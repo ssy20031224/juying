@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { nativeAdapters, type HomeSection } from "../../lib/adapters/native";
 import { SOURCES } from "../../lib/sources";
 import { cached } from "../../lib/cache";
+import { canonicalMediaId, toVariant, type SourcedItem } from "../../lib/catalog";
 
 type Section = HomeSection & { sourceKey: string; sourceTitle: string };
 
@@ -26,7 +27,18 @@ export async function GET(request: Request) {
       const envName = envBySource[source.key];
       if (envName && !process.env[envName]?.trim()) throw new Error("source is not configured");
       const home = await cached(`home:${source.key}`, 15 * 60 * 1000, () => adapter.home!(AbortSignal.timeout(12000)));
-      for (const section of home) sections.push({ ...section, sourceKey: source.key, sourceTitle: source.title });
+      for (const section of home) {
+        const items = section.items.map((value) => {
+          const sourced = { ...value, sourceKey: source.key, sourceTitle: source.title } as SourcedItem;
+          return {
+            ...sourced,
+            id: canonicalMediaId(sourced.title, sourced.year),
+            sourceCount: 1,
+            variants: [toVariant(sourced)],
+          };
+        });
+        sections.push({ ...section, items, sourceKey: source.key, sourceTitle: source.title });
+      }
     } catch (error) {
       errors.push({ sourceKey: source.key, error: error instanceof Error ? error.message : "home request failed" });
     }

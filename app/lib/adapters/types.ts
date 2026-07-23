@@ -11,6 +11,47 @@ export type SourceItem = {
   sourceCount: number;
 };
 
+export type SourceVariant = {
+  sourceKey: string;
+  sourceTitle: string;
+  sourceMediaId: string;
+  title: string;
+  year?: string;
+  kind?: string;
+  cover?: string;
+  description?: string;
+};
+
+export type CanonicalEpisodeSource = {
+  sourceKey: string;
+  sourceTitle: string;
+  sourceMediaId: string;
+  route: string;
+  flag: Record<string, string>;
+};
+
+export type CanonicalEpisode = {
+  id: string;
+  name: string;
+  number?: number;
+  sources: CanonicalEpisodeSource[];
+};
+
+export type CanonicalMedia = {
+  id: string;
+  title: string;
+  year?: string;
+  kind?: string;
+  score?: string;
+  cover?: string;
+  description?: string;
+  sourceKey: string;
+  sourceTitle: string;
+  sourceCount: number;
+  variants: SourceVariant[];
+  episodes?: CanonicalEpisode[];
+};
+
 export type Episode = {
   id: string;
   name: string;

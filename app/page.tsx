@@ -3,12 +3,23 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
-  Bookmark, Check, ChevronLeft, ChevronRight, Compass, Download, Film,
-  Heart, History, Home as HomeIcon, Info, Layers3, Menu, Play, Search, Settings2,
+  Bookmark, ChevronRight, Compass, Download, Film,
+  Heart, History, Home as HomeIcon, Info, Play, Search, Settings2,
   Share2, Sparkles, UserRound, X,
 } from "lucide-react";
+import { MediaPlayer } from "./components/player/MediaPlayer";
+import type { PlayerEpisode, PlayerQuality, PlayerSession } from "./components/player/types";
 
-type Episode = { name: string; url: string; route: string; flag?: Record<string, string> };
+type SourceVariant = {
+  sourceKey: string;
+  sourceTitle: string;
+  sourceMediaId: string;
+  title: string;
+  year?: string;
+  kind?: string;
+  cover?: string;
+  description?: string;
+};
 
 type Result = {
   id: string;
@@ -21,7 +32,8 @@ type Result = {
   sourceTitle: string;
   sourceCount?: number;
   description?: string;
-  episodes?: Episode[];
+  variants?: SourceVariant[];
+  episodes?: PlayerEpisode[];
 };
 
 type SearchResponse = {
@@ -32,8 +44,6 @@ type SearchResponse = {
 
 type HomeSection = { title: string; key: string; sourceKey: string; sourceTitle: string; items: Result[] };
 type View = "home" | "library" | "profile";
-type Quality = { id: string; name: string; url?: string; width?: number; height?: number; bitrate?: number };
-type PlayerState = { title: string; url: string; type?: string; cover?: string; route?: string; qualityOptions?: Quality[] };
 
 const sourcePills = [
   { label: "全源", tone: "mint" },
@@ -44,10 +54,10 @@ const sourcePills = [
 ];
 
 const demoItems: Result[] = [
-  { id: "demo-1", title: "雾山五行 · 番外篇", year: "2025", kind: "国漫 / 奇幻", score: "9.1", sourceKey: "lanerc", sourceTitle: "Lanerc", sourceCount: 4, description: "山海之间的少年，踏上一场关于火与记忆的旅程。", episodes: [{ name: "第 01 集", url: "", route: "Lanerc" }, { name: "第 02 集", url: "", route: "Lanerc" }] },
-  { id: "demo-2", title: "银河边缘的邮差", year: "2024", kind: "科幻 / 冒险", score: "8.7", sourceKey: "AuvFun", sourceTitle: "AuvFun", sourceCount: 2, description: "一封迟到三十年的信，把邮差送向宇宙尽头。", episodes: [{ name: "第 01 集", url: "", route: "AuvFun" }] },
-  { id: "demo-3", title: "夏日终曲", year: "2023", kind: "爱情 / 剧情", score: "8.4", sourceKey: "dmbus", sourceTitle: "次元城", sourceCount: 3, description: "在海风停下之前，他们决定把未说出口的话说完。", episodes: [{ name: "正片", url: "", route: "次元城" }] },
-  { id: "demo-4", title: "星门观测站", year: "2025", kind: "科幻 / 悬疑", score: "8.9", sourceKey: "shuangxing", sourceTitle: "双星", sourceCount: 1, description: "观测站收到一组来自未来的坐标。", episodes: [{ name: "第 01 集", url: "", route: "双星" }] },
+  { id: "demo-1", title: "雾山五行 · 番外篇", year: "2025", kind: "国漫 / 奇幻", score: "9.1", sourceKey: "lanerc", sourceTitle: "Lanerc", sourceCount: 1, description: "山海之间的少年，踏上一场关于火与记忆的旅程。", episodes: [{ id: "demo-1-1", name: "第 01 集", number: 1, sources: [] }, { id: "demo-1-2", name: "第 02 集", number: 2, sources: [] }] },
+  { id: "demo-2", title: "银河边缘的邮差", year: "2024", kind: "科幻 / 冒险", score: "8.7", sourceKey: "AuvFun", sourceTitle: "AuvFun", sourceCount: 1, description: "一封迟到三十年的信，把邮差送向宇宙尽头。", episodes: [{ id: "demo-2-1", name: "第 01 集", number: 1, sources: [] }] },
+  { id: "demo-3", title: "夏日终曲", year: "2023", kind: "爱情 / 剧情", score: "8.4", sourceKey: "dmbus", sourceTitle: "动漫巴士", sourceCount: 1, description: "在海风停下之前，他们决定把未说出口的话说完。", episodes: [{ id: "demo-3-1", name: "正片", sources: [] }] },
+  { id: "demo-4", title: "星门观测站", year: "2025", kind: "科幻 / 悬疑", score: "8.9", sourceKey: "shuangxing", sourceTitle: "双星", sourceCount: 1, description: "观测站收到一组来自未来的坐标。", episodes: [{ id: "demo-4-1", name: "第 01 集", number: 1, sources: [] }] },
 ];
 
 const colorFor = (key: string) => ({ lanerc: "#18b7d1", AuvFun: "#8c6ff5", dmbus: "#e9a23b", shuangxing: "#14a88a" }[key] || "#758196");
@@ -81,8 +91,7 @@ export default function Home() {
   const [sourceStats, setSourceStats] = useState<SearchResponse["sources"]>([]);
   const [homeSections, setHomeSections] = useState<HomeSection[]>([]);
   const [selected, setSelected] = useState<Result | null>(null);
-  const [playing, setPlaying] = useState<PlayerState | null>(null);
-  const [selectedQuality, setSelectedQuality] = useState<string>("");
+  const [playing, setPlaying] = useState<PlayerSession | null>(null);
   const [favorites, setFavorites] = useState<Result[]>([]);
   const [history, setHistory] = useState<Result[]>([]);
   const [loading, setLoading] = useState(false);
@@ -158,23 +167,69 @@ export default function Home() {
     setSelected(item); addHistory(item);
     if (item.id.startsWith("demo-")) return;
     try {
-      const response = await fetch(`/api/detail?source=${encodeURIComponent(item.sourceKey)}&id=${encodeURIComponent(item.id)}`);
+      const variants = item.variants?.length ? item.variants : [{
+        sourceKey: item.sourceKey,
+        sourceTitle: item.sourceTitle,
+        sourceMediaId: item.id,
+        title: item.title,
+        year: item.year,
+        kind: item.kind,
+        cover: item.cover,
+        description: item.description,
+      }];
+      const response = await fetch("/api/media/detail", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ variants }),
+      });
+      if (!response.ok) throw new Error("detail aggregation failed");
       const detail = (await response.json()) as Result;
-      setSelected({ ...item, ...detail });
+      setSelected({ ...item, ...detail, score: detail.score || item.score });
     } catch { setNotice("详情暂时无法获取，请稍后重试"); }
   }
 
-  async function resolvePlay(episode: Episode) {
-    if (!selected) return;
-    if (episode.url) { setPlaying({ title: `${selected.title} · ${episode.name}`, url: episode.url, cover: selected.cover, route: episode.route }); return; }
-    if (!episode.flag) { setNotice("该演示条目没有真实播放地址"); return; }
-    setNotice("正在向来源请求临时播放地址");
+  async function resolvePlay(episodeIndex: number, sourceIndex = 0) {
+    const media = selected || playing?.media;
+    const episodes = selected?.episodes || playing?.episodes;
+    const episode = episodes?.[episodeIndex];
+    const source = episode?.sources[sourceIndex];
+    if (!media || !episodes || !episode || !source) {
+      setNotice(episode?.sources.length === 0 ? "该演示条目没有真实播放线路" : "该剧集没有可用来源");
+      return;
+    }
+    setNotice(`正在解析 ${source.sourceTitle} · ${source.route}`);
     try {
-      const response = await fetch(`/api/play?source=${encodeURIComponent(selected.sourceKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(episode.flag) });
-      const payload = (await response.json()) as { url?: string; type?: string; qualityOptions?: Quality[]; referer?: string; error?: string };
+      const response = await fetch(`/api/play?source=${encodeURIComponent(source.sourceKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(source.flag),
+      });
+      const payload = (await response.json()) as { url?: string; type?: string; qualityOptions?: PlayerQuality[]; referer?: string; error?: string };
       if (!payload.url) { setNotice(payload.error || "来源没有返回可播放地址"); return; }
-      setSelected(null); setSelectedQuality(""); setPlaying({ title: `${selected.title} · ${episode.name}`, url: payload.url, type: payload.type, cover: selected.cover, route: episode.route, qualityOptions: payload.qualityOptions });
+      setSelected(null);
+      setPlaying({
+        media,
+        episodes,
+        episodeIndex,
+        sourceIndex,
+        url: payload.url,
+        type: payload.type,
+        route: source.route,
+        qualityOptions: payload.qualityOptions,
+      });
+      setNotice(`正在播放 ${episode.name} · ${source.sourceTitle}`);
     } catch { setNotice("播放地址解析失败，请更换线路重试"); }
+  }
+
+  async function shareItem(item: Result) {
+    const text = `${item.title} · ${item.year || "聚映"}`;
+    try {
+      if (navigator.share) await navigator.share({ title: item.title, text, url: location.href });
+      else {
+        await navigator.clipboard.writeText(`${text} ${location.href}`);
+        setNotice("分享链接已复制");
+      }
+    } catch { /* user cancelled sharing */ }
   }
 
   function closeOverlays() { setSelected(null); setPlaying(null); }
@@ -199,9 +254,22 @@ export default function Home() {
 
     <footer className="site-footer"><span>聚映 · 多源检索工具</span><span>只聚合元数据与临时播放入口，不保存影片文件</span></footer>
 
-    {selected && <div className="overlay" onClick={closeOverlays}><section className="detail-sheet" role="dialog" aria-modal="true" aria-label="影片详情" onClick={(event) => event.stopPropagation()}><button className="sheet-close" onClick={() => setSelected(null)} aria-label="关闭"><X size={20} /></button><div className="detail-cover"><Cover item={selected} /><span>{selected.sourceTitle}</span></div><div className="detail-content"><p className="eyebrow">{selected.sourceTitle} · {selected.year || "最新"}</p><h2>{selected.title}</h2><p className="detail-description">{selected.description || "来源方暂未提供简介，选择剧集后即可请求播放地址。"}</p><div className="detail-actions"><button onClick={() => toggleFavorite(selected)} className={favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "selected" : ""}>{favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? <Heart size={16} fill="currentColor" /> : <Bookmark size={16} />} {favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "已收藏" : "收藏"}</button><button><Share2 size={16} /> 分享</button></div><div className="episode-block"><div className="episode-title"><span>选集</span><small>{selected.episodes?.length || 0} 集 · {selected.sourceCount || 1} 条线路</small></div>{selected.episodes?.length ? <div className="episode-grid">{selected.episodes.map((episode) => <button key={`${episode.route}-${episode.name}`} onClick={() => resolvePlay(episode)}><span>{episode.name}</span><small>{episode.route}</small><Play size={14} fill="currentColor" /></button>)}</div> : <div className="empty-state"><Info size={18} /> 暂无剧集信息</div>}</div></div></section></div>}
+    {selected && <div className="overlay" onClick={closeOverlays}><section className="detail-sheet" role="dialog" aria-modal="true" aria-label="影片详情" onClick={(event) => event.stopPropagation()}><button className="sheet-close" onClick={() => setSelected(null)} aria-label="关闭"><X size={20} /></button><div className="detail-cover"><Cover item={selected} /><span>{selected.sourceCount || 1} 个来源</span></div><div className="detail-content"><p className="eyebrow">{selected.sourceTitle} · {selected.year || "最新"}</p><h2>{selected.title}</h2><p className="detail-description">{selected.description || "来源方暂未提供简介，选择剧集后即可请求播放地址。"}</p><div className="detail-actions"><button onClick={() => toggleFavorite(selected)} className={favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "selected" : ""}>{favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? <Heart size={16} fill="currentColor" /> : <Bookmark size={16} />} {favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "已收藏" : "收藏"}</button><button onClick={() => void shareItem(selected)}><Share2 size={16} /> 分享</button></div><div className="episode-block"><div className="episode-title"><span>选集</span><small>{selected.episodes?.length || 0} 集 · {selected.variants?.length || selected.sourceCount || 1} 个来源</small></div>{selected.episodes?.length ? <div className="episode-grid">{selected.episodes.map((episode, index) => <button key={episode.id} onClick={() => void resolvePlay(index, 0)}><span>{episode.name}</span><small>{episode.sources.length ? `${episode.sources.length} 个来源 · ${episode.sources[0].route}` : "暂无播放线路"}</small><Play size={14} fill="currentColor" /></button>)}</div> : <div className="empty-state"><Info size={18} /> 暂无剧集信息</div>}</div></div></section></div>}
 
-    {playing && <div className="overlay player-overlay" onClick={closeOverlays}><section className="player-sheet" role="dialog" aria-modal="true" aria-label="视频播放器" onClick={(event) => event.stopPropagation()}><div className="player-topbar"><button onClick={() => setPlaying(null)} aria-label="返回"><ChevronLeft size={23} /></button><div><strong>{playing.title}</strong><span>{playing.route || "来源直连"}</span></div><button aria-label="更多操作"><Menu size={21} /></button></div><video controls autoPlay playsInline poster={playing.cover} src={playing.url} onError={() => setNotice("播放器无法加载该地址，可尝试更换线路")} /><div className="player-toolbar"><span><Layers3 size={16} /> {playing.type?.toUpperCase() || "AUTO"}</span><span><Check size={16} /> 来源直连</span><button><Settings2 size={16} /> 播放设置</button></div>{playing.qualityOptions?.length ? <div className="quality-row"><span>清晰度</span>{playing.qualityOptions.map((quality) => <button key={quality.id} className={selectedQuality === quality.id ? "active" : ""} onClick={() => { setSelectedQuality(quality.id); if (quality.url) setPlaying((current) => current ? { ...current, url: quality.url || current.url } : current); }}>{quality.name}</button>)}</div> : null}<p className="player-note">播放地址来自来源方，本站不保存媒体内容。若来源要求额外请求头，将由对应播放器适配处理。</p></section></div>}
+    {playing && <MediaPlayer
+      key={`${playing.media.id}-${playing.episodeIndex}-${playing.sourceIndex}-${playing.url}`}
+      session={playing}
+      favorite={favoriteIds.has(`${playing.media.sourceKey}-${playing.media.id}`)}
+      onClose={() => setPlaying(null)}
+      onResolve={resolvePlay}
+      onNotice={setNotice}
+      onFavorite={() => {
+        const item = items.find((entry) => entry.id === playing.media.id)
+          || favorites.find((entry) => entry.id === playing.media.id)
+          || { ...playing.media, year: "", kind: "", score: "", sourceCount: 1 };
+        toggleFavorite(item);
+      }}
+    />}
   </main>;
 }
 

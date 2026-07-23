@@ -3,18 +3,9 @@ import { mapWithConcurrency } from "../../lib/fanout";
 import { nativeAdapters } from "../../lib/adapters/native";
 import { SOURCES, type Source } from "../../lib/sources";
 import { cached } from "../../lib/cache";
+import { mergeSearchItems, type SourcedItem } from "../../lib/catalog";
 
-type Item = {
-  id: string;
-  title: string;
-  year: string;
-  kind: string;
-  score: string;
-  sourceKey: string;
-  sourceTitle: string;
-  sourceCount: number;
-  description?: string;
-};
+type Item = SourcedItem & { year: string; kind: string; score: string };
 
 type SourceOutcome = { items: Item[]; error?: string };
 
@@ -77,24 +68,20 @@ async function searchSource(query: string, source: Source): Promise<SourceOutcom
 
 export async function GET(request: Request) {
   const query = new URL(request.url).searchParams.get("q")?.trim() || "";
-  if (!query) return NextResponse.json({ items: demo, sources: SOURCES.map((source) => ({ ...source, count: 0, status: "idle" })), demo: true });
+  if (!query) return NextResponse.json({ items: mergeSearchItems(demo), sources: SOURCES.map((source) => ({ ...source, count: 0, status: "idle" })), demo: true });
 
   const liveSources = SOURCES.filter((source) => source.enabled && source.adapter);
   const configuredConcurrency = Number(process.env.SEARCH_SOURCE_CONCURRENCY || 4);
   const outcomes = await mapWithConcurrency(liveSources, Number.isFinite(configuredConcurrency) ? configuredConcurrency : 4, (source) => searchSource(query, source));
-  const grouped = new Map<string, Item>();
+  const allItems: Item[] = [];
   const sourceStats = new Map<string, { count: number; status: string; latencyMs?: number; error?: string }>();
   outcomes.forEach((outcome, index) => {
     const source = liveSources[index];
     const result = outcome.value;
     sourceStats.set(source.key, { count: result?.items.length || 0, status: outcome.error || result?.error ? "error" : "ok", latencyMs: outcome.durationMs, error: outcome.error || result?.error });
-    for (const item of result?.items || []) {
-      const key = `${item.title.trim().toLowerCase()}|${item.year}`;
-      const existing = grouped.get(key);
-      if (existing) existing.sourceCount += 1;
-      else grouped.set(key, item);
-    }
+    allItems.push(...(result?.items || []));
   });
+  const items = mergeSearchItems(allItems);
   const sources = SOURCES.map((source) => ({ ...source, ...(sourceStats.get(source.key) || { count: 0, status: source.adapter ? "not configured" : "catalog-only" }) }));
-  return NextResponse.json({ items: [...grouped.values()], sources, demo: grouped.size === 0 });
+  return NextResponse.json({ items, sources, demo: items.length === 0 });
 }

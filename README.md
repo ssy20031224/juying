@@ -1,5 +1,15 @@
 # 聚映：多源检索与播放入口
 
+## 项目文档
+
+- 开发入口与文件索引：`AGENTS.md`
+- 当前真实架构：`docs/system-architecture.md`
+- 功能缺口与路线图：`docs/product-gap-roadmap.md`
+- 多源后端适配：`docs/backend-adaptation-plan.md`
+- Lanerc 架构评审：`docs/lanerc-architecture-review.md`
+- 移动端 App 外壳：`docs/mobile-app-shell.md`
+- 主要变更记录：`docs/change-log.md`
+
 这是一个可安装到 Android 的 PWA/响应式网站原型。它只聚合已授权来源的检索结果和临时播放地址，不下载、不存储、不转发媒体文件。
 
 ## 本地运行
