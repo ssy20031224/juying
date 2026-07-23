@@ -1,0 +1,14 @@
+{
+  "name": "聚映 · 多源观影",
+  "short_name": "聚映",
+  "description": "多源检索与播放入口，不保存影片内容。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#18b7d1",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
