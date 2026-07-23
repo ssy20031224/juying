@@ -9,13 +9,6 @@ type Item = SourcedItem & { year: string; kind: string; score: string };
 
 type SourceOutcome = { items: Item[]; error?: string };
 
-const adapterEnv: Record<string, string> = {
-  AuvFun: "AUVFUN_BASE_URL",
-  cycapp: "CYCAPP_BASE_URL",
-  jinpai: "JINPAI_BASE_URL",
-  sanqiu: "SANQIU_BASE_URL",
-};
-
 const demo: Item[] = [
   { id: "demo-1", title: "雾山五行 · 番外篇", year: "2025", kind: "国漫 / 奇幻", score: "9.1", sourceKey: "lanerc", sourceTitle: "Lanerc", sourceCount: 4, description: "山海之间的少年，踏上一场关于火与记忆的旅程。" },
   { id: "demo-2", title: "银河边缘的邮差", year: "2024", kind: "科幻 / 冒险", score: "8.7", sourceKey: "AuvFun", sourceTitle: "AuvFun", sourceCount: 2, description: "一封迟到三十年的信，把邮差送向宇宙尽头。" },
@@ -52,8 +45,6 @@ function normalize(value: unknown, source: Source): Item[] {
 
 async function searchSource(query: string, source: Source): Promise<SourceOutcome> {
   if (source.adapter && nativeAdapters[source.adapter]) {
-    const envName = adapterEnv[source.adapter];
-    if (envName && !process.env[envName]?.trim()) return { items: [], error: "not configured" };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {

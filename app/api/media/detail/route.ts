@@ -6,13 +6,6 @@ import { mergeDetails, type SourcedDetail } from "../../../lib/catalog";
 import { mapWithConcurrency } from "../../../lib/fanout";
 import { SOURCES } from "../../../lib/sources";
 
-const envBySource: Record<string, string> = {
-  AuvFun: "AUVFUN_BASE_URL",
-  cycapp: "CYCAPP_BASE_URL",
-  jinpai: "JINPAI_BASE_URL",
-  sanqiu: "SANQIU_BASE_URL",
-};
-
 function validVariant(value: unknown): value is SourceVariant {
   if (!value || typeof value !== "object") return false;
   const variant = value as Partial<SourceVariant>;
@@ -32,8 +25,6 @@ export async function POST(request: Request) {
     const source = SOURCES.find((entry) => entry.key === variant.sourceKey);
     const adapter = source?.adapter ? nativeAdapters[source.adapter] : undefined;
     if (!source || !adapter) throw new Error("source adapter unavailable");
-    const envName = envBySource[source.key];
-    if (envName && !process.env[envName]?.trim()) throw new Error("source is not configured");
     const result = await cached(
       `detail:${source.key}:${variant.sourceMediaId}`,
       30 * 60 * 1000,

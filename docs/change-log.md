@@ -46,3 +46,11 @@
 - 弹幕开关和设置面板已接入；由于当前没有授权弹幕数据源，显示“暂无弹幕通道”。
 - 已在 390px 移动端验证 Lanerc 真实作品详情、剧集播放、倍速面板、弹幕设置面板和换源面板。
 - `npm run lint` 通过（仅保留远程封面 `<img>` 的性能提示），`npm test` 通过：构建和 3 项渲染/API 回归测试均通过。
+
+## 2026-07-23：接入本地完整来源 JS 的 Native 默认流程
+
+- 确认原始脚本位于 `C:\Users\songz\Desktop\public-work\remote_sources\`，包含 13 个来源 JS、来源清单和远程配置。
+- 按本地脚本核对并移植 AuvFun、Cycapp、Jinpai、Sanqiu 的主链路；`config/categories/searchFiltered` 已纳入下一步统一目录 API，不再把这些来源的环境变量当作必填启动条件。
+- 将 AuvFun、Cycapp、Jinpai、Sanqiu 的默认主机和脚本内运行参数移入服务端 Native Adapter；环境变量保留为授权部署时的可选覆盖。
+- 实测 `/api/home` 已返回 AuvFun 4 个分区和 Sanqiu 最新动漫，Lanerc 仍正常返回；Cycapp 当前上游返回 401，Jinpai 仍需继续健康验证。
+- 前端首页不再额外截断每个来源分区，展示 Adapter 返回的完整分区结果；来源接口自身的分页上限仍需通过后续目录 API 扩展。

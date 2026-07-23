@@ -8,8 +8,8 @@
 
 ## 2. 当前状态
 
-- 当前主要可自动工作的真实来源：Lanerc。
-- AuvFun、Cycapp、Jinpai、Sanqiu：Native Adapter 代码存在，但默认缺少来源方配置。
+- 当前主要可自动工作的真实来源：Lanerc、AuvFun、Sanqiu；四个 Native 来源均已按本地 JS 的完整契约移植，AuvFun/Jinpai/Sanqiu 的环境变量为可选覆盖。
+- Cycapp、Jinpai 仍需继续做来源健康验证；Cycapp 当前接口返回 401，不应通过伪造凭据绕过。
 - 其余 8 个来源：只在注册表中登记，JS Worker/Browser Worker 尚未实现。
 - 前端已有首页、搜索、片库、详情、自定义移动端播放器、收藏和历史。
 - 搜索结果已保留 `variants[]`；详情通过 `/api/media/detail` 合并同一作品的多来源剧集和线路。
@@ -63,6 +63,7 @@
 | `app/lib/fanout.ts` | 有界并发 |
 | `app/lib/cache.ts` | TTL 缓存和 singleflight |
 | `config/source-manifests.json` | 来源运行时和状态元数据 |
+| `C:\Users\songz\Desktop\public-work\remote_sources\*.js` | 本地审核过的来源脚本；作为 Adapter 的行为依据，不在 API 主进程直接执行 |
 | `worker/index.ts` | Cloudflare Worker/vinext 入口 |
 | `db/schema.ts` | 未来目录、进度和用户数据表；当前为空 |
 
@@ -125,10 +126,10 @@
 ## 8. 修改来源 Adapter 的流程
 
 1. 确认授权和允许的访问边界。
-2. 阅读对应本地原始 JS 和 `config/source-manifests.json`。
+2. 阅读 `C:\Users\songz\Desktop\public-work\remote_sources\` 对应的完整 JS 和 `config/source-manifests.json`。
 3. 选择 Native、JS Worker 或 Browser Worker。
 4. 建立不含密钥的固定响应 Fixture。
-5. 实现首页、搜索、详情、播放规范化。
+5. 完整覆盖来源脚本的 config/categories/home/search/searchFiltered/detail/play 契约，再做规范化。
 6. 添加超时、响应大小限制和错误分类。
 7. 添加契约测试。
 8. 在来源状态中分别记录实现、配置和验证结果。

@@ -58,7 +58,7 @@ flowchart LR
     C --> G["来源注册表 app/lib/sources.ts"]
     G --> A["Native Adapters"]
     A --> L["Lanerc：当前可自动访问"]
-    A --> O["AuvFun / Cycapp / Jinpai / Sanqiu：代码存在但需配置"]
+    A --> O["AuvFun / Cycapp / Jinpai / Sanqiu：已按本地 JS 默认流程接入"]
     G --> N["其余 8 个来源：仅登记，运行时未实现"]
 
     R --> T["临时播放 URL"]
@@ -109,11 +109,11 @@ flowchart LR
 
 | 来源 | 注册运行时 | 当前代码状态 | 当前环境状态 | 首页/搜索/详情/播放 |
 |---|---|---|---|---|
-| Lanerc | native | 已实现 | 可自动发现并访问 | 已实测贯通 |
-| AuvFun | native | Adapter 已编写 | 缺少来源方配置 | 默认跳过 |
-| 次元城 Cycapp | native | Adapter 已编写 | 缺少来源方配置 | 默认跳过 |
-| 金牌 Jinpai | native | Adapter 已编写 | 缺少来源方配置 | 默认跳过 |
-| 三秋 Sanqiu | native | Adapter 已编写 | 缺少来源方配置 | 默认跳过 |
+| Lanerc | native | 已按完整 JS 契约实现 | 可自动发现并访问 | 已实测贯通 |
+| AuvFun | native | 已按本地 JS 的首页/搜索/详情/播放流程实现 | 使用 JS 内置默认值，可用环境变量覆盖 | 首页/搜索已实测，播放依来源状态 |
+| 次元城 Cycapp | native | 已按本地 JS 的分类/搜索/详情/播放流程实现 | 默认主机来自 JS；当前接口返回 401 | 等待来源接口恢复/授权 |
+| 金牌 Jinpai | native | 已按本地 JS 的多域名/签名/清晰度流程实现 | 使用 JS 内置默认值，可用环境变量覆盖 | 需继续健康验证 |
+| 三秋 Sanqiu | native | 已按本地 JS 的筛选/搜索/详情/解码流程实现 | 使用 JS 内置默认值，可用环境变量覆盖 | 首页/搜索已实测 |
 | 瓜子 | js-worker | 仅登记 | JS Worker 未实现 | 不执行 |
 | 双星 | js-worker | 仅登记 | JS Worker 未实现 | 不执行 |
 | 云帆 | js-worker | 仅登记 | JS Worker 未实现 | 不执行 |
@@ -125,11 +125,11 @@ flowchart LR
 
 因此，当前“资源少”的根因是：
 
-1. 真正在线工作的来源主要只有 Lanerc。
+1. 之前只有 Lanerc 被执行；本轮已将 AuvFun 和 Sanqiu 的本地 JS 默认流程接入，首页资源量已增加。
 2. 首页只展示来源首页接口主动返回的有限分区，并不是全站目录。
 3. 搜索是按关键词临时调用来源，不存在预先同步的完整目录库。
 4. 规范作品已经保留同一作品的 `variants[]`，但目前只在请求生命周期内聚合，尚未落到持久目录。
-5. JS Worker 和 Browser Worker 尚未落地，八个登记来源不会被执行。
+5. JS Worker 和 Browser Worker 尚未落地，八个登记来源仍不会被执行。
 
 ## 6. 当前数据模型
 
@@ -304,7 +304,7 @@ flowchart LR
 - `LANERC_FALLBACK_URL`
 - `LANERC_ALLOWED_HOSTS`
 
-已存在的来源专用配置仅用于对应 Adapter，例如：
+来源专用环境变量现在是“可选覆盖”，不是所有来源的必填项。AuvFun、Jinpai、Sanqiu 的默认主机/签名参数来自已审核的本地 JS；Cycapp 的默认主机也来自本地 JS。可覆盖项包括：
 
 - `AUVFUN_BASE_URL`
 - `AUVFUN_API_SECRET`
@@ -315,6 +315,11 @@ flowchart LR
 - `JINPAI_KEY`
 - `SANQIU_BASE_URL`
 - `SANQIU_SIGN_FINGER`
+
+原始来源脚本位置：
+
+- `C:\Users\songz\Desktop\public-work\remote_sources\*.js`
+- 这些脚本是 Adapter 的行为依据，但不会在 API 主进程直接执行；Native Adapter 采用逐方法移植，JS/Browser 来源后续进入隔离运行时。
 
 安全原则：
 

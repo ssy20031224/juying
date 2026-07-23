@@ -9,12 +9,13 @@
 - 新增 `POST /api/media/detail`，并行聚合来源详情、剧集和同集播放线路。
 - 新增自定义移动端播放器核心：选集、上下集、换源、倍速、画中画、全屏、分享、收藏和播放进度。
 - 弹幕开关/设置面板已接入真实空状态；缓存按钮保持未启用，不伪装下载能力。
+- 已读取 `C:\Users\songz\Desktop\public-work\remote_sources\` 的完整来源脚本；AuvFun、Cycapp、Jinpai、Sanqiu 的 Native 默认流程不再因缺少环境变量而被跳过。
 
 ## 1. 功能缺口总表
 
 | 领域 | 当前状态 | 目标状态 | 优先级 |
 |---|---|---|---|
-| 多源资源 | 主要只有 Lanerc 在线 | 13 个来源按 Native/JS/Browser 分批适配 | P0 |
+| 多源资源 | Lanerc、AuvFun、Sanqiu 已能返回数据，Cycapp/Jinpai 待健康验证 | 13 个来源按 Native/JS/Browser 分批适配 | P0 |
 | 多源合并 | 请求内保留 `SourceVariant[]`，可打开来源面板 | 落地持久目录、健康排序和跨请求换源 | P0 |
 | 分类目录 | 依赖来源首页文案 | 统一分类、标签、年份、季度、状态和评分索引 | P0 |
 | 播放器 | 自定义核心已实现 | 横屏手势、锁屏、清晰度重解析和错误切换 | P0 |

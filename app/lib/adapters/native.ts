@@ -16,6 +16,19 @@ const LANERC_STALE_ENDPOINT = "https://server.jngaoke.cn/";
 const LANERC_AUTH_FALLBACK = "com.clggjv.xcjfmd.ffo";
 const LANERC_DECRYPT_KEY = "8f81c2519e3b661834219e7142000093";
 
+// These defaults are copied from the reviewed local source scripts in
+// C:\Users\songz\Desktop\public-work\remote_sources. Environment variables
+// remain optional overrides for an operator's authorized endpoint.
+const AUVFUN_DEFAULT_BASE = "http://85.209.230.191:8003";
+const AUVFUN_DEFAULT_AES_KEY = "zhuhongleipeipei";
+const AUVFUN_DEFAULT_API_SECRET = "zhl's river app";
+const AUVFUN_DEFAULT_DEVICE_ID = "4822e35123b5312b";
+const CYCAPP_DEFAULT_BASE = "https://pc.cycback.org";
+const JINPAI_DEFAULT_BASE = "https://y2s52n7.com";
+const JINPAI_DEFAULT_KEY = "cb808529bae6b6be45ecfab29a4889bc";
+const SANQIU_DEFAULT_BASE = "https://asd123sx23xdacsx.top";
+const SANQIU_DEFAULT_SIGN_FINGER = "SF-C3B2B41F6EFFFF9869176CF68F6790E8F07506FC88632C94B4F5F0430D5498CA";
+
 function clean(value: unknown): string {
   return String(value ?? "").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").trim();
 }
@@ -79,12 +92,6 @@ function item(sourceKey: string, raw: Json): SourceItem {
 
 function quality(name: unknown, url: string, index: number, raw?: Json): QualityOption {
   return { id: String(raw?.id ?? url ?? index), name: guessName(name, `线路 ${index + 1}`), url, type: mediaType(url), width: number(raw?.width), height: number(raw?.height ?? raw?.resolution), bitrate: number(raw?.bitrate ?? raw?.bandwidth) };
-}
-
-function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} is not configured`);
-  return value.replace(/\/$/, "");
 }
 
 function lanercNormalizeHost(value: unknown): string {
@@ -244,14 +251,14 @@ export class LanercAdapter implements SourceAdapter {
 
 export class AuvFunAdapter implements SourceAdapter {
   readonly sourceKey = "AuvFun";
-  private base() { return requireEnv("AUVFUN_BASE_URL"); }
+  private base() { return (process.env.AUVFUN_BASE_URL?.trim() || AUVFUN_DEFAULT_BASE).replace(/\/$/, ""); }
   private async call(path: string, query: Record<string, string>, signal: AbortSignal): Promise<Json> {
-    const secret = requireEnv("AUVFUN_API_SECRET");
+    const secret = process.env.AUVFUN_API_SECRET?.trim() || AUVFUN_DEFAULT_API_SECRET;
     const timestamp = Math.floor(Date.now() / 1000) + 60;
     const fullPath = `/app${path}`;
     const params = new URLSearchParams({ ...query, sign: Buffer.from(md5(`${timestamp}${fullPath}${secret}`), "hex").toString("base64url").slice(0, 22), time: String(timestamp) });
     const raw = await requestText(`${this.base()}${fullPath}?${params}`, signal, { "User-Agent": "Dart/3.11 (dart:io)", Accept: "application/json" });
-    return parseMaybeEncrypted(raw, process.env.AUVFUN_AES_KEY?.trim() || "");
+    return parseMaybeEncrypted(raw, process.env.AUVFUN_AES_KEY?.trim() || AUVFUN_DEFAULT_AES_KEY);
   }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
     const data = await this.call("/video/search", { keyWord: query, page: String(page), size: "20" }, signal);
@@ -275,7 +282,7 @@ export class AuvFunAdapter implements SourceAdapter {
     return { item: result, episodes };
   }
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
-    const data = await this.call("/episode/jx", { videoTitle: flag.videoTitle || "", episodeId: flag.episodeId || "", deviceId: process.env.AUVFUN_DEVICE_ID?.trim() || "" }, signal);
+    const data = await this.call("/episode/jx", { videoTitle: flag.videoTitle || "", episodeId: flag.episodeId || "", deviceId: process.env.AUVFUN_DEVICE_ID?.trim() || AUVFUN_DEFAULT_DEVICE_ID }, signal);
     const list = Array.isArray(data.data?.resolutionList) ? data.data.resolutionList : [];
     const resolutions = list.filter((raw: Json) => raw?.url).map((raw: Json, index: number) => quality(raw.name, String(raw.url), index, raw));
     if (!resolutions.length) throw new Error("AuvFun returned no resolution");
@@ -288,7 +295,7 @@ export class AuvFunAdapter implements SourceAdapter {
 
 export class CycappAdapter implements SourceAdapter {
   readonly sourceKey = "cycapp";
-  private base() { return requireEnv("CYCAPP_BASE_URL"); }
+  private base() { return (process.env.CYCAPP_BASE_URL?.trim() || CYCAPP_DEFAULT_BASE).replace(/\/$/, ""); }
   private async call(path: string, signal: AbortSignal, referer?: string): Promise<Json> {
     return requestJson(`${this.base()}${path}`, signal, { "User-Agent": UA_CYC, Referer: referer || `${this.base()}/`, Accept: "application/json" });
   }
@@ -335,12 +342,12 @@ export class CycappAdapter implements SourceAdapter {
 
 export class JinpaiAdapter implements SourceAdapter {
   readonly sourceKey = "jinpai";
-  private base() { return requireEnv("JINPAI_BASE_URL"); }
+  private base() { return (process.env.JINPAI_BASE_URL?.trim() || JINPAI_DEFAULT_BASE).replace(/\/$/, ""); }
   private async call(path: string, raw: string, timestamp: string, signal: AbortSignal): Promise<Json> {
     return requestJson(`${this.base()}${path}`, signal, { sign: sha1(md5(raw)), T: timestamp, Deviceid: "Deviceid", "User-Agent": "okhttp/3.15", Accept: "application/json" });
   }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const key = process.env.JINPAI_KEY?.trim() || "";
+    const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
     const t = String(Math.floor(Date.now() / 1000));
     const path = query ? `/api/mw-movie/anonymous/video/searchByWord?keyword=${encodeURIComponent(query)}&pageNum=${page}&pageSize=20` : `/api/mw-movie/anonymous/video/list?type1=4&pageNum=${page}&area=&year=`;
     const raw = query ? `keyword=${query}&pageNum=${page}&pageSize=20&key=${key}&t=${t}` : `area=&pageNum=${page}&type1=4&year=&key=${key}&t=${t}`;
@@ -353,7 +360,7 @@ export class JinpaiAdapter implements SourceAdapter {
     return items.length ? [{ title: "最新动漫", key: "", items: items.slice(0, 12) }] : [];
   }
   async detail(id: string, signal: AbortSignal) {
-    const key = process.env.JINPAI_KEY?.trim() || "";
+    const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
     const t = String(Math.floor(Date.now() / 1000));
     const data = await this.call(`/api/mw-movie/anonymous/video/detail?id=${encodeURIComponent(id)}`, `id=${id}&key=${key}&t=${t}`, t, signal);
     const raw = data.data || {};
@@ -362,7 +369,7 @@ export class JinpaiAdapter implements SourceAdapter {
     return { item: result, episodes };
   }
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
-    const key = process.env.JINPAI_KEY?.trim() || "";
+    const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
     const t = String(Math.floor(Date.now() / 1000));
     const id = String(flag.id || "");
     const nid = String(flag.nid || "");
@@ -375,11 +382,11 @@ export class JinpaiAdapter implements SourceAdapter {
 
 export class SanqiuAdapter implements SourceAdapter {
   readonly sourceKey = "sanqiu";
-  private base() { return (process.env.SANQIU_BASE_URL?.trim() || "").replace(/\/$/, ""); }
+  private base() { return (process.env.SANQIU_BASE_URL?.trim() || SANQIU_DEFAULT_BASE).replace(/\/$/, ""); }
   private headers(): Record<string, string> {
     const nonce = String(Math.floor(Math.random() * 999) + 1);
     const time = String(Math.floor(Date.now() / 1000));
-    const raw = `finger=${process.env.SANQIU_SIGN_FINGER || ""}&id=com.sunshine.tv&nonce=${nonce}&sk=SK-thanks&time=${time}&v=4`;
+    const raw = `finger=${process.env.SANQIU_SIGN_FINGER?.trim() || SANQIU_DEFAULT_SIGN_FINGER}&id=com.sunshine.tv&nonce=${nonce}&sk=SK-thanks&time=${time}&v=4`;
     return { "user-agent": "okhttp/4.12.0", "x-ave": "4", "x-aid": "com.sunshine.tv", "x-time": time, "x-nonc": nonce, "x-sign": sha256(raw).toUpperCase(), "x-device-id": "0b4328287a5d953e" };
   }
   private async call(path: string, signal: AbortSignal): Promise<Json> { return requestJson(`${this.base()}${path}`, signal, this.headers()); }
