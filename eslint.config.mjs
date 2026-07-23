@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Reviewed source snapshots are input artifacts, not application modules.
+    "config/source-scripts/**",
+    "config/script-runner.cjs",
+    "public/source-scripts/**",
+    "public/script-runner.cjs",
   ]),
 ]);
 

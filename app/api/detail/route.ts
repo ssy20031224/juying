@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { nativeAdapters } from "../../lib/adapters/native";
+import { sourceAdapters } from "../../lib/adapters";
 import { SOURCES } from "../../lib/sources";
 import { cached } from "../../lib/cache";
 
@@ -8,11 +8,11 @@ export async function GET(request: Request) {
   const source = params.get("source") || "";
   const id = params.get("id") || "";
   const sourceConfig = SOURCES.find((entry) => entry.key === source);
-  const native = sourceConfig?.adapter ? nativeAdapters[sourceConfig.adapter] : undefined;
-  if (!native || !id) return NextResponse.json({ episodes: [] });
+  const adapter = sourceConfig?.adapter ? sourceAdapters[sourceConfig.adapter] : undefined;
+  if (!adapter || !id) return NextResponse.json({ episodes: [] });
 
   try {
-    const result = await cached(`detail:${source}:${id}`, 30 * 60 * 1000, () => native.detail(id, AbortSignal.timeout(12000)));
+    const result = await cached(`detail:${source}:${id}`, 30 * 60 * 1000, () => adapter.detail(id, AbortSignal.timeout(12000)));
     return NextResponse.json({
       id,
       title: result.item.title,

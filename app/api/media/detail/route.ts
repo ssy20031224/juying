@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { nativeAdapters } from "../../../lib/adapters/native";
+import { sourceAdapters } from "../../../lib/adapters";
 import type { SourceVariant } from "../../../lib/adapters/types";
 import { cached } from "../../../lib/cache";
 import { mergeDetails, type SourcedDetail } from "../../../lib/catalog";
@@ -23,7 +23,7 @@ export async function POST(request: Request) {
 
   const outcomes = await mapWithConcurrency(unique, 3, async (variant): Promise<SourcedDetail> => {
     const source = SOURCES.find((entry) => entry.key === variant.sourceKey);
-    const adapter = source?.adapter ? nativeAdapters[source.adapter] : undefined;
+    const adapter = source?.adapter ? sourceAdapters[source.adapter] : undefined;
     if (!source || !adapter) throw new Error("source adapter unavailable");
     const result = await cached(
       `detail:${source.key}:${variant.sourceMediaId}`,

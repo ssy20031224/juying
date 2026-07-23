@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { mapWithConcurrency } from "../../lib/fanout";
-import { nativeAdapters } from "../../lib/adapters/native";
+import { sourceAdapters } from "../../lib/adapters";
 import { SOURCES, type Source } from "../../lib/sources";
 import { cached } from "../../lib/cache";
 import { mergeSearchItems, type SourcedItem } from "../../lib/catalog";
@@ -44,11 +44,11 @@ function normalize(value: unknown, source: Source): Item[] {
 }
 
 async function searchSource(query: string, source: Source): Promise<SourceOutcome> {
-  if (source.adapter && nativeAdapters[source.adapter]) {
+  if (source.adapter && sourceAdapters[source.adapter]) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
-      const items = await cached(`search:${source.key}:${query.toLowerCase()}`, 5 * 60 * 1000, () => nativeAdapters[source.adapter!].search(query, 1, controller.signal));
+      const items = await cached(`search:${source.key}:${query.toLowerCase()}`, 5 * 60 * 1000, () => sourceAdapters[source.adapter!].search(query, 1, controller.signal));
       return { items: items.map((value) => ({ ...value, sourceKey: source.key, sourceTitle: source.title })) as Item[] };
     } finally {
       clearTimeout(timeout);

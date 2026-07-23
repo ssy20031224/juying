@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { nativeAdapters, type HomeSection } from "../../lib/adapters/native";
+import type { HomeSection } from "../../lib/adapters/native";
+import { sourceAdapters } from "../../lib/adapters";
 import { SOURCES } from "../../lib/sources";
 import { cached } from "../../lib/cache";
 import { canonicalMediaId, toVariant, type SourcedItem } from "../../lib/catalog";
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   for (const source of sources) {
     try {
       if (!source.adapter) continue;
-      const adapter = nativeAdapters[source.adapter] as (typeof nativeAdapters)[string] & { home?: (signal: AbortSignal) => Promise<HomeSection[]> };
+      const adapter = sourceAdapters[source.adapter] as (typeof sourceAdapters)[string] & { home?: (signal: AbortSignal) => Promise<HomeSection[]> };
       if (!adapter?.home) continue;
       const home = await cached(`home:${source.key}`, 15 * 60 * 1000, () => adapter.home!(AbortSignal.timeout(12000)));
       for (const section of home) {

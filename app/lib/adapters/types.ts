@@ -79,7 +79,11 @@ export type PlayResult = {
 };
 
 export interface SourceAdapter {
+  readonly sourceKey?: string;
+  home?(signal: AbortSignal): Promise<unknown>;
   search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]>;
+  categories?(signal: AbortSignal): Promise<unknown>;
+  searchFiltered?(category: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]>;
   detail(id: string, signal: AbortSignal): Promise<{ item: SourceItem; episodes: Episode[] }>;
   play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult>;
 }
