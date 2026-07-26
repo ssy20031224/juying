@@ -1,0 +1,69 @@
+2026-07-24T00:07:35.002Z [search] q="火影" | kind=日漫 | genre=- | year=2024 | sort=hot | source=全部 | page=1
+2026-07-24T00:07:35.003Z   -> 9 sources, 9 ok, 307 raw items, 229 merged
+2026-07-24T00:07:35.004Z   -> 142KB | 4278ms
+2026-07-24T00:07:35.005Z      AuvFun: 43 items  2019ms
+2026-07-24T00:07:35.005Z      lanerc: 23 items  614ms
+2026-07-24T00:07:35.006Z      jinpai: 52 items  2071ms
+2026-07-24T00:07:35.007Z      cycapp: 24 items  2039ms
+2026-07-24T00:07:35.007Z      guazi: 35 items  1840ms
+2026-07-24T00:07:35.008Z      shuangxing: 21 items  261ms
+2026-07-24T00:07:35.009Z      xifanacg: 36 items  2172ms
+2026-07-24T00:07:35.010Z      sanqiu: 29 items  738ms
+2026-07-24T00:07:35.011Z      gugu: 44 items  1226ms
+2026-07-24T00:10:02.962Z [search] q="星" | kind=- | genre=- | year=- | sort=update | source=全部 | page=1
+2026-07-24T00:10:02.964Z   -> 9 sources, 9 ok, 877 raw items, 778 merged
+2026-07-24T00:10:02.965Z   -> 723KB | 3936ms
+2026-07-24T00:10:02.965Z      AuvFun: 651 items  3924ms
+2026-07-24T00:10:02.967Z      lanerc: 20 items  298ms
+2026-07-24T00:10:02.967Z      jinpai: 51 items  1407ms
+2026-07-24T00:10:02.969Z      cycapp: 20 items  925ms
+2026-07-24T00:10:02.970Z      guazi: 39 items  1516ms
+2026-07-24T00:10:02.971Z      shuangxing: 21 items  254ms
+2026-07-24T00:10:02.972Z      xifanacg: 30 items  948ms
+2026-07-24T00:10:02.973Z      sanqiu: 25 items  748ms
+2026-07-24T00:10:02.974Z      gugu: 20 items  1077ms
+2026-07-24T03:01:08.255Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:01:50.360Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:02:12.625Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:02:52.846Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:03:37.042Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:08:03.020Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:22:00.238Z Search request: q="", source="", year="", sort="hot", page=1
+2026-07-24T03:22:55.487Z Search request: q="", source="", year="", sort="hot", page=1
+2026-07-24T03:23:15.681Z Search request: q="", source="Lanerc", year="", sort="update", page=1
+2026-07-24T03:24:35.315Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-24T03:24:48.286Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-24T03:25:27.455Z Search request: q="", source="", year="", sort="hot", page=1
+2026-07-24T03:26:00.696Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:31:05.617Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T03:35:05.705Z Search request: q="后宫", source="", year="", sort="update", page=1
+2026-07-24T04:04:38.430Z Search request: q="后宫", source="", year="", sort="update", page=1
+2026-07-24T04:04:41.034Z Search request: q="热血", source="", year="", sort="update", page=1
+2026-07-24T04:04:43.467Z Search request: q="校园", source="", year="", sort="update", page=1
+2026-07-24T04:04:45.507Z Search request: q="机战", source="", year="", sort="update", page=1
+2026-07-24T04:04:48.293Z Search request: q="泡面番", source="", year="", sort="update", page=1
+2026-07-24T04:04:50.136Z Search request: q="偶像", source="", year="", sort="update", page=1
+2026-07-24T04:05:20.090Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:19:03.934Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:22:47.100Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:27:59.302Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:35:44.207Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:47:28.910Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:54:15.088Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T10:58:13.745Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T11:01:18.779Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T11:39:12.333Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T12:42:52.823Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-24T12:49:15.040Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-24T23:54:48.507Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-25T00:14:02.032Z Search request: q="星", source="", year="", sort="update", page=1
+2026-07-25T05:10:26.955Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:10:32.420Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:10:39.777Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:10:54.859Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:20:09.829Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:20:32.551Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:20:37.391Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:20:47.866Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-25T05:21:02.957Z Search request: q="火影", source="", year="", sort="update", page=1
+2026-07-26T05:05:40.969Z Search request: q="星", source="", year="", sort="update", page=1

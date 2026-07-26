@@ -1,0 +1,469 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
+import {
+  Bookmark, ChevronRight, Compass, Download, Film,
+  Heart, History, Home as HomeIcon, Info, Play, Search, Settings2,
+  Share2, Sparkles, UserRound, X,
+} from "lucide-react";
+import { MediaPlayer } from "./components/player/MediaPlayer";
+import type { PlayerEpisode, PlayerQuality, PlayerSession } from "./components/player/types";
+
+type SourceVariant = {
+  sourceKey: string;
+  sourceTitle: string;
+  sourceMediaId: string;
+  title: string;
+  year?: string;
+  kind?: string;
+  cover?: string;
+  description?: string;
+};
+
+type Result = {
+  id: string;
+  title: string;
+  year: string;
+  kind: string;
+  score: string;
+  cover?: string;
+  sourceKey: string;
+  sourceTitle: string;
+  sourceCount?: number;
+  description?: string;
+  variants?: SourceVariant[];
+  episodes?: PlayerEpisode[];
+};
+
+type SearchResponse = {
+  items: Result[];
+  sources: { key: string; title: string; enabled: boolean; count: number; error?: string; status?: string }[];
+  demo?: boolean;
+};
+
+type HomeSection = { title: string; key: string; sourceKey: string; sourceTitle: string; items: Result[] };
+type View = "home" | "library" | "profile";
+
+const KINDS = ["全部", "日漫", "国漫", "剧场版", "欧美"];
+const GENRES = ["全部", "热血", "奇幻", "战斗", "穿越", "后宫", "恋爱", "校园", "日常", "治愈", "搞笑", "悬疑", "科幻", "冒险", "魔法", "机战", "推理", "运动", "音乐", "偶像", "职场", "历史", "美食", "萌系", "百合", "耽美", "泡面番"];
+const STATUSES = ["全部", "连载中", "已完结"];
+const currentYear = new Date().getFullYear();
+const YEARS = ["全部", ...Array.from({ length: currentYear - 2002 }, (_, i) => String(currentYear - i)), "更早"];
+const SORTS: { id: string; label: string }[] = [{ id: "update", label: "最近更新" }, { id: "hot", label: "多源热门" }, { id: "score", label: "高分好评" }];
+
+const sourcePills = [
+  { label: "全源", tone: "mint" },
+  { label: "Lanerc", tone: "cyan" },
+  { label: "AuvFun", tone: "violet" },
+  { label: "次元城", tone: "amber" },
+  { label: "更多 10 个", tone: "slate" },
+];
+
+const demoItems: Result[] = [
+  { id: "demo-1", title: "雾山五行 · 番外篇", year: "2025", kind: "国漫 / 奇幻", score: "9.1", sourceKey: "lanerc", sourceTitle: "Lanerc", sourceCount: 1, description: "山海之间的少年，踏上一场关于火与记忆的旅程。", episodes: [{ id: "demo-1-1", name: "第 01 集", number: 1, sources: [] }, { id: "demo-1-2", name: "第 02 集", number: 2, sources: [] }] },
+  { id: "demo-2", title: "银河边缘的邮差", year: "2024", kind: "科幻 / 冒险", score: "8.7", sourceKey: "AuvFun", sourceTitle: "AuvFun", sourceCount: 1, description: "一封迟到三十年的信，把邮差送向宇宙尽头。", episodes: [{ id: "demo-2-1", name: "第 01 集", number: 1, sources: [] }] },
+  { id: "demo-3", title: "夏日终曲", year: "2023", kind: "爱情 / 剧情", score: "8.4", sourceKey: "dmbus", sourceTitle: "动漫巴士", sourceCount: 1, description: "在海风停下之前，他们决定把未说出口的话说完。", episodes: [{ id: "demo-3-1", name: "正片", sources: [] }] },
+  { id: "demo-4", title: "星门观测站", year: "2025", kind: "科幻 / 悬疑", score: "8.9", sourceKey: "shuangxing", sourceTitle: "双星", sourceCount: 1, description: "观测站收到一组来自未来的坐标。", episodes: [{ id: "demo-4-1", name: "第 01 集", number: 1, sources: [] }] },
+];
+
+const colorFor = (key: string) => ({ lanerc: "#18b7d1", AuvFun: "#8c6ff5", dmbus: "#e9a23b", shuangxing: "#14a88a" }[key] || "#758196");
+const storageKeys = { favorites: "juying:favorites", history: "juying:history" };
+
+function Cover({ item, className = "", priority = false }: { item?: Partial<Result>; className?: string; priority?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  const raw = item?.cover || "";
+  const isDouban = /doubanio\.com/i.test(raw);
+  const url = (isDouban || failed) && raw ? `/api/cover?url=${encodeURIComponent(raw)}` : raw;
+  if (!raw) return <div className={`cover-fallback ${className}`}><span>{(item?.title || "聚").slice(0, 1)}</span></div>;
+  return <img className={`cover-image ${className}`} src={url} alt={`${item?.title || "影片"} 封面`} loading={priority ? "eager" : "lazy"} referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+}
+
+function SearchForm({ query, setQuery, loading, onSubmit }: { query: string; setQuery: (value: string) => void; loading: boolean; onSubmit: (event: FormEvent) => void }) {
+  return <form className="searchbar" onSubmit={onSubmit} role="search">
+    <Search size={19} strokeWidth={2.2} aria-hidden="true" />
+    <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索全网作品、动漫、剧场版..." aria-label="搜索影片" />
+    {query && <button type="button" style={{ height: "auto", padding: "4px", background: "transparent", border: 0, color: "var(--muted)" }} onClick={() => setQuery("")} aria-label="清空输入"><X size={15} /></button>}
+    <button type="submit" disabled={loading}>{loading ? "检索中" : "开始检索"}<ChevronRight size={17} /></button>
+  </form>;
+}
+
+function MovieCard({ item, index, onOpen, favorite, onFavorite }: { item: Result; index: number; onOpen: (item: Result) => void; favorite: boolean; onFavorite: (item: Result) => void }) {
+  return <article className="movie-card" tabIndex={0} onClick={() => onOpen(item)} onKeyDown={(event) => event.key === "Enter" && onOpen(item)}>
+    <div className="poster-wrap"><Cover item={item} /><span className="poster-index">{String(index + 1).padStart(2, "0")}</span><span className="poster-tag">{(item.kind || "影视").split(/[\s/，,]/)[0]}</span><button className={`favorite-chip ${favorite ? "is-favorite" : ""}`} aria-label={favorite ? "取消收藏" : "收藏影片"} onClick={(event) => { event.stopPropagation(); onFavorite(item); }}>{favorite ? <Heart size={15} fill="currentColor" /> : <Bookmark size={15} />}</button></div>
+    <div className="movie-copy"><div className="movie-meta"><span>{item.year || "—"}</span><span className="score">★ {item.score || "-"}</span></div><h3>{item.title}</h3><p>{item.kind || "影视"}</p><div className="movie-source"><i style={{ background: colorFor(item.sourceKey) }} />{item.sourceTitle}<span>{item.sourceCount || 1} 线路</span></div></div>
+  </article>;
+}
+
+export default function Home() {
+  const [view, setView] = useState<View>("home");
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [activeKind, setActiveKind] = useState("全部");
+  const [activeGenre, setActiveGenre] = useState("全部");
+  const [activeYear, setActiveYear] = useState("全部");
+  const [activeStatus, setActiveStatus] = useState("全部");
+  const [activeSort, setActiveSort] = useState("update");
+  const [activeSource, setActiveSource] = useState("全部");
+  const [items, setItems] = useState<Result[]>(demoItems);
+  const [page, setPage] = useState(1);
+  const [totalLibrary, setTotalLibrary] = useState(0);
+  const [searchResults, setSearchResults] = useState<Result[] | null>(null);
+  const [sourceStats, setSourceStats] = useState<SearchResponse["sources"]>([]);
+  const [homeSections, setHomeSections] = useState<HomeSection[]>([]);
+  const [selected, setSelected] = useState<Result | null>(null);
+  const [playing, setPlaying] = useState<PlayerSession | null>(null);
+  const [favorites, setFavorites] = useState<Result[]>([]);
+  const [history, setHistory] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [notice, setNotice] = useState("正在连接已收录来源");
+
+  useEffect(() => {
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    const timer = window.setTimeout(() => {
+      try {
+        setFavorites(JSON.parse(localStorage.getItem(storageKeys.favorites) || "[]") as Result[]);
+        setHistory(JSON.parse(localStorage.getItem(storageKeys.history) || "[]") as Result[]);
+      } catch { /* ignore malformed device-local state */ }
+    }, 0);
+    fetch("/api/home")
+      .then((response) => response.json() as Promise<{ sections?: HomeSection[]; errors?: { sourceKey: string; error: string }[] }>)
+      .then((payload) => {
+        const sections = payload.sections || [];
+        setHomeSections(sections);
+        if (sections.length) {
+          setItems(sections.flatMap((section) => section.items));
+          setNotice(`已加载 ${sections.length} 个首页分区，封面和元数据来自来源方`);
+        } else if (payload.errors?.length) setNotice("部分来源暂不可用，仍可浏览本地演示内容");
+      })
+      .catch(() => setNotice("实时来源连接较慢，当前显示演示内容"));
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const featured = homeSections[0]?.items?.[0] || items[0] || demoItems[0];
+  const hotItems = homeSections.find((section) => section.title.includes("热门"))?.items || items.slice(0, 6);
+  const libraryItems = useMemo(() => Array.from(new Map(items.map((item) => [`${item.sourceKey}-${item.id}`, item])).values()), [items]);
+  const filteredItems = useMemo(() => {
+    let list = libraryItems;
+    if (activeQuery) {
+      const queryChars = new Set([...activeQuery].filter((c) => /[\u4e00-\u9fff\w]/.test(c)));
+      if (queryChars.size >= 2) {
+        list = list.filter((item) => {
+          const titleChars = new Set([...item.title].filter((c) => /[\u4e00-\u9fff\w]/.test(c)));
+          let overlap = 0;
+          for (const c of queryChars) { if (titleChars.has(c)) overlap++; }
+          return overlap >= Math.min(queryChars.size, 3);
+        }).sort((a, b) => {
+          const aO = [...queryChars].filter((c) => a.title.includes(c)).length;
+          const bO = [...queryChars].filter((c) => b.title.includes(c)).length;
+          return bO - aO;
+        });
+      }
+    }
+    if (activeKind !== "全部") list = list.filter((item) => (item.kind || "").includes(activeKind));
+    // Genre is now handled server-side by the search API — client-side
+    // re-filtering would drop correctly filtered items that lack kind/tags metadata.
+    if (activeYear !== "全部") {
+      if (activeYear === "更早") list = list.filter((item) => parseInt(item.year || "0") < 2003);
+      else list = list.filter((item) => (item.year || "").includes(activeYear));
+    }
+    if (activeStatus !== "全部") {
+      const status = (item: { status?: string }) => (item.status || "").toLowerCase();
+      if (activeStatus === "连载中") list = list.filter((item) => /更新|连载|连/.test(status(item)));
+      else if (activeStatus === "已完结") list = list.filter((item) => /完结|全/.test(status(item)));
+    }
+    const sorted = [...list];
+    if (activeSort === "score") sorted.sort((a, b) => (parseFloat(b.score || "0") || 0) - (parseFloat(a.score || "0") || 0));
+    else if (activeSort === "hot") sorted.sort((a, b) => (b.sourceCount || 1) - (a.sourceCount || 1));
+    else sorted.sort((a, b) => (parseInt(b.year || "0") || 0) - (parseInt(a.year || "0") || 0));
+    return sorted;
+  }, [activeQuery, activeKind, activeGenre, activeYear, activeStatus, activeSort, libraryItems]);
+  const favoriteIds = useMemo(() => new Set(favorites.map((item) => `${item.sourceKey}-${item.id}`)), [favorites]);
+
+  function saveDeviceState(key: string, value: Result[]) {
+    try { localStorage.setItem(key, JSON.stringify(value.slice(0, 40))); } catch { /* private mode */ }
+  }
+
+  function toggleFavorite(item: Result) {
+    const id = `${item.sourceKey}-${item.id}`;
+    const next = favoriteIds.has(id) ? favorites.filter((value) => `${value.sourceKey}-${value.id}` !== id) : [item, ...favorites];
+    setFavorites(next); saveDeviceState(storageKeys.favorites, next);
+  }
+
+  function addHistory(item: Result) {
+    const id = `${item.sourceKey}-${item.id}`;
+    const next = [item, ...history.filter((value) => `${value.sourceKey}-${value.id}` !== id)];
+    setHistory(next); saveDeviceState(storageKeys.history, next);
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const next = query.trim();
+    if (!next) { setSearchResults(null); return; }
+    setLoading(true); setNotice("正在并发检索已启用来源");
+    try {
+      const response = await fetch(`/api/search?q=${encodeURIComponent(next)}`);
+      const payload = (await response.json()) as SearchResponse;
+      setSearchResults(payload.items);
+      setSourceStats(payload.sources || []);
+      setNotice(payload.demo ? "当前没有来源返回匹配内容，请尝试其他关键词" : `已完成 ${payload.sources.filter((source) => source.count > 0).length} 个来源的检索`);
+    } catch {
+      setNotice("检索服务暂时不可用，已保留最近内容");
+    } finally { setLoading(false); }
+  }
+
+  async function openDetail(item: Result) {
+    setSelected(item); addHistory(item);
+    if (item.id.startsWith("demo-")) return;
+    try {
+      const variants = item.variants?.length ? item.variants : [{
+        sourceKey: item.sourceKey,
+        sourceTitle: item.sourceTitle,
+        sourceMediaId: item.id,
+        title: item.title,
+        year: item.year,
+        kind: item.kind,
+        cover: item.cover,
+        description: item.description,
+      }];
+      const response = await fetch("/api/media/detail", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ variants }),
+      });
+      if (!response.ok) throw new Error("detail aggregation failed");
+      const detail = (await response.json()) as Result;
+      setSelected({ ...item, ...detail, score: detail.score || item.score });
+    } catch { setNotice("详情暂时无法获取，请稍后重试"); }
+  }
+
+  async function resolvePlay(episodeIndex: number, sourceIndex = 0) {
+    const media = selected || playing?.media;
+    const episodes = selected?.episodes || playing?.episodes;
+    const episode = episodes?.[episodeIndex];
+    const source = episode?.sources[sourceIndex];
+    if (!media || !episodes || !episode || !source) {
+      setNotice(episode?.sources.length === 0 ? "该演示条目没有真实播放线路" : "该剧集没有可用来源");
+      return;
+    }
+    setNotice(`正在解析 ${source.sourceTitle} · ${source.route}`);
+    try {
+      const response = await fetch(`/api/play?source=${encodeURIComponent(source.sourceKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(source.flag),
+      });
+      const payload = (await response.json()) as { url?: string; type?: string; qualityOptions?: PlayerQuality[]; referer?: string; error?: string };
+      if (!payload.url) { setNotice(payload.error || "来源没有返回可播放地址"); return; }
+      setSelected(null);
+      setPlaying({
+        media,
+        episodes,
+        episodeIndex,
+        sourceIndex,
+        url: payload.url,
+        type: payload.type,
+        route: source.route,
+        qualityOptions: payload.qualityOptions,
+      });
+      setNotice(`正在播放 ${episode.name} · ${source.sourceTitle}`);
+    } catch { setNotice("播放地址解析失败，请更换线路重试"); }
+  }
+
+  async function shareItem(item: Result) {
+    const text = `${item.title} · ${item.year || "聚映"}`;
+    try {
+      if (navigator.share) await navigator.share({ title: item.title, text, url: location.href });
+      else {
+        await navigator.clipboard.writeText(`${text} ${location.href}`);
+        setNotice("分享链接已复制");
+      }
+    } catch { /* user cancelled sharing */ }
+  }
+
+  async function fetchLibraryWith(kind: string, genre: string, year: string, status: string, sort: string, source: string, pageNum: number) {
+    setLibraryLoading(true);
+    setNotice("正在加载...");
+    try {
+      const params = new URLSearchParams();
+      if (kind !== "全部") params.set("kind", kind);
+      if (genre !== "全部") params.set("genre", genre);
+      if (year !== "全部") params.set("year", year);
+      if (sort) params.set("sort", sort);
+      if (source !== "全部") params.set("source", source);
+      params.set("page", String(pageNum));
+      const response = await fetch(`/api/search?${params.toString()}`);
+      const payload = await response.json() as SearchResponse;
+      setItems(payload.items || []);
+      setPage(pageNum);
+      setTotalLibrary(payload.total || (payload.items || []).length);
+      setSourceStats(payload.sources || []);
+      setNotice(payload.items?.length ? `${payload.items.length} 部 · 第 ${pageNum} 页` : "暂无匹配作品");
+    } catch { setNotice("加载失败，请重试"); }
+    finally { setLibraryLoading(false); }
+  }
+
+  // Auto-load on entering library
+  useEffect(() => {
+    if (view === "library") {
+      void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, 1);
+    }
+  }, [view]);
+
+  function applyFilter(kind?: string, genre?: string, year?: string, status?: string, sort?: string, source?: string) {
+    if (kind !== undefined) setActiveKind(kind);
+    if (genre !== undefined) setActiveGenre(genre);
+    if (year !== undefined) setActiveYear(year);
+    if (status !== undefined) setActiveStatus(status);
+    if (sort !== undefined) setActiveSort(sort);
+    if (source !== undefined) setActiveSource(source);
+    setActiveQuery("");
+    setQuery("");
+    void fetchLibraryWith(
+      kind !== undefined ? kind : activeKind,
+      genre !== undefined ? genre : activeGenre,
+      year !== undefined ? year : activeYear,
+      status !== undefined ? status : activeStatus,
+      sort !== undefined ? sort : activeSort,
+      source !== undefined ? source : activeSource,
+      1,
+    );
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function viewCollection(section?: string) {
+    const title = section || "全部";
+    let kind = "全部"; let genre = "全部"; let sort = "update";
+    if (title.includes("日漫")) kind = "日漫";
+    else if (title.includes("国漫")) kind = "国漫";
+    else if (title.includes("剧场")) kind = "剧场版";
+    else if (title.includes("欧美")) kind = "欧美";
+    else if (title.includes("热门") || title.includes("推荐")) sort = "hot";
+    setView("library");
+    applyFilter(kind, genre, "全部", "全部", sort, "全部");
+  }
+
+  function closeOverlays() { setSelected(null); setPlaying(null); }
+
+  return <main className="app-shell">
+    <header className="desktop-nav"><a className="brand" href="#top" aria-label="聚映首页"><span className="brand-mark">J</span><span>聚映<span className="brand-dot">·</span></span></a><nav><button className={view === "home" ? "active" : ""} onClick={() => setView("home")}>发现</button><button className={view === "library" ? "active" : ""} onClick={() => setView("library")}>片库</button><button onClick={() => setView("profile")}>我的</button></nav><a className="install-link" href="/manifest.webmanifest"><Download size={14} /> 安装到手机</a></header>
+
+    <div className="mobile-top"><div className="user-greeting"><div className="avatar"><Sparkles size={15} /></div><div><span>晚上好，</span><strong>准备看点什么？</strong></div></div><button className="icon-button" aria-label="观看历史" onClick={() => setView("profile")}><History size={20} /></button></div>
+
+    {view === "home" && <>
+      <section className="mobile-search"><SearchForm query={query} setQuery={setQuery} loading={loading} onSubmit={submit} /><div className="mobile-tabs"><button className="active">精选</button><button onClick={() => { setView("library"); setActiveQuery("日漫"); }}>日漫</button><button onClick={() => { setView("library"); setActiveQuery("剧场版"); }}>剧场版</button></div></section>
+      <section className="desktop-hero" id="top"><div className="eyebrow"><span className="live-dot" /> 多源检索 · 不存储影片</div><h1>把分散的片源，<em>聚</em>到一起。</h1><p>搜索一次，查看多个授权来源的结果，选择线路后由你的播放器直连来源。</p><SearchForm query={query} setQuery={setQuery} loading={loading} onSubmit={submit} /><div className="source-pills">{sourcePills.map((pill) => <span className={`source-pill ${pill.tone}`} key={pill.label}><i />{pill.label}</span>)}</div></section>
+      <section className="mobile-feature"><div className="feature-image"><Cover item={featured} priority /><div className="feature-gradient" /><div className="feature-copy"><span>今日精选 · {featured.sourceTitle}</span><h1>{featured.title}</h1><p>{featured.kind || "精选内容"}</p></div><button className="feature-play" aria-label={`播放 ${featured.title}`} onClick={() => openDetail(featured)}><Play size={18} fill="currentColor" /></button><div className="feature-dots"><i className="active" /><i /><i /></div></div><div className="quick-actions"><button onClick={() => setView("library")}><Compass size={19} /><span>发现更多</span></button><button onClick={() => setView("profile")}><History size={19} /><span>观看记录</span></button><button onClick={() => setView("profile")}><Heart size={19} /><span>我的收藏</span></button></div></section>
+      <HomeSections sections={homeSections} items={hotItems} onOpen={openDetail} favorites={favoriteIds} onFavorite={toggleFavorite} onViewAll={viewCollection} />
+    </>}
+
+    {view === "library" && <section className="library-view"><div className="library-head"><div><p className="eyebrow">多源片库</p><h1>全量影视</h1><span>{libraryLoading ? "加载中..." : `${filteredItems.length} 部 · 第 ${page} 页${totalLibrary > 0 ? ` · 共 ${totalLibrary} 部` : ""}`}</span></div></div>
+      <div className="filter-matrix" style={libraryLoading ? { opacity: 0.5, pointerEvents: "none" } as CSSProperties : undefined}>
+        <div className="filter-row"><span className="filter-label">分类：</span><div className="filter-pills">{KINDS.map((k) => <button key={k} className={`filter-pill ${activeKind === k ? "active" : ""}`} onClick={() => applyFilter(k, undefined, undefined, undefined, undefined)}>{k}</button>)}</div></div>
+        <div className="filter-row"><span className="filter-label">题材：</span><div className="filter-pills">{GENRES.map((g) => <button key={g} className={`filter-pill ${activeGenre === g ? "active" : ""}`} onClick={() => applyFilter(undefined, g, undefined, undefined, undefined)}>{g}</button>)}</div></div>
+        <div className="filter-row"><span className="filter-label">年份：</span><div className="filter-pills">{YEARS.map((y) => <button key={y} className={`filter-pill ${activeYear === y ? "active" : ""}`} onClick={() => applyFilter(undefined, undefined, y, undefined, undefined)}>{y}</button>)}</div></div>
+        <div className="filter-row"><span className="filter-label">状态：</span><div className="filter-pills">{STATUSES.map((s) => <button key={s} className={`filter-pill ${activeStatus === s ? "active" : ""}`} onClick={() => applyFilter(undefined, undefined, undefined, s, undefined)}>{s}</button>)}</div></div>
+        <div className="filter-row"><span className="filter-label">排序：</span><div className="filter-pills">{SORTS.map((s) => <button key={s.id} className={`filter-pill ${activeSort === s.id ? "active" : ""}`} onClick={() => applyFilter(undefined, undefined, undefined, undefined, s.id, undefined)}>{s.label}</button>)}</div></div>
+        {sourceStats.length > 0 && <div className="filter-row"><span className="filter-label">来源：</span><div className="filter-pills"><button key="全部" className={`filter-pill ${activeSource === "全部" ? "active" : ""}`} onClick={() => applyFilter(undefined, undefined, undefined, undefined, undefined, "全部")}>全部</button>{sourceStats.filter((s) => s.enabled).map((s) => <button key={s.key} className={`filter-pill ${activeSource === s.key ? "active" : ""}`} onClick={() => applyFilter(undefined, undefined, undefined, undefined, undefined, s.key)}>{s.title}</button>)}</div></div>}
+      </div>
+      {libraryLoading ? <div className="library-loading"><div className="loading-spinner"><div className="spinner-ring" /><span>加载中...</span></div><div className="library-grid">{Array.from({ length: 6 }, (_, i) => <div key={i} className="skeleton-card"><div className="skeleton-poster" /><div className="skeleton-title" /><div className="skeleton-meta" /></div>)}</div></div>
+        : <>
+          <div className="source-status">{sourceStats.length ? sourceStats.map((source) => <span key={source.key} style={{ "--source-color": colorFor(source.key) } as CSSProperties}><i />{source.title} {source.count ? `· ${source.count}` : "· 无结果"}</span>) : <><span><i />13 个来源已收录</span><span><i className="muted" />播放地址不经过本站存储</span></>}</div><div className="library-grid">{filteredItems.map((item, index) => <MovieCard key={`lib-${item.sourceKey}-${item.id}-${index}`} item={item} index={index} onOpen={openDetail} favorite={favoriteIds.has(`${item.sourceKey}-${item.id}`)} onFavorite={toggleFavorite} />)}</div></>}
+      {filteredItems.length > 0 && (() => {
+        const totalPages = totalLibrary > 0 ? Math.ceil(totalLibrary / 20) : 1;
+        const start = Math.max(1, page - 2);
+        const pages: number[] = [];
+        for (let p = start; p <= Math.min(totalPages, start + 4); p++) pages.push(p);
+        return <div className="pagination-bar">
+          <button disabled={page <= 1} onClick={() => { void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, 1); window.scrollTo({ top: 0, behavior: "smooth" }); }}>首页</button>
+          <button disabled={page <= 1} onClick={() => { void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, page - 1); window.scrollTo({ top: 0, behavior: "smooth" }); }}>上一页</button>
+          {pages.map((p) => <button key={p} className={p === page ? "active" : ""} onClick={() => { if (p !== page) { void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, p); window.scrollTo({ top: 0, behavior: "smooth" }); } }}>{p}</button>)}
+          <button disabled={page >= totalPages} onClick={() => { void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, page + 1); window.scrollTo({ top: 0, behavior: "smooth" }); }}>下一页</button>
+          <button disabled={page >= totalPages} onClick={() => { void fetchLibraryWith(activeKind, activeGenre, activeYear, activeStatus, activeSort, activeSource, totalPages); window.scrollTo({ top: 0, behavior: "smooth" }); }}>尾页</button>
+        </div>;
+      })()}</section>}
+
+    {view === "profile" && <ProfileView favorites={favorites} history={history} onOpen={openDetail} onFavorite={toggleFavorite} />}
+
+    <nav className="mobile-bottom" aria-label="主导航"><button className={view === "home" ? "active" : ""} onClick={() => setView("home")}><HomeIcon size={21} /><span>首页</span></button><button className={view === "library" ? "active" : ""} onClick={() => setView("library")}><Film size={21} /><span>片库</span></button><button className={view === "profile" ? "active" : ""} onClick={() => setView("profile")}><UserRound size={21} /><span>我的</span></button></nav>
+
+    <footer className="site-footer"><span>聚映 · 多源检索工具</span><span>只聚合元数据与临时播放入口，不保存影片文件</span></footer>
+
+    {selected && <div className="overlay" onClick={closeOverlays}><section className="detail-sheet" role="dialog" aria-modal="true" aria-label="影片详情" onClick={(event) => event.stopPropagation()}><button className="sheet-close" onClick={() => setSelected(null)} aria-label="关闭"><X size={20} /></button><div className="detail-cover"><Cover item={selected} /><span>{selected.sourceCount || 1} 个来源</span></div><div className="detail-content"><p className="eyebrow">{selected.sourceTitle} · {selected.year || "最新"}</p><h2>{selected.title}</h2><p className="detail-description">{selected.description || "来源方暂未提供简介，选择剧集后即可请求播放地址。"}</p><div className="detail-actions"><button onClick={() => toggleFavorite(selected)} className={favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "selected" : ""}>{favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? <Heart size={16} fill="currentColor" /> : <Bookmark size={16} />} {favoriteIds.has(`${selected.sourceKey}-${selected.id}`) ? "已收藏" : "收藏"}</button><button onClick={() => void shareItem(selected)}><Share2 size={16} /> 分享</button></div><div className="episode-block"><div className="episode-title"><span>选集</span><small>{selected.episodes?.length || 0} 集 · {selected.variants?.length || selected.sourceCount || 1} 个来源</small></div>{selected.episodes?.length ? <div className="episode-grid">{selected.episodes.map((episode, index) => <button key={episode.id} onClick={() => void resolvePlay(index, 0)}><span>{episode.name}</span><small>{episode.sources.length ? `${episode.sources.length} 个来源 · ${episode.sources[0].route}` : "暂无播放线路"}</small><Play size={14} fill="currentColor" /></button>)}</div> : <div className="empty-state"><Info size={18} /> 暂无剧集信息</div>}</div></div></section></div>}
+
+    {playing && <MediaPlayer
+      key={`${playing.media.id}-${playing.episodeIndex}-${playing.sourceIndex}-${playing.url}`}
+      session={playing}
+      favorite={favoriteIds.has(`${playing.media.sourceKey}-${playing.media.id}`)}
+      onClose={() => setPlaying(null)}
+      onResolve={resolvePlay}
+      onNotice={setNotice}
+      onFavorite={() => {
+        const item = items.find((entry) => entry.id === playing.media.id)
+          || favorites.find((entry) => entry.id === playing.media.id)
+          || { ...playing.media, year: "", kind: "", score: "", sourceCount: 1 };
+        toggleFavorite(item);
+      }}
+    />}
+    {searchResults && <SearchOverlay results={searchResults} query={query} sourceStats={sourceStats} loading={loading} onOpen={openDetail} onFavorite={toggleFavorite} favorites={favoriteIds} onClose={() => { setSearchResults(null); setQuery(""); }} />}
+  </main>;
+}
+
+function SearchOverlay({ results, query, sourceStats, loading, onOpen, onFavorite, favorites, onClose }: { results: Result[]; query: string; sourceStats: SearchResponse["sources"]; loading: boolean; onOpen: (item: Result) => void; onFavorite: (item: Result) => void; favorites: Set<string>; onClose: () => void }) {
+  return <div className="overlay search-overlay" onClick={onClose}>
+    <section className="search-sheet" role="dialog" aria-modal="true" aria-label="搜索结果" onClick={(e) => e.stopPropagation()}>
+      <div className="search-sheet-head">
+        <div><p className="eyebrow">搜索结果</p><h2>"{query}"</h2><span>{loading ? "检索中..." : results.length ? `${results.length} 部作品` : "暂无匹配内容"}</span></div>
+        <button onClick={onClose} aria-label="关闭"><X size={22} /></button>
+      </div>
+      {sourceStats.length > 0 && <div className="source-status">{sourceStats.filter((s) => s.count > 0).map((s, i) => <span key={`${s.key}-${i}`} style={{ "--source-color": colorFor(s.key) } as CSSProperties}><i />{s.title} · {s.count} 条</span>)}</div>}
+      {results.length ? <div className="library-grid">{results.map((item, index) => <MovieCard key={`sr-${item.sourceKey}-${item.id}-${index}`} item={item} index={index} onOpen={onOpen} favorite={favorites.has(`${item.sourceKey}-${item.id}`)} onFavorite={onFavorite} />)}</div> : <div className="empty-state"><Search size={19} /> 尝试其他关键词，或查看下方热门推荐</div>}
+    </section>
+  </div>;
+}
+
+function HomeSections({ sections, items, onOpen, favorites, onFavorite, onViewAll }: { sections: HomeSection[]; items: Result[]; onOpen: (item: Result) => void; favorites: Set<string>; onFavorite: (item: Result) => void; onViewAll: (section?: string) => void }) {
+  const CATEGORY_LABELS: Record<string, string[]> = {
+    hero: ["轮播", "banner", "__hero__"],
+    热门: ["热门", "人气热门", "高分推荐", "动画排行榜"],
+    最近更新: ["最近更新", "最新动漫", "热乎の新番", "刚上架の旧番"],
+    日漫: ["日漫", "日本动漫", "日本番", "日番", "番剧", "TV动画"],
+    国漫: ["国漫", "国产动漫", "大陆"],
+    剧场版: ["剧场版", "剧场", "动画电影"],
+    欧美: ["欧美", "欧美动漫", "美漫"],
+  };
+  function categoryFor(title: string): string {
+    const t = title.replace(/[【】\s]/g, "");
+    for (const [cat, keywords] of Object.entries(CATEGORY_LABELS)) {
+      for (const kw of keywords) { if (t.includes(kw)) return cat; }
+    }
+    return "其他";
+  }
+  const categoryOrder = ["hero", "热门", "最近更新", "日漫", "国漫", "剧场版", "欧美", "其他"];
+  const grouped = new Map<string, { items: Result[]; seen: Set<string> }>();
+  for (const section of sections) {
+    const cat = categoryFor(section.title);
+    if (!grouped.has(cat)) grouped.set(cat, { items: [], seen: new Set() });
+    const g = grouped.get(cat)!;
+    for (const item of section.items) {
+      if (!g.seen.has(item.id)) { g.seen.add(item.id); g.items.push(item); }
+    }
+  }
+  const displaySections: { title: string; items: Result[] }[] = [];
+  for (const cat of categoryOrder) {
+    const g = grouped.get(cat);
+    if (g && g.items.length) {
+      displaySections.push({ title: cat === "hero" ? "今日精选" : cat === "其他" ? "更多推荐" : cat, items: g.items.slice(0, 12) });
+    }
+  }
+  const final = displaySections.length ? displaySections : [{ title: "热门推荐", items: items.slice(0, 12) }];
+  return <section className="home-content">
+    <div className="section-heading"><div><p className="eyebrow">实时聚合</p><h2>好内容，正在发生</h2></div><button onClick={() => onViewAll("全部")}>查看全部 <ChevronRight size={16} /></button></div>
+    {final.map((s, si) => <div className="content-row" key={`${s.title}-${si}`}><div className="row-heading"><h3>{s.title}</h3><span>{s.items.length} 部 · 多源聚合</span><button onClick={() => onViewAll(s.title)}>查看更多 <ChevronRight size={16} /></button></div><div className="horizontal-grid">{s.items.map((item, idx) => <MovieCard key={`hs-${item.sourceKey}-${item.id}-${idx}`} item={item} index={idx} onOpen={onOpen} favorite={favorites.has(`${item.sourceKey}-${item.id}`)} onFavorite={onFavorite} />)}</div></div>)}
+  </section>;
+}
+
+function ProfileView({ favorites, history, onOpen, onFavorite }: { favorites: Result[]; history: Result[]; onOpen: (item: Result) => void; onFavorite: (item: Result) => void }) {
+  return <section className="profile-view"><div className="profile-card"><div className="profile-avatar"><Sparkles size={23} /></div><div><p>聚映用户</p><h1>本地观影空间</h1><span>收藏和观看记录仅保存在当前设备</span></div><button aria-label="设置"><Settings2 size={19} /></button></div><div className="profile-banner"><div><Sparkles size={18} /><strong>保持轻盈，继续发现</strong><span>不下载、不转存，随时从来源直达</span></div><ChevronRight size={20} /></div><div className="profile-shortcuts"><button><Heart size={20} /><span>我的收藏</span><b>{favorites.length}</b></button><button><History size={20} /><span>历史记录</span><b>{history.length}</b></button><button><Download size={20} /><span>离线缓存</span><b>未启用</b></button></div><div className="profile-section"><div className="section-heading"><div><p className="eyebrow">最近观看</p><h2>继续追番</h2></div></div>{history.length ? <div className="compact-list">{history.slice(0, 5).map((item) => <button key={`${item.sourceKey}-${item.id}`} onClick={() => onOpen(item)}><Cover item={item} /><span><strong>{item.title}</strong><small>{item.sourceTitle} · {item.year || "最新"}</small></span><ChevronRight size={17} /></button>)}</div> : <div className="empty-state"><History size={18} /> 打开一部影片后，这里会记录最近观看</div>}</div><div className="profile-section"><div className="section-heading"><div><p className="eyebrow">我的收藏</p><h2>想看的内容</h2></div></div>{favorites.length ? <div className="compact-list">{favorites.slice(0, 5).map((item) => <div className="compact-row" key={`${item.sourceKey}-${item.id}`} role="button" tabIndex={0} onClick={() => onOpen(item)} onKeyDown={(event) => event.key === "Enter" && onOpen(item)}><Cover item={item} /><span><strong>{item.title}</strong><small>{item.sourceTitle} · {item.kind || "影视"}</small></span><button className="remove-favorite" onClick={(event) => { event.stopPropagation(); onFavorite(item); }} aria-label="取消收藏"><X size={15} /></button></div>)}</div> : <div className="empty-state"><Bookmark size={18} /> 在影片详情中点击收藏，建立自己的片单</div>}</div></section>;
+}

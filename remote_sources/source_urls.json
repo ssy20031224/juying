@@ -1,0 +1,19 @@
+{
+  "configUrl": "https://www.z6i.cn/admin/config.json",
+  "sourceJsBase": "https://js.z1i.cn/js/",
+  "sources": [
+    {"key": "dmbus", "codeUrl": "https://js.z1i.cn/js/dmbus.js", "localFile": "dmbus.js"},
+    {"key": "lmm85", "codeUrl": "https://js.z1i.cn/js/lmm85.js", "localFile": "lmm85.js"},
+    {"key": "gugu", "codeUrl": "https://js.z1i.cn/js/gugu.js", "localFile": "gugu.js"},
+    {"key": "xifanacg", "codeUrl": "https://js.z1i.cn/js/xifanacg.js", "localFile": "xifanacg.js"},
+    {"key": "sanqiu", "codeUrl": "https://js.z1i.cn/js/sanqiu.js", "localFile": "sanqiu.js"},
+    {"key": "jinpai", "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js", "localFile": "jinpai.js"},
+    {"key": "akianime", "codeUrl": "https://js.z1i.cn/js/akianime.js", "localFile": "akianime.js"},
+    {"key": "guazi", "codeUrl": "https://js.z1i.cn/js/guazi.js", "localFile": "guazi.js"},
+    {"key": "cycapp", "codeUrl": "https://js.z1i.cn/js/cyc.js", "localFile": "cycapp.js"},
+    {"key": "yzx", "codeUrl": "https://js.z1i.cn/js/yzx.js", "localFile": "yzx.js"},
+    {"key": "AuvFun", "codeUrl": "https://js.z1i.cn/js/AuvFun.js", "localFile": "AuvFun.js"},
+    {"key": "lanerc", "codeUrl": "https://js.z1i.cn/js/lanerc_legacy.js", "localFile": "lanerc.js"},
+    {"key": "shuangxing", "codeUrl": "https://js.z1i.cn/js/shuangxing99.js", "localFile": "shuangxing.js"}
+  ]
+}

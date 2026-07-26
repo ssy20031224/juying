@@ -1,0 +1,86 @@
+[
+  {
+    "key": "dmbus",
+    "title": "Auv源16",
+    "codeUrl": "https://js.z1i.cn/js/dmbus.js",
+    "hasCode": true
+  },
+  {
+    "key": "lmm85",
+    "title": "Auv源12",
+    "codeUrl": "https://js.z1i.cn/js/lmm85.js",
+    "hasCode": true
+  },
+  {
+    "key": "gugu",
+    "title": "Auv源14",
+    "codeUrl": "https://js.z1i.cn/js/gugu.js",
+    "hasCode": true
+  },
+  {
+    "key": "xifanacg",
+    "title": "Auv源5",
+    "codeUrl": "https://js.z1i.cn/js/xifanacg.js",
+    "hasCode": true
+  },
+  {
+    "key": "sanqiu",
+    "title": "Auv源10",
+    "codeUrl": "https://js.z1i.cn/js/sanqiu.js",
+    "hasCode": true
+  },
+  {
+    "key": "jinpai",
+    "title": "Auv源1",
+    "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js",
+    "hasCode": true
+  },
+  {
+    "key": "akianime",
+    "title": "Auv源11",
+    "codeUrl": "https://js.z1i.cn/js/akianime.js",
+    "hasCode": true
+  },
+  {
+    "key": "guazi",
+    "title": "Auv源3",
+    "codeUrl": "https://js.z1i.cn/js/guazi.js",
+    "hasCode": true
+  },
+  {
+    "key": "cycapp",
+    "title": "Auv源2",
+    "codeUrl": "https://js.z1i.cn/js/cyc.js",
+    "hasCode": true
+  },
+  {
+    "key": "jinpai",
+    "title": "Auv源1",
+    "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js",
+    "hasCode": true
+  },
+  {
+    "key": "yzx",
+    "title": "Auv源6",
+    "codeUrl": "https://js.z1i.cn/js/yzx.js",
+    "hasCode": true
+  },
+  {
+    "key": "AuvFun",
+    "title": "AuvFun1",
+    "codeUrl": "https://js.z1i.cn/js/AuvFun.js",
+    "hasCode": true
+  },
+  {
+    "key": "lanerc",
+    "title": "AuvFun",
+    "codeUrl": "https://js.z1i.cn/js/lanerc_legacy.js",
+    "hasCode": true
+  },
+  {
+    "key": "shuangxing",
+    "title": "Auv源4",
+    "codeUrl": "https://js.z1i.cn/js/shuangxing99.js",
+    "hasCode": true
+  }
+]
