@@ -951,8 +951,15 @@ function play(flag) {
             auth: runtime.auth
         };
         if (!body.vid) return JSON.stringify({ url: '', type: 'auto' });
-        var response = _apiPost('app/proxyx3x', body);
+        var response = _apiPost('app/proxy', body);
         var playUrl = String(_findDeep(response, 'play_url') || '');
+        if (!playUrl || playUrl.indexOf('5de1db9f489ce649f17bf695cde3878c') !== -1) {
+            response = _apiPost('app/proxyx3x', body);
+            var altUrl = String(_findDeep(response, 'play_url') || '');
+            if (altUrl && altUrl.indexOf('5de1db9f489ce649f17bf695cde3878c') === -1) {
+                playUrl = altUrl;
+            }
+        }
         return JSON.stringify({ url: playUrl, type: _mediaType(playUrl) });
     } catch (error) {
         _lanercLog('播放解析失败：' + String(error));

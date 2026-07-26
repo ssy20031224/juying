@@ -131,16 +131,18 @@ class SourceManager(private val context: Context) {
             }
         }
 
-        val rc = remoteConfigs[key]
-        var code = RemoteSourceFetcher.getScript(context, key, rc?.codeUrl ?: "")
-        if (code.isNotEmpty()) {
-            try {
-                val exports = engine.loadSourceFromCode(key, source.localFile, code)
-                return SourceAdapter(source, exports, gson)
-            } catch (e: Exception) {
-                Log.w("SourceManager", "Failed loading script for $key (${e.message}), clearing cache and trying bundled asset...")
-                val cacheFile = java.io.File(context.filesDir, "source_scripts/${key}.js")
-                if (cacheFile.exists()) try { cacheFile.delete() } catch (_: Exception) {}
+        if (key != "lanerc") {
+            val rc = remoteConfigs[key]
+            var code = RemoteSourceFetcher.getScript(context, key, rc?.codeUrl ?: "")
+            if (code.isNotEmpty()) {
+                try {
+                    val exports = engine.loadSourceFromCode(key, source.localFile, code)
+                    return SourceAdapter(source, exports, gson)
+                } catch (e: Exception) {
+                    Log.w("SourceManager", "Failed loading script for $key (${e.message}), clearing cache and trying bundled asset...")
+                    val cacheFile = java.io.File(context.filesDir, "source_scripts/${key}.js")
+                    if (cacheFile.exists()) try { cacheFile.delete() } catch (_: Exception) {}
+                }
             }
         }
         // Fallback to bundled asset directly
