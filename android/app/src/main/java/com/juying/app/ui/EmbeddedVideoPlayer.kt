@@ -1,9 +1,11 @@
 package com.juying.app.ui
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.ContextWrapper
+import android.media.AudioManager
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
@@ -17,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -45,7 +48,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.C
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -79,6 +86,18 @@ private fun formatTime(ms: Long): String {
     } else {
         String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
     }
+}
+
+private fun adjustScreenBrightness(activity: Activity?, delta: Float) {
+    activity ?: return
+    val attributes = activity.window.attributes
+    val current = if (attributes.screenBrightness in 0.01f..1f) {
+        attributes.screenBrightness
+    } else {
+        0.5f
+    }
+    attributes.screenBrightness = (current + delta).coerceIn(0.05f, 1f)
+    activity.window.attributes = attributes
 }
 
 // Custom UI Vector Icons
@@ -170,6 +189,20 @@ fun EmbeddedVideoPlayer(
     var currentSpeed by remember { mutableStateOf(1.0f) }
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var playError by remember { mutableStateOf(false) }
+    var selectedQuality by remember { mutableStateOf("Auto") }
+    var qualityEnhancement by remember { mutableStateOf(false) }
+    var showQualityMenu by remember { mutableStateOf(false) }
+    var showDanmakuSettings by remember { mutableStateOf(false) }
+    var danmakuOpacity by remember { mutableStateOf(0.85f) }
+    var danmakuDraft by remember { mutableStateOf("") }
+    val lowRamDevice = remember(context) {
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
+    }
+    val maxSpeed = if (lowRamDevice || qualityEnhancement) 2.0f else 3.0f
+    val audioManager = remember(context) {
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    }
+    val sentDanmaku = remember { mutableStateListOf<String>() }
 
     var isPlaying by remember { mutableStateOf(true) }
     var currentPosition by remember { mutableStateOf(0L) }
@@ -290,7 +323,22 @@ fun EmbeddedVideoPlayer(
             ProgressiveMediaSource.Factory(httpDataSourceFactory).createMediaSource(mediaItem)
         }
 
-        ExoPlayer.Builder(context).build().apply {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                30_000,  // keep at least 30 seconds buffered
+                120_000, // allow up to 2 minutes on unstable CDN links
+                2_500,
+                5_000
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+
+        ExoPlayer.Builder(context, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
+            .apply {
             setMediaSource(mediaSource)
             prepare()
             playWhenReady = true
@@ -320,14 +368,15 @@ fun EmbeddedVideoPlayer(
         }
     }
 
-    // Auto-update position every 250ms
+    // Twice per second is smooth enough for the progress bar and avoids
+    // forcing four whole-player recompositions per second while decoding.
     LaunchedEffect(exoPlayer, isSeeking) {
         while (true) {
             if (!isSeeking) {
                 currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                 duration = exoPlayer.duration.coerceAtLeast(0L)
             }
-            delay(250)
+            delay(500)
         }
     }
 
@@ -345,6 +394,25 @@ fun EmbeddedVideoPlayer(
 
     LaunchedEffect(currentSpeed) {
         exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
+    }
+
+    LaunchedEffect(selectedQuality) {
+        val builder = exoPlayer.trackSelectionParameters.buildUpon()
+        when (selectedQuality) {
+            "1080p" -> builder.setMaxVideoSize(1920, 1080)
+            "720p" -> builder.setMaxVideoSize(1280, 720)
+            "480p" -> builder.setMaxVideoSize(854, 480)
+            else -> builder.clearVideoSizeConstraints()
+        }
+        exoPlayer.trackSelectionParameters = builder.build()
+    }
+
+    LaunchedEffect(qualityEnhancement) {
+        exoPlayer.videoScalingMode = if (qualityEnhancement) {
+            C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+        } else {
+            C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        }
     }
 
     DisposableEffect(exoPlayer) {
@@ -370,17 +438,71 @@ fun EmbeddedVideoPlayer(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .then(if (isFullscreen) Modifier.pointerInput(duration, isLocked) {
+                var startX = 0f
+                var totalX = 0f
+                var totalY = 0f
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        startX = offset.x
+                        totalX = 0f
+                        totalY = 0f
+                    },
+                    onDrag = { change, amount ->
+                        totalX += amount.x
+                        totalY += amount.y
+                        if (!isFullscreen || isLocked) return@detectDragGestures
+                        if (kotlin.math.abs(totalY) > kotlin.math.abs(totalX)) {
+                            val delta = (-amount.y / 900f).coerceIn(-0.08f, 0.08f)
+                            val width = size.width.coerceAtLeast(1)
+                            if (startX < width * 0.5f) {
+                                adjustScreenBrightness(activity, delta)
+                            } else {
+                                audioManager?.let { manager ->
+                                    val max = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                    val current = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                    val step = (amount.y / -36f).toInt()
+                                    manager.setStreamVolume(
+                                        AudioManager.STREAM_MUSIC,
+                                        (current + step).coerceIn(0, max),
+                                        0
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    onDragEnd = {
+                        if (!isFullscreen || isLocked || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
+                        val width = size.width.coerceAtLeast(1)
+                        val proportion = (totalX / width.toFloat()).coerceIn(-0.35f, 0.35f)
+                        val deltaMs = if (kotlin.math.abs(totalX) < width * 0.35f) {
+                            if (totalX > 0) 15_000L else -15_000L
+                        } else {
+                            (duration.coerceAtLeast(60_000L) * proportion).toLong()
+                        }
+                        exoPlayer.seekTo(
+                            (exoPlayer.currentPosition + deltaMs)
+                                .coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                        )
+                    }
+                )
+            } else Modifier)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = {
                         controlsVisible = !controlsVisible
                     },
+                    onLongPress = { offset ->
+                        if (isFullscreen && !isLocked) {
+                            currentSpeed = if (offset.x < size.width * 0.5f) 0.5f else maxSpeed
+                        }
+                    },
                     onDoubleTap = { offset ->
                         val width = size.width
                         if (offset.x < width * 0.35f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition - 10000L).coerceAtLeast(0L))
+                            exoPlayer.seekTo((exoPlayer.currentPosition - 15000L).coerceAtLeast(0L))
                         } else if (offset.x > width * 0.65f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition + 10000L).coerceAtMost(exoPlayer.duration))
+                            exoPlayer.seekTo((exoPlayer.currentPosition + 15000L).coerceAtMost(exoPlayer.duration))
                         } else {
                             if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                         }
@@ -404,6 +526,9 @@ fun EmbeddedVideoPlayer(
                     PlayerView(ctx).apply {
                         player = exoPlayer
                         useController = false
+                        isClickable = false
+                        isFocusable = false
+                        setOnTouchListener { _, _ -> false }
                         this.resizeMode = resizeMode
                         layoutParams = FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -416,6 +541,30 @@ fun EmbeddedVideoPlayer(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+        }
+
+        if (danmakuEnabled && sentDanmaku.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 72.dp, end = 18.dp)
+                    .widthIn(max = 280.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                sentDanmaku.takeLast(6).forEach { message ->
+                    Text(
+                        message,
+                        color = Color.White.copy(alpha = danmakuOpacity),
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.28f), CircleShape)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
         }
 
         // ── Controls Overlay ──
@@ -653,6 +802,7 @@ fun EmbeddedVideoPlayer(
                                     .padding(horizontal = 6.dp)
                                     .height(28.dp)
                                     .background(Color.White.copy(alpha = 0.15f), CircleShape)
+                                    .clickable { showDanmakuSettings = true }
                                     .padding(horizontal = 12.dp),
                                 contentAlignment = Alignment.CenterStart
                             ) {
@@ -665,6 +815,18 @@ fun EmbeddedVideoPlayer(
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    selectedQuality,
+                                    color = AppColors.cyan,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clickable { showQualityMenu = true }
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+
+                                Spacer(Modifier.width(6.dp))
+
                                 // Super Resolution / Ratio
                                 Text(
                                     when (resizeMode) {
@@ -749,6 +911,107 @@ fun EmbeddedVideoPlayer(
                 confirmButton = {
                     TextButton(onClick = { showSpeedMenu = false }) {
                         Text("关闭", color = AppColors.cyan)
+                    }
+                },
+                containerColor = AppColors.panel
+            )
+        }
+
+        if (showQualityMenu) {
+            AlertDialog(
+                onDismissRequest = { showQualityMenu = false },
+                title = { Text("清晰度与画质增强", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        listOf("Auto", "1080p", "720p", "480p").forEach { quality ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedQuality = quality
+                                        showQualityMenu = false
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(quality, color = if (selectedQuality == quality) AppColors.cyan else AppColors.text)
+                                if (selectedQuality == quality) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = AppColors.cyan)
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("硬件画质增强", color = AppColors.text)
+                                Text(
+                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后会增加 GPU/解码负载",
+                                    color = AppColors.muted,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = qualityEnhancement,
+                                onCheckedChange = { qualityEnhancement = it }
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showQualityMenu = false }) {
+                        Text("关闭", color = AppColors.cyan)
+                    }
+                },
+                containerColor = AppColors.panel
+            )
+        }
+
+        if (showDanmakuSettings) {
+            AlertDialog(
+                onDismissRequest = { showDanmakuSettings = false },
+                title = { Text("弹幕设置", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("显示弹幕", color = AppColors.text)
+                            Switch(checked = danmakuEnabled, onCheckedChange = { danmakuEnabled = it })
+                        }
+                        Text("透明度 ${(danmakuOpacity * 100).toInt()}%", color = AppColors.muted, fontSize = 12.sp)
+                        Slider(
+                            value = danmakuOpacity,
+                            onValueChange = { danmakuOpacity = it },
+                            valueRange = 0.25f..1f
+                        )
+                        OutlinedTextField(
+                            value = danmakuDraft,
+                            onValueChange = { danmakuDraft = it },
+                            label = { Text("发送弹幕") },
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (danmakuDraft.isNotBlank()) {
+                            sentDanmaku.add(danmakuDraft.trim())
+                            danmakuDraft = ""
+                        }
+                        showDanmakuSettings = false
+                    }) {
+                        Text("发送并关闭", color = AppColors.cyan)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDanmakuSettings = false }) {
+                        Text("取消", color = AppColors.muted)
                     }
                 },
                 containerColor = AppColors.panel

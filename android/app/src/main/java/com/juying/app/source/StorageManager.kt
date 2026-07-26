@@ -15,6 +15,13 @@ class StorageManager(context: Context) {
     private val prefs = context.getSharedPreferences("juying_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
 
+    private fun itemKey(item: SourceItem): String {
+        // Older merged cards may have stored "sourceA,sourceB". Keep the
+        // first executable source as the stable identity for history/favorites.
+        val source = item.sourceKey.substringBefore(',').trim()
+        return "$source\u0000${item.id}"
+    }
+
     fun getHistory(): List<HistoryItem> {
         val json = prefs.getString("watch_history", "[]") ?: "[]"
         return try {
@@ -24,7 +31,8 @@ class StorageManager(context: Context) {
 
     fun addHistory(item: SourceItem, episodeName: String, playUrl: String) {
         val list = getHistory().toMutableList()
-        list.removeAll { it.item.id == item.id && it.item.sourceKey == item.sourceKey }
+        val key = itemKey(item)
+        list.removeAll { itemKey(it.item) == key }
         list.add(0, HistoryItem(item, episodeName, playUrl))
         if (list.size > 50) list.removeAt(list.size - 1)
         prefs.edit().putString("watch_history", gson.toJson(list)).apply()
@@ -42,14 +50,16 @@ class StorageManager(context: Context) {
     }
 
     fun isFavorite(item: SourceItem): Boolean {
-        return getFavorites().any { it.id == item.id && it.sourceKey == item.sourceKey }
+        val key = itemKey(item)
+        return getFavorites().any { itemKey(it) == key }
     }
 
     fun toggleFavorite(item: SourceItem): Boolean {
         val list = getFavorites().toMutableList()
-        val exists = list.any { it.id == item.id && it.sourceKey == item.sourceKey }
+        val key = itemKey(item)
+        val exists = list.any { itemKey(it) == key }
         if (exists) {
-            list.removeAll { it.id == item.id && it.sourceKey == item.sourceKey }
+            list.removeAll { itemKey(it) == key }
         } else {
             list.add(0, item)
         }

@@ -359,16 +359,21 @@ class SourceManager(private val context: Context) {
         fun mergeSearchItems(items: List<SourceItem>): List<SourceItem> {
             val groups = LinkedHashMap<String, MutableList<SourceItem>>()
             for (item in items) {
-                val key = normalizeTitle(item.title)
+                val key = normalizeTitle(item.title).ifBlank {
+                    "${item.sourceKey}\u0000${item.id}"
+                }
                 groups.getOrPut(key) { mutableListOf() }.add(item)
             }
-            return groups.values.map { variants ->
+            return groups.values.map { rawVariants ->
+                // The same source can expose one title in several home sections.
+                // Count each (source, id) only once and never concatenate sourceKey:
+                // sourceKey is an executable adapter identity, not display metadata.
+                val variants = rawVariants.distinctBy { "${it.sourceKey}\u0000${it.id}" }
                 val main = variants.first()
-                if (variants.size == 1) main
+                if (variants.size == 1) main.copy(sourceCount = 1)
                 else main.copy(
-                    sourceKey = variants.joinToString(",") { it.sourceKey },
-                    sourceTitle = variants.joinToString("+") { it.sourceTitle },
-                    sourceCount = variants.size,
+                    sourceTitle = variants.map { it.sourceTitle }.filter { it.isNotBlank() }.distinct().joinToString("+"),
+                    sourceCount = variants.map { it.sourceKey }.filter { it.isNotBlank() }.distinct().size.coerceAtLeast(1),
                     year = variants.firstOrNull { it.year.isNotEmpty() }?.year ?: main.year,
                     kind = variants.firstOrNull { it.kind.isNotEmpty() }?.kind ?: main.kind,
                     cover = variants.firstOrNull { it.cover.isNotEmpty() }?.cover ?: main.cover,
@@ -381,18 +386,79 @@ class SourceManager(private val context: Context) {
         }
 
         fun sortByRelevance(items: List<SourceItem>, query: String): List<SourceItem> {
-            val q = query.lowercase().trim()
+            val q = normalizeTitle(query)
             if (q.isEmpty()) return items
-            return items.sortedByDescending { item ->
-                val t = item.title.lowercase()
-                when {
-                    t == q -> 100
-                    t.startsWith(q) -> 80
-                    t.contains(q) -> 60
-                    t.length >= 2 && q.length >= 2 && q.toSet().count { c -> c in t } * 100 / q.length >= 50 -> 40
-                    else -> 0
-                }
+            return items.withIndex()
+                .sortedWith(
+                    compareByDescending<IndexedValue<SourceItem>> { relevanceScore(it.value, q) }
+                        .thenBy { it.index }
+                )
+                .map { it.value }
+        }
+
+        /**
+         * Search several low-cost aliases only when a source returns too few
+         * results. This helps retrieve seasons, specials and typo variants
+         * without replacing the user's original query.
+         */
+        fun searchVariants(query: String): List<String> {
+            val raw = query.trim()
+            if (raw.isEmpty()) return emptyList()
+            val compact = raw.replace(Regex("[\\s\\p{Punct}【】《》「」『』（）\\[\\]]"), "")
+            return linkedSetOf<String>().apply {
+                add(raw)
+                if (compact != raw) add(compact)
+                val withoutDe = compact.replace("的", "")
+                if (withoutDe.length >= 3 && withoutDe != compact) add(withoutDe)
+                // The final 3 characters are often the distinctive franchise
+                // name in Chinese titles (e.g. “葬送的芙莉莲” -> “芙莉莲”).
+                if (compact.length >= 5) add(compact.takeLast(3))
+            }.toList()
+        }
+
+        private fun relevanceScore(item: SourceItem, query: String): Int {
+            val title = normalizeTitle(item.title)
+            if (title.isEmpty()) return 0
+            val searchable = buildString {
+                append(title)
+                append(normalizeTitle(item.kind))
+                item.tags.forEach { append(normalizeTitle(it)) }
+                append(normalizeTitle(item.description).take(80))
             }
+            val distinctQuery = query.toSet().size.coerceAtLeast(1)
+            val overlap = query.toSet().count { it in title } * 100 / distinctQuery
+            val edit = levenshtein(query, title)
+            val editScore = (100 - edit * 100 / maxOf(query.length, title.length, 1)).coerceAtLeast(0)
+            return when {
+                title == query -> 10_000
+                title.startsWith(query) -> 8_500 + overlap
+                title.contains(query) -> 7_500 + overlap
+                searchable.contains(query) -> 6_500 + overlap
+                overlap >= 70 -> 4_000 + overlap + editScore
+                overlap >= 45 -> 2_000 + overlap + editScore / 2
+                else -> editScore
+            }
+        }
+
+        private fun levenshtein(left: String, right: String): Int {
+            if (left == right) return 0
+            if (left.isEmpty()) return right.length
+            if (right.isEmpty()) return left.length
+            var previous = IntArray(right.length + 1) { it }
+            for (i in left.indices) {
+                val current = IntArray(right.length + 1)
+                current[0] = i + 1
+                for (j in right.indices) {
+                    val cost = if (left[i] == right[j]) 0 else 1
+                    current[j + 1] = minOf(
+                        current[j] + 1,
+                        previous[j + 1] + 1,
+                        previous[j] + cost
+                    )
+                }
+                previous = current
+            }
+            return previous[right.length]
         }
     }
 }
@@ -586,6 +652,19 @@ class SourceAdapter(
                 val cover = obj.get("cover")?.asString ?: obj.get("pic")?.asString ?: obj.get("thumb")?.asString ?: obj.get("vod_pic")?.asString ?: ""
                 val year = obj.get("year")?.asString ?: obj.get("vod_year")?.asString ?: ""
                 val kind = obj.get("kind")?.asString ?: obj.get("type")?.asString ?: obj.get("vod_class")?.asString ?: ""
+                val tags = listOf("tags", "tag", "genre", "class", "vod_class", "type")
+                    .flatMap { field ->
+                        val value = obj.get(field) ?: return@flatMap emptyList()
+                        if (value.isJsonArray) {
+                            value.asJsonArray.mapNotNull { it.takeIf { v -> v.isJsonPrimitive }?.asString }
+                        } else {
+                            listOf(value.takeIf { it.isJsonPrimitive }?.asString.orEmpty())
+                        }
+                    }
+                    .flatMap { it.split(Regex("[,，、/|·\\s]+")) }
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
                 val status = obj.get("status")?.asString ?: obj.get("remarks")?.asString ?: obj.get("vod_remarks")?.asString ?: ""
                 val desc = obj.get("desc")?.asString ?: obj.get("description")?.asString ?: obj.get("vod_blurb")?.asString ?: ""
                 val score = obj.get("score")?.asString ?: obj.get("vod_score")?.asString ?: ""
@@ -595,6 +674,7 @@ class SourceAdapter(
                     title = cleanTitle,
                     year = year,
                     kind = kind,
+                    tags = tags,
                     status = status,
                     score = score,
                     cover = cover,

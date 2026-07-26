@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed as lazyItemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -94,6 +95,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sourceManager = SourceManager(application)
     private val storageManager = StorageManager(application)
     private var isAppInitialized = false
+    private var playerReturnView = "home"
+    private var pendingEpisodeName: String? = null
 
     // Cached pool of home section items — reused by fetchLibrary() to avoid re-fetching
     private var cachedHomePool: List<SourceItem> = emptyList()
@@ -112,6 +115,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var currentPlayResult by mutableStateOf<PlayResult?>(null)
     var isPlayLoading by mutableStateOf(false)
     var playError by mutableStateOf<String?>(null)
+    var episodeCacheProgress by mutableStateOf<String?>(null)
+    var downloadProgress by mutableStateOf<String?>(null)
 
     // Multi-source alternative details for "换源"
     var alternativeDetails by mutableStateOf<List<Pair<String, DetailResult>>>(emptyList())
@@ -126,6 +131,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // History and Favorites
     var historyList by mutableStateOf<List<HistoryItem>>(emptyList())
     var favoritesList by mutableStateOf<List<SourceItem>>(emptyList())
+    var commentDraft by mutableStateOf("")
+    var comments by mutableStateOf<List<String>>(emptyList())
+
+    fun addComment() {
+        val text = commentDraft.trim()
+        if (text.isNotEmpty()) {
+            comments = comments + text
+            commentDraft = ""
+        }
+    }
 
     // ── Library filters matching user spec ──
     var activeKind by mutableStateOf("全部")
@@ -405,8 +420,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
+            // If the exact query produced only a handful of hits, ask each
+            // source for a compact alias as well. This is what surfaces
+            // “第一季/第二季/剧场版/番外” and common spacing/typo variants
+            // while the relevance scorer keeps the exact title first.
+            val primaryCount = synchronized(accLock) { accumulated.size }
+            val supplementalQueries = SourceManager.searchVariants(keyword)
+                .drop(1)
+                .take(2)
+            if (primaryCount < 12 && supplementalQueries.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    coroutineScope {
+                        supplementalQueries.forEach { supplement ->
+                            targetAdapters.forEach { adapter ->
+                                launch {
+                                    val results = try {
+                                        withTimeout(8_000L) { adapter.search(supplement, 1) }
+                                    } catch (_: Exception) { emptyList() }
+                                    synchronized(accLock) {
+                                        accumulated.addAll(results)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                val snapshot = synchronized(accLock) { accumulated.toList() }
+                val sorted = SourceManager.sortByRelevance(
+                    SourceManager.mergeSearchItems(snapshot),
+                    keyword
+                )
+                withContext(Dispatchers.Main) {
+                    items = sorted
+                    notice = "已按相关度找到 ${sorted.size} 部作品"
+                }
+            }
+
             // Fuzzy fallback: if still too few results, retry with shorter queries
-            val currentItems = items
+            val currentItems = SourceManager.mergeSearchItems(
+                synchronized(accLock) { accumulated.toList() }
+            )
             if (currentItems.size < 5 && keyword.length > 2) {
                 val shorter = listOf(
                     keyword.take((keyword.length * 0.7).toInt().coerceAtLeast(2)),
@@ -482,21 +535,133 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fetchLibrary()
     }
 
+    private fun serverCategory(adapter: SourceAdapter, kind: String): String {
+        if (kind == "全部") return ""
+        return when (kind) {
+            "日漫" -> when (adapter.key.lowercase()) {
+                "lanerc", "jinpai", "sanqiu" -> "日本"
+                "shuangxing" -> "@1"
+                else -> "日漫"
+            }
+            "国漫" -> when (adapter.key.lowercase()) {
+                "lanerc", "jinpai", "sanqiu" -> "大陆"
+                "shuangxing" -> "@2"
+                else -> "国漫"
+            }
+            "剧场版" -> "剧场版"
+            "欧美" -> when (adapter.key.lowercase()) {
+                "lanerc", "jinpai", "sanqiu" -> "欧美"
+                else -> "欧美"
+            }
+            else -> kind
+        }
+    }
+
+    private fun serverFilterMap(adapter: SourceAdapter): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        if (activeGenre != "全部") {
+            // Different scripts use different names for the same server field.
+            result["class"] = activeGenre
+            result["genre"] = activeGenre
+            result["type"] = activeGenre
+            result["vod_class"] = activeGenre
+        }
+        if (activeYear != "全部" && activeYear != "更早") {
+            result["year"] = activeYear
+        }
+        if (activeStatus != "全部") {
+            result["status"] = activeStatus
+            result["state"] = activeStatus
+            result["remarks"] = activeStatus
+        }
+
+        val sort = when (adapter.key.lowercase()) {
+            "lanerc" -> if (activeSort == "score") "按评分" else "按时间"
+            "yzx" -> when (activeSort) {
+                "hot" -> "热度"
+                "score" -> "评分"
+                else -> "最新"
+            }
+            "akianime" -> when (activeSort) {
+                "hot" -> "hits"
+                "score" -> "score"
+                else -> "time"
+            }
+            "sanqiu" -> if (activeSort == "score") "score" else if (activeSort == "hot") "hits" else "time"
+            else -> when (activeSort) {
+                "hot" -> "hits"
+                "score" -> "score"
+                else -> "time"
+            }
+        }
+        result["sort"] = sort
+        result["by"] = sort
+        result["order"] = sort
+        result["extend_sort"] = sort
+        return result
+    }
+
     var libraryItems by mutableStateOf<List<SourceItem>>(emptyList())
     var libraryPage by mutableStateOf(1)
     var libraryHasMore by mutableStateOf(true)
     var libraryLoadingMore by mutableStateOf(false)
+    private var libraryJob: Job? = null
+    private var libraryGeneration = 0
+
+    private fun applyLibraryFiltersFast(input: List<SourceItem>): List<SourceItem> {
+        var filtered = input
+        if (activeKind != kinds.first()) {
+            val key = activeKind.lowercase()
+            filtered = filtered.filter { item ->
+                val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
+                metadata.isBlank() || metadata.contains(key)
+            }
+        }
+        if (activeGenre != genres.first()) {
+            val key = activeGenre.lowercase()
+            filtered = filtered.filter { item ->
+                val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
+                metadata.isBlank() || metadata.contains(key)
+            }
+        }
+        if (activeYear != years.first() && activeYear != years.last()) {
+            filtered = filtered.filter { item ->
+                item.year.isBlank() || item.year.contains(activeYear)
+            }
+        } else if (activeYear == years.last()) {
+            filtered = filtered.filter {
+                it.year.toIntOrNull()?.let { year -> year < 2003 } ?: true
+            }
+        }
+        if (activeStatus != statuses.first()) {
+            filtered = filtered.filter { item ->
+                val status = item.status
+                status.isBlank() ||
+                    (activeStatus == statuses[1] && (status.contains("\u8fde\u8f7d") || status.contains("\u66f4\u65b0"))) ||
+                    (activeStatus == statuses[2] && (status.contains("\u5b8c\u7ed3") || status.contains("\u5168\u96c6")))
+            }
+        }
+        return when (activeSort) {
+            "hot" -> filtered.sortedWith(compareByDescending<SourceItem> { it.sourceCount }
+                .thenByDescending { it.score.toDoubleOrNull() ?: 0.0 })
+            "score" -> filtered.sortedByDescending { it.score.toDoubleOrNull() ?: 0.0 }
+            else -> filtered
+        }
+    }
 
     fun fetchLibrary(reset: Boolean = true) {
-        viewModelScope.launch {
+        libraryJob?.cancel()
+        val requestId = ++libraryGeneration
+        libraryJob = viewModelScope.launch {
             if (reset) {
                 libraryPage = 1
-                libraryItems = emptyList()
+                val cached = applyLibraryFiltersFast(cachedHomePool)
+                libraryItems = cached
                 libraryHasMore = true
                 withContext(Dispatchers.Main) {
-                    items = emptyList()
-                    totalLibrary = 0
-                    loading = true
+                    items = cached
+                    totalLibrary = cached.size
+                    loading = false
                     libraryLoadingMore = false
                     notice = "正在检索多源片库..."
                 }
@@ -518,17 +683,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 allAvailable
             }
 
-            val searchCat = if (activeKind != "全部") activeKind else ""
-            val filterMap = mutableMapOf<String, String>()
-            if (activeGenre != "全部") filterMap["genre"] = activeGenre
-            if (activeYear != "全部") filterMap["year"] = activeYear
-            if (activeStatus != "全部") filterMap["status"] = activeStatus
-            filterMap["sort"] = activeSort
-
-            val hasFilter = searchCat.isNotEmpty() || activeGenre != "全部" || activeYear != "全部" || activeStatus != "全部"
-
             val fetchedNewItems = mutableListOf<SourceItem>()
             val fetchLock = Any()
+            val completedSources = AtomicInteger(0)
 
             withContext(Dispatchers.IO) {
                 coroutineScope {
@@ -536,7 +693,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         launch {
                             val rawItems = try {
                                 withTimeout(12_000L) {
-                                    var res = if (hasFilter) adapter.searchFiltered(searchCat, filterMap, currentPage) else emptyList()
+                                    // Always try the source's native filter endpoint
+                                    // first, including the unfiltered “recent” view.
+                                    var res = adapter.searchFiltered(
+                                        serverCategory(adapter, activeKind),
+                                        serverFilterMap(adapter),
+                                        currentPage
+                                    )
                                     if (res.isEmpty()) {
                                         val queryTerm = when {
                                             activeGenre != "全部" -> activeGenre
@@ -549,10 +712,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             } catch (_: Exception) { emptyList() }
 
-                            if (rawItems.isNotEmpty()) {
-                                synchronized(fetchLock) {
-                                    fetchedNewItems.addAll(rawItems)
+                            val snapshot = synchronized(fetchLock) {
+                                fetchedNewItems.addAll(rawItems)
+                                fetchedNewItems.toList()
+                            }
+                            val streamed = applyLibraryFiltersFast(
+                                SourceManager.mergeSearchItems(snapshot)
+                            )
+                            val done = completedSources.incrementAndGet()
+                            withContext(Dispatchers.Main) {
+                                if (requestId != libraryGeneration) return@withContext
+                                val existingKeys = currentExisting
+                                    .map { SourceManager.normalizeTitle(it.title) }
+                                    .toSet()
+                                val newItems = streamed.filter {
+                                    SourceManager.normalizeTitle(it.title) !in existingKeys
                                 }
+                                val merged = if (reset) {
+                                    SourceManager.mergeSearchItems(currentExisting + streamed)
+                                } else {
+                                    currentExisting + newItems
+                                }
+                                libraryItems = merged
+                                items = merged
+                                totalLibrary = merged.size
+                                loading = false
+                                libraryLoadingMore = false
+                                notice = "received ${merged.size} items; ${done}/${targetAdapters.size} sources complete"
                             }
                         }
                     }
@@ -567,22 +753,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val kindLower = activeKind.lowercase()
                 filtered = filtered.filter { item ->
                     val kindFirst = item.kind.lowercase().split("[\\s,，、/|·]+".toRegex()).firstOrNull() ?: ""
-                    kindFirst.contains(kindLower) || item.tags.any { it.lowercase().contains(kindLower) } || item.title.lowercase().contains(kindLower)
+                    val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
+                    metadata.isBlank() || kindFirst.contains(kindLower) || metadata.contains(kindLower)
                 }
             }
             if (activeGenre != "全部") {
                 val genreLower = activeGenre.lowercase()
                 filtered = filtered.filter { item ->
-                    item.tags.any { it.lowercase().contains(genreLower) } ||
-                    item.kind.lowercase().contains(genreLower) ||
-                    item.title.lowercase().contains(genreLower) ||
-                    item.description.lowercase().contains(genreLower)
+                    val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase().trim()
+                    metadata.isBlank() || metadata.contains(genreLower)
                 }
             }
             if (activeStatus != "全部") {
                 filtered = filtered.filter { item ->
                     val s = item.status
                     when {
+                        s.isBlank() -> true
                         activeStatus == "连载中" -> s.contains("连载") || s.contains("更新") || s.contains("话") || s.contains("集")
                         activeStatus == "已完结" -> s.contains("完结") || s.contains("全") || s.contains("0集")
                         else -> true
@@ -590,11 +776,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (activeYear != "全部" && activeYear != "更早") {
-                filtered = filtered.filter { item -> item.year.contains(activeYear) }
+                filtered = filtered.filter { item -> item.year.isBlank() || item.year.contains(activeYear) }
             } else if (activeYear == "更早") {
                 filtered = filtered.filter { item ->
                     val y = item.year.toIntOrNull()
-                    y != null && y < 2003
+                    y == null || y < 2003
                 }
             }
 
@@ -636,25 +822,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fetchLibrary(reset = false)
     }
 
-    fun openMovie(item: SourceItem) {
+    fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
+        playerReturnView = when (view) {
+            "library" -> "library"
+            "profile" -> "profile"
+            else -> "home"
+        }
+        pendingEpisodeName = preferredEpisodeName
         viewModelScope.launch {
+            // Older/merged home cards may contain "sourceA,sourceB". The item id
+            // belongs to the first source, so resolve a real adapter identity.
+            val primarySourceKey = item.sourceKey
+                .split(',')
+                .asSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && sourceManager.getAdapter(it) != null }
+                ?: item.sourceKey.trim()
+            val playableItem = if (primarySourceKey != item.sourceKey) {
+                item.copy(
+                    sourceKey = primarySourceKey,
+                    sourceTitle = item.sourceTitle.substringBefore('+').ifBlank { item.sourceTitle },
+                    sourceCount = 1
+                )
+            } else item
+
             withContext(Dispatchers.Main) {
                 loading = true
                 alternativeDetails = emptyList()
                 currentPlayResult = null
-                notice = "正在解析「${item.title}」剧集列表..."
+                notice = "正在解析「${playableItem.title}」剧集列表..."
             }
-            val adapter = sourceManager.getAdapter(item.sourceKey)
+            val adapter = sourceManager.getAdapter(primarySourceKey)
 
             // Detail cache-first (30 min TTL) — cached hit shows episodes in <5ms
-            val detailCacheKey = "${item.sourceKey}:${item.id}"
+            val detailCacheKey = "$primarySourceKey:${playableItem.id}"
             val detailResult = ResultCache.getDetail(detailCacheKey)
                 ?: run {
                     val fresh = withContext(Dispatchers.IO) {
                         if (adapter != null) {
-                            try { adapter.detail(item.id) } catch (_: Exception) { null }
+                            try { adapter.detail(playableItem.id) } catch (_: Exception) { null }
                         } else null
-                    } ?: DetailResult(item, emptyList())
+                    } ?: DetailResult(playableItem, emptyList())
                     ResultCache.putDetail(detailCacheKey, fresh)
                     fresh
                 }
@@ -664,10 +872,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loading = false
                 activeDetail = detailResult
                 activeAlternativeIndex = 0
-                currentEpisodeIndex = 0
+                currentEpisodeIndex = detailResult.episodes.indexOfFirst { ep ->
+                    pendingEpisodeName?.let { preferred ->
+                        ep.name.equals(preferred, ignoreCase = true) ||
+                            ep.name.contains(preferred, ignoreCase = true) ||
+                            preferred.contains(ep.name, ignoreCase = true)
+                    } ?: false
+                }.takeIf { it >= 0 } ?: 0
+                pendingEpisodeName = null
                 view = "player"
                 if (detailResult.episodes.isNotEmpty()) {
-                    selectEpisode(0)
+                    selectEpisode(currentEpisodeIndex)
                 } else {
                     notice = "该作品暂无可用选集"
                 }
@@ -677,7 +892,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ep1 = detailResult.episodes.getOrNull(1)
             if (ep1 != null && adapter != null) {
                 viewModelScope.launch(Dispatchers.IO) {
-                    val prefetchKey = "${item.sourceKey}:${ep1.flagStr.take(200)}"
+                    val prefetchKey = "$primarySourceKey:${ep1.flagStr.take(200)}"
                     if (ResultCache.getPlay(prefetchKey) == null) {
                         try {
                             val r = withTimeout(15_000L) { adapter.play(ep1.flagStr) }
@@ -688,8 +903,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Fetch alternative sources in background concurrently
-            val itemTitle = item.title
-            val primaryKey = item.sourceKey
+            val itemTitle = playableItem.title
+            val primaryKey = primarySourceKey
             viewModelScope.launch(Dispatchers.IO) {
                 val altList = try {
                     coroutineScope {
@@ -741,6 +956,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val adapter = sourceManager.getAdapter(sourceKey) ?: return
 
         viewModelScope.launch {
+            val resolveStartedAt = System.nanoTime()
             withContext(Dispatchers.Main) {
                 isPlayLoading = true
                 playError = null
@@ -751,11 +967,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val playCacheKey = "$sourceKey:${ep.flagStr.take(200)}"
             val cachedPlay = ResultCache.getPlay(playCacheKey)
             if (cachedPlay != null) {
+                val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                 withContext(Dispatchers.Main) {
                     isPlayLoading = false
                     currentPlayResult = cachedPlay
                     storageManager.addHistory(detail.item, ep.name, cachedPlay.url)
                     reloadStorageData()
+                    notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 }
                 // Pre-fetch next episode while current plays
@@ -773,10 +991,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 isPlayLoading = false
                 if (playResult != null && playResult.url.isNotEmpty()) {
+                    val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                     ResultCache.putPlay(playCacheKey, playResult)  // Cache for instant replay
                     currentPlayResult = playResult
                     storageManager.addHistory(detail.item, ep.name, playResult.url)
                     reloadStorageData()
+                    notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 } else {
                     playError = "播放地址解析失败"
@@ -790,6 +1010,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Pre-fetch adjacent episodes in background
             prefetchAdjacentEpisodes(episodes, index, sourceKey, adapter)
         }
+    }
+
+    /**
+     * A CDN can return a URL that expires without carrying a recognizable
+     * timestamp in its query string. Do not keep serving that URL from the
+     * play cache after Media3 reports an error; the next tap will resolve it
+     * again with fresh headers/tokens.
+     */
+    fun invalidateCurrentPlayCache() {
+        val detail = currentActiveDetail() ?: return
+        val ep = detail.episodes.getOrNull(currentEpisodeIndex) ?: return
+        ResultCache.invalidatePlay("${detail.item.sourceKey}:${ep.flagStr.take(200)}")
+        currentPlayResult = null
+        playError = "视频加载失败，已清除旧地址，请点击本集重试"
     }
 
     /**
@@ -827,15 +1061,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else alternativeDetails.getOrNull(activeAlternativeIndex - 1)?.second
     }
 
-    /** Switch to next alternative source for the same episode */
-    fun switchSource() {
+    val displayedDetail: DetailResult?
+        get() = currentActiveDetail()
+
+    val availableSourceLabels: List<String>
+        get() {
+            val primary = activeDetail?.item?.sourceTitle
+                ?.ifBlank { activeDetail?.item?.sourceKey }
+                ?: "当前源"
+            return listOf(primary) + alternativeDetails.map { (key, detail) ->
+                detail.item.sourceTitle.ifBlank { key }
+            }
+        }
+
+    /** Select an exact source index for the same title/episode. */
+    fun selectSource(index: Int) {
         val total = 1 + alternativeDetails.size
-        if (total <= 1) return
-        val newIdx = (activeAlternativeIndex + 1) % total
-        activeAlternativeIndex = newIdx
+        if (index !in 0 until total) return
+        activeAlternativeIndex = index
 
         val newDetail = currentActiveDetail() ?: return
-        activeDetail = newDetail
 
         // Select the closest episode number
         val currentEpNum = currentEpisodeIndex + 1
@@ -847,10 +1092,108 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         selectEpisode(bestIdx)
     }
 
+    /** Legacy “换源” button behavior: cycle, while the chips use selectSource(). */
+    fun switchSource() {
+        val total = 1 + alternativeDetails.size
+        if (total > 1) selectSource((activeAlternativeIndex + 1) % total)
+    }
+
     fun retryPlay() {
         val detail = currentActiveDetail() ?: return
         if (detail.episodes.isNotEmpty()) {
+            val ep = detail.episodes.getOrNull(currentEpisodeIndex)
+            if (ep != null) ResultCache.invalidatePlay("${detail.item.sourceKey}:${ep.flagStr.take(200)}")
             selectEpisode(currentEpisodeIndex)
+        }
+    }
+
+    fun goBackFromPlayer() {
+        val destination = playerReturnView
+        view = destination
+        when (destination) {
+            "library" -> {
+                items = libraryItems
+                reloadStorageData()
+            }
+            "profile" -> reloadStorageData()
+        }
+    }
+
+    /**
+     * Warm the in-memory play cache for every episode. Signed URLs are
+     * intentionally rejected by ResultCache and will still be resolved fresh.
+     */
+    fun cacheCurrentEpisodes() {
+        val detail = currentActiveDetail() ?: return
+        val adapter = sourceManager.getAdapter(detail.item.sourceKey) ?: return
+        if (episodeCacheProgress != null) return
+        val episodes = detail.episodes
+        viewModelScope.launch(Dispatchers.IO) {
+            var cached = 0
+            withContext(Dispatchers.Main) {
+                episodeCacheProgress = "0/${episodes.size}"
+            }
+            episodes.forEachIndexed { index, ep ->
+                val key = "${detail.item.sourceKey}:${ep.flagStr.take(200)}"
+                if (ResultCache.getPlay(key) == null) {
+                    try {
+                        val result = withTimeout(15_000L) { adapter.play(ep.flagStr) }
+                        if (result.url.isNotBlank()) {
+                            ResultCache.putPlay(key, result)
+                            if (ResultCache.getPlay(key) != null) cached++
+                        }
+                    } catch (_: Exception) { }
+                } else {
+                    cached++
+                }
+                withContext(Dispatchers.Main) {
+                    episodeCacheProgress = "${index + 1}/${episodes.size}"
+                }
+            }
+            withContext(Dispatchers.Main) {
+                episodeCacheProgress = null
+                notice = "已缓存 $cached/${episodes.size} 集可复用播放地址"
+            }
+        }
+    }
+
+    fun downloadCurrentEpisodes() {
+        val detail = currentActiveDetail() ?: return
+        val adapter = sourceManager.getAdapter(detail.item.sourceKey) ?: return
+        if (downloadProgress != null) return
+        val episodes = detail.episodes
+        viewModelScope.launch(Dispatchers.IO) {
+            val downloader = VideoDownloadManager(getApplication())
+            var downloaded = 0
+            episodes.forEachIndexed { index, episode ->
+                withContext(Dispatchers.Main) {
+                    downloadProgress = "${index + 1}/${episodes.size}"
+                }
+                try {
+                    val play = withTimeout(20_000L) { adapter.play(episode.flagStr) }
+                    if (play.url.isNotBlank()) {
+                        val file = downloader.download(
+                            play.url,
+                            play.headers,
+                            play.referer,
+                            detail.item.title,
+                            episode.name
+                        )
+                        if (file != null) downloaded++
+                    }
+                } catch (_: Exception) {
+                    SourceLogManager.error(
+                        adapter.key,
+                        "download",
+                        "download failed",
+                        "episode=${episode.name}"
+                    )
+                }
+            }
+            withContext(Dispatchers.Main) {
+                downloadProgress = null
+                notice = "已下载 $downloaded/${episodes.size} 集到本地视频目录"
+            }
         }
     }
 
@@ -1057,10 +1400,10 @@ fun HomeView(vm: MainViewModel) {
                             }
                             item(key = "section_row_${section.key}") {
                                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp)) {
-                                    items(
+                                    lazyItemsIndexed(
                                         items = section.items.take(12),
-                                        key = { item -> "${item.sourceKey}:${item.id}" }
-                                    ) { item ->
+                                        key = { index, item -> "${section.key}:${item.sourceKey}:${item.id}:$index" }
+                                    ) { _, item ->
                                         MovieCard(item, Modifier.width(140.dp).padding(4.dp)) { vm.openMovie(item) }
                                     }
                                 }
@@ -1148,13 +1491,14 @@ fun LibraryView(vm: MainViewModel) {
 // ── Anime Player Screen matching Screenshot 2 spec ──
 @Composable
 fun PlayerViewScreen(vm: MainViewModel) {
-    val detail = vm.activeDetail ?: return
+    val detail = vm.displayedDetail ?: return
     val currentEp = detail.episodes.getOrNull(vm.currentEpisodeIndex)
     val isFav = vm.isFavorite(detail.item)
     val chunkSize = 30
     val episodeChunks = remember(detail.episodes) { detail.episodes.chunked(chunkSize) }
     var selectedChunkIndex by remember(detail.episodes) { mutableStateOf(0) }
     var expandedDescription by remember { mutableStateOf(false) }
+    var showComments by remember(detail.item.id) { mutableStateOf(false) }
     val totalSources = 1 + vm.alternativeDetails.size
 
     Column(Modifier.fillMaxSize().background(AppColors.bg)) {
@@ -1180,8 +1524,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     onNextEpisode = if (vm.currentEpisodeIndex < detail.episodes.size - 1) {
                         { vm.selectEpisode(vm.currentEpisodeIndex + 1) }
                     } else null,
-                    onBack = { vm.view = "home" },
-                    onError = { vm.currentPlayResult = null; vm.playError = "视频加载失败，请尝试换源或重试" }
+                    onBack = { vm.goBackFromPlayer() },
+                    onError = { vm.invalidateCurrentPlayCache() }
                 )
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1216,7 +1560,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
 
             // Top Left Floating Back Button
             IconButton(
-                onClick = { vm.view = "home" },
+                onClick = { vm.goBackFromPlayer() },
                 modifier = Modifier
                     .padding(8.dp)
                     .align(Alignment.TopStart)
@@ -1237,6 +1581,45 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     Text("评论 99+", color = AppColors.muted, fontSize = 15.sp)
                 }
                 Spacer(Modifier.height(12.dp))
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "评论区",
+                        color = AppColors.cyan,
+                        fontSize = 14.sp,
+                        modifier = Modifier.clickable { showComments = !showComments }
+                    )
+                    Text("${vm.comments.size} 条本地评论", color = AppColors.muted, fontSize = 12.sp)
+                }
+                if (showComments) {
+                    OutlinedTextField(
+                        value = vm.commentDraft,
+                        onValueChange = { vm.commentDraft = it },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        placeholder = { Text("说点什么…") },
+                        trailingIcon = {
+                            TextButton(onClick = { vm.addComment() }) {
+                                Text("发布", color = AppColors.cyan)
+                            }
+                        },
+                        maxLines = 4
+                    )
+                    vm.comments.takeLast(5).forEach { comment ->
+                        Text(
+                            comment,
+                            color = AppColors.text,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
             }
 
             // Title and Brief
@@ -1315,13 +1698,39 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         enabled = totalSources > 1,
                         tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
                     ) { vm.switchSource() }
-                    ActionButton(Icons.Default.Star, "缓存番剧", enabled = false) {}
+                    ActionButton(
+                        Icons.Default.Star,
+                        vm.downloadProgress?.let { "下载 $it" }
+                            ?: vm.episodeCacheProgress?.let { "预解析 $it" }
+                            ?: "下载番剧",
+                        enabled = vm.downloadProgress == null && vm.episodeCacheProgress == null
+                    ) { vm.downloadCurrentEpisodes() }
                     ActionButton(
                         if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         if (isFav) "已追番" else "追番",
                         tint = if (isFav) AppColors.rose else AppColors.text
                     ) { vm.toggleFavorite(detail.item) }
                     ActionButton(Icons.Default.Share, "分享", enabled = false) {}
+                }
+                if (totalSources > 1) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("选择播放源", color = AppColors.muted, fontSize = 12.sp)
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        lazyItemsIndexed(vm.availableSourceLabels) { index, label ->
+                            FilterChip(
+                                selected = index == vm.activeAlternativeIndex,
+                                onClick = { vm.selectSource(index) },
+                                label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
+                                    selectedLabelColor = AppColors.cyan
+                                )
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.height(16.dp))
             }
@@ -1512,10 +1921,10 @@ fun ProfileView(vm: MainViewModel) {
         } else {
             items(vm.historyList) { history ->
                 Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .clickable { vm.openMovie(history.item) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable { vm.openMovie(history.item, history.episodeName) },
                     colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
                 ) {
                     Row(
