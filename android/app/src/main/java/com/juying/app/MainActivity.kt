@@ -17,10 +17,13 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed as lazyItemsIndexed
+import java.util.concurrent.atomic.AtomicInteger
+
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -56,21 +59,70 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import java.util.concurrent.atomic.AtomicInteger
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import java.io.File
+import java.util.Calendar
 
-// ── Color scheme matching web globals.css ──
-object AppColors {
-    val bg = Color(0xFF090E17)
-    val panel = Color(0xFF101926)
-    val panel2 = Color(0xFF162436)
-    val text = Color(0xFFF3F7FC)
-    val muted = Color(0xFF8B9AAF)
-    val cyan = Color(0xFF43D5E8)
-    val purple = Color(0xFFA855F7)
-    val orange = Color(0xFFFFB257)
-    val rose = Color(0xFFFF7F9E)
-    val green = Color(0xFF4ADE80)
+data class CustomColors(
+    val bg: Color,
+    val panel: Color,
+    val panel2: Color,
+    val text: Color,
+    val muted: Color,
+    val cyan: Color,
+    val purple: Color,
+    val orange: Color,
+    val rose: Color,
+    val green: Color,
+    val isDark: Boolean
+)
+
+val LocalCustomColors = staticCompositionLocalOf {
+    CustomColors(
+        bg = Color(0xFF090E17),
+        panel = Color(0xFF101926),
+        panel2 = Color(0xFF162436),
+        text = Color(0xFFF3F7FC),
+        muted = Color(0xFF8B9AAF),
+        cyan = Color(0xFF43D5E8),
+        purple = Color(0xFFA855F7),
+        orange = Color(0xFFFFB257),
+        rose = Color(0xFFFF7F9E),
+        green = Color(0xFF4ADE80),
+        isDark = true
+    )
 }
+
+object AppColors {
+    val bg: Color @Composable get() = LocalCustomColors.current.bg
+    val panel: Color @Composable get() = LocalCustomColors.current.panel
+    val panel2: Color @Composable get() = LocalCustomColors.current.panel2
+    val text: Color @Composable get() = LocalCustomColors.current.text
+    val muted: Color @Composable get() = LocalCustomColors.current.muted
+    val cyan: Color @Composable get() = LocalCustomColors.current.cyan
+    val purple: Color @Composable get() = LocalCustomColors.current.purple
+    val orange: Color @Composable get() = LocalCustomColors.current.orange
+    val rose: Color @Composable get() = LocalCustomColors.current.rose
+    val green: Color @Composable get() = LocalCustomColors.current.green
+}
+
+fun isValidEmail(email: String): Boolean {
+    val trimmed = email.trim()
+    return trimmed.contains("@") && trimmed.contains(".") &&
+            Regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$").matches(trimmed)
+}
+
+fun isPasswordStrong(password: String): Boolean {
+    if (password.length < 8) return false
+    var types = 0
+    if (password.any { it.isUpperCase() }) types++
+    if (password.any { it.isLowerCase() }) types++
+    if (password.any { it.isDigit() }) types++
+    if (password.any { !it.isLetterOrDigit() }) types++
+    return types >= 3
+}
+
 
 @Composable
 fun LoadingSpinner(modifier: Modifier = Modifier, color: Color = AppColors.cyan) {
@@ -134,6 +186,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var commentDraft by mutableStateOf("")
     var comments by mutableStateOf<List<String>>(emptyList())
 
+    // Theme & Account Settings State
+    var themeMode by mutableStateOf(storageManager.getThemeMode())
+    var userEmail by mutableStateOf(storageManager.getUserEmail())
+    var userPassword by mutableStateOf(storageManager.getUserPassword())
+    var userAvatarIndex by mutableStateOf(storageManager.getUserAvatar())
+
+    fun updateThemeMode(mode: String) {
+        themeMode = mode
+        storageManager.setThemeMode(mode)
+    }
+
+    fun updateUserEmail(email: String) {
+        userEmail = email
+        storageManager.setUserEmail(email)
+    }
+
+    fun updateUserPassword(password: String) {
+        userPassword = password
+        storageManager.setUserPassword(password)
+    }
+
+    fun updateUserAvatar(index: Int) {
+        userAvatarIndex = index
+        storageManager.setUserAvatar(index)
+    }
+
+    fun getDownloadedFilesList(): List<Pair<String, String>> {
+        val root = getApplication<Application>().getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: getApplication<Application>().filesDir
+        val folder = File(root, "lanerc")
+        if (!folder.exists() || !folder.isDirectory) return emptyList()
+        val result = mutableListOf<Pair<String, String>>()
+        folder.listFiles()?.forEach { animeDir ->
+            if (animeDir.isDirectory) {
+                animeDir.listFiles()?.forEach { epFile ->
+                    if (epFile.extension in listOf("mp4", "m3u8")) {
+                        val sizeMb = String.format("%.1f MB", epFile.length() / (1024.0 * 1024.0))
+                        result.add(Pair("${animeDir.name} - ${epFile.nameWithoutExtension}", sizeMb))
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    fun allPoolItems(): List<SourceItem> {
+        return (cachedHomePool + homeSections.flatMap { it.items }).distinctBy { it.id }
+    }
+
     fun addComment() {
         val text = commentDraft.trim()
         if (text.isNotEmpty()) {
@@ -141,6 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             commentDraft = ""
         }
     }
+
 
     // ── Library filters matching user spec ──
     var activeKind by mutableStateOf("全部")
@@ -214,19 +315,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadHomeInternal() {
-        val presetSections = mutableMapOf(
-            "🔥 热门推荐" to mutableListOf<SourceItem>(),
-            "🇯🇵 日漫精选" to mutableListOf<SourceItem>(),
-            "🇨🇳 国漫精粹" to mutableListOf<SourceItem>(),
-            "🎬 剧场版/电影" to mutableListOf<SourceItem>(),
-            "✨ 最新更新" to mutableListOf<SourceItem>()
+        val presetSections = linkedMapOf(
+            "热门推荐" to mutableListOf<SourceItem>(),
+            "最新更新" to mutableListOf<SourceItem>(),
+            "日漫精选" to mutableListOf<SourceItem>(),
+            "国漫精粹" to mutableListOf<SourceItem>(),
+            "剧场版/电影" to mutableListOf<SourceItem>()
         )
 
         fun buildHomeSectionsList(): List<HomeSection> {
             return presetSections.mapNotNull { (title, list) ->
-                val merged = SourceManager.mergeSearchItems(list)
-                if (merged.isEmpty()) null
-                else HomeSection(title = title, key = title, items = merged)
+                val deduped = list.distinctBy { SourceManager.normalizeTitle(it.title) }
+                if (deduped.isEmpty()) null
+                else {
+                    HomeSection(title = title, key = title, items = deduped.take(16))
+                }
             }
         }
 
@@ -237,13 +340,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (cachedHomePool.isNotEmpty()) {
                 cachedHomePool.forEach { item ->
                     val kind = item.kind + " " + item.title
-                    when {
-                        kind.contains("日漫") || kind.contains("日本") -> presetSections["🇯🇵 日漫精选"]?.add(item)
-                        kind.contains("国漫") || kind.contains("国产") -> presetSections["🇨🇳 国漫精粹"]?.add(item)
-                        kind.contains("剧场") || kind.contains("电影") -> presetSections["🎬 剧场版/电影"]?.add(item)
-                        else -> {
-                            presetSections["🔥 热门推荐"]?.add(item)
-                            presetSections["✨ 最新更新"]?.add(item)
+                    val targetKey = when {
+                        kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
+                        kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
+                        kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
+                        else -> "热门推荐"
+                    }
+                    val targetList = presetSections[targetKey]
+                    if (targetList != null) {
+                        val norm = SourceManager.normalizeTitle(item.title)
+                        if (targetList.none { SourceManager.normalizeTitle(it.title) == norm }) {
+                            targetList.add(item)
+                        }
+                    }
+                    if (targetKey == "热门推荐") {
+                        val updateList = presetSections["最新更新"]
+                        if (updateList != null) {
+                            val norm = SourceManager.normalizeTitle(item.title)
+                            if (updateList.none { SourceManager.normalizeTitle(it.title) == norm }) {
+                                updateList.add(item)
+                            }
                         }
                     }
                 }
@@ -256,7 +372,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Concurrent streaming: each source populates the preset sections as data arrives
+        // Concurrent streaming: silently append new items to the right side of presetSections
+        var lastUIUpdateMs = 0L
         withContext(Dispatchers.IO) {
             coroutineScope {
                 adapters.forEach { adapter ->
@@ -284,25 +401,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             synchronized(presetSections) {
                                 fetchedItems.forEach { item ->
                                     val kind = item.kind + " " + item.title + " " + item.tags.joinToString(" ")
-                                    when {
-                                        kind.contains("日漫") || kind.contains("日本") -> presetSections["🇯🇵 日漫精选"]?.add(item)
-                                        kind.contains("国漫") || kind.contains("国产") -> presetSections["🇨🇳 国漫精粹"]?.add(item)
-                                        kind.contains("剧场") || kind.contains("电影") -> presetSections["🎬 剧场版/电影"]?.add(item)
-                                        else -> {
-                                            presetSections["🔥 热门推荐"]?.add(item)
-                                            presetSections["✨ 最新更新"]?.add(item)
+                                    val targetKey = when {
+                                        kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
+                                        kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
+                                        kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
+                                        else -> "热门推荐"
+                                    }
+                                    val targetList = presetSections[targetKey]
+                                    if (targetList != null) {
+                                        val norm = SourceManager.normalizeTitle(item.title)
+                                        if (targetList.none { SourceManager.normalizeTitle(it.title) == norm }) {
+                                            targetList.add(item)
+                                        }
+                                    }
+                                    if (targetKey == "热门推荐") {
+                                        val updateList = presetSections["最新更新"]
+                                        if (updateList != null) {
+                                            val norm = SourceManager.normalizeTitle(item.title)
+                                            if (updateList.none { SourceManager.normalizeTitle(it.title) == norm }) {
+                                                updateList.add(item)
+                                            }
                                         }
                                     }
                                 }
                             }
 
-                            val updatedList = synchronized(presetSections) { buildHomeSectionsList() }
-                            withContext(Dispatchers.Main) {
-                                homeSections = updatedList
-                                cachedHomePool = updatedList.flatMap { it.items }
-                                if (!isSearchActive) items = cachedHomePool
-                                notice = "已成功加载 ${updatedList.size} 个视频分区"
-                                loading = false
+                            val now = System.currentTimeMillis()
+                            if (now - lastUIUpdateMs > 1500L || homeSections.isEmpty()) {
+                                lastUIUpdateMs = now
+                                val updatedList = synchronized(presetSections) { buildHomeSectionsList() }
+                                withContext(Dispatchers.Main) {
+                                    homeSections = updatedList
+                                    cachedHomePool = updatedList.flatMap { it.items }
+                                    if (!isSearchActive) items = cachedHomePool
+                                    notice = "已为你动态加载 ${updatedList.sumOf { it.items.size }} 部精彩作品"
+                                    loading = false
+                                }
                             }
                         }
                     }
@@ -501,20 +635,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loading = false
                 val finalItems = items
                 if (finalItems.isEmpty()) {
-                    notice = "未找到「$keyword」匹配内容，试试短一点的关键词"
+                    notice = "未找到「$keyword」匹配内容，试试其他关键词"
                 } else {
-                    // Cache the final merged result
                     ResultCache.putSearch(cacheKey, finalItems)
                 }
             }
         }
     }
 
+    fun executeSearch(keyword: String) {
+        val q = keyword.trim()
+        if (q.isBlank()) return
+        query = q
+        view = "search_result"
+        search(q)
+    }
+
     fun clearSearch() {
         query = ""
         isSearchActive = false
-        items = cachedHomePool
-        notice = "已清除搜索"
+        items = emptyList()
+        notice = ""
     }
 
     fun applyFilter(
@@ -863,16 +1004,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             try { adapter.detail(playableItem.id) } catch (_: Exception) { null }
                         } else null
                     } ?: DetailResult(playableItem, emptyList())
-                    ResultCache.putDetail(detailCacheKey, fresh)
+                    if (fresh.episodes.isNotEmpty()) ResultCache.putDetail(detailCacheKey, fresh)
                     fresh
                 }
+
+            // Fallback for expired/broken source URL from history or favorites
+            var finalDetailResult = detailResult
+            if (finalDetailResult.episodes.isEmpty()) {
+                val fallback = withContext(Dispatchers.IO) {
+                    val targetTitle = SourceManager.normalizeTitle(playableItem.title)
+                    sourceManager.allAdapters().firstNotNullOfOrNull { alt ->
+                        if (alt.key == primarySourceKey) null
+                        else {
+                            try {
+                                val altItems = alt.search(playableItem.title, 1)
+                                val match = altItems.firstOrNull { SourceManager.normalizeTitle(it.title) == targetTitle }
+                                if (match != null) {
+                                    val d = alt.detail(match.id)
+                                    if (d.episodes.isNotEmpty()) d else null
+                                } else null
+                            } catch (_: Exception) { null }
+                        }
+                    }
+                }
+                if (fallback != null) {
+                    finalDetailResult = fallback
+                }
+            }
 
             // Show player immediately — don't wait for alt sources
             withContext(Dispatchers.Main) {
                 loading = false
-                activeDetail = detailResult
+                activeDetail = finalDetailResult
                 activeAlternativeIndex = 0
-                currentEpisodeIndex = detailResult.episodes.indexOfFirst { ep ->
+                currentEpisodeIndex = finalDetailResult.episodes.indexOfFirst { ep ->
                     pendingEpisodeName?.let { preferred ->
                         ep.name.equals(preferred, ignoreCase = true) ||
                             ep.name.contains(preferred, ignoreCase = true) ||
@@ -881,7 +1046,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }.takeIf { it >= 0 } ?: 0
                 pendingEpisodeName = null
                 view = "player"
-                if (detailResult.episodes.isNotEmpty()) {
+                if (finalDetailResult.episodes.isNotEmpty()) {
                     selectEpisode(currentEpisodeIndex)
                 } else {
                     notice = "该作品暂无可用选集"
@@ -1078,6 +1243,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSource(index: Int) {
         val total = 1 + alternativeDetails.size
         if (index !in 0 until total) return
+        currentPlayResult = null
+        isPlayLoading = true
+        playError = null
         activeAlternativeIndex = index
 
         val newDetail = currentActiveDetail() ?: return
@@ -1086,9 +1254,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentEpNum = currentEpisodeIndex + 1
         val bestIdx = newDetail.episodes.indexOfFirst {
             it.name.toIntOrNull() == currentEpNum
-        }.let { if (it >= 0) it else 0.coerceAtMost(newDetail.episodes.size - 1) }
+        }.let { if (it >= 0) it else 0.coerceAtMost((newDetail.episodes.size - 1).coerceAtLeast(0)) }
         currentEpisodeIndex = bestIdx
-        playError = null
         selectEpisode(bestIdx)
     }
 
@@ -1232,85 +1399,296 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun JuyingApp(vm: MainViewModel) {
-    MaterialTheme(colorScheme = darkColorScheme(
-        background = AppColors.bg,
-        surface = AppColors.panel,
-        primary = AppColors.cyan,
-    )) {
-        Scaffold(
-            bottomBar = {
-                if (vm.view != "player") {
-                    NavigationBar(containerColor = AppColors.panel) {
-                        NavigationBarItem(
-                            selected = vm.view == "home",
-                            onClick = { vm.view = "home" },
-                            icon = { Icon(Icons.Default.Home, null) },
-                            label = { Text("首页") }
-                        )
-                        NavigationBarItem(
-                            selected = vm.view == "library",
-                            onClick = { vm.view = "library"; vm.fetchLibrary() },
-                            icon = { Icon(Icons.Default.List, null) },
-                            label = { Text("片库") }
-                        )
-                        NavigationBarItem(
-                            selected = vm.view == "profile",
-                            onClick = { vm.view = "profile"; vm.reloadStorageData(); vm.reloadSourcesState() },
-                            icon = { Icon(Icons.Default.Person, null) },
-                            label = { Text("我的") }
-                        )
+    val systemDark = isSystemInDarkTheme()
+    val isDark = when (vm.themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> systemDark
+    }
+
+    val customColors = if (isDark) {
+        CustomColors(
+            bg = Color(0xFF090E17),
+            panel = Color(0xFF101926),
+            panel2 = Color(0xFF162436),
+            text = Color(0xFFF3F7FC),
+            muted = Color(0xFF8B9AAF),
+            cyan = Color(0xFF43D5E8),
+            purple = Color(0xFFA855F7),
+            orange = Color(0xFFFFB257),
+            rose = Color(0xFFFF7F9E),
+            green = Color(0xFF4ADE80),
+            isDark = true
+        )
+    } else {
+        CustomColors(
+            bg = Color(0xFFF1F5F9),
+            panel = Color(0xFFFFFFFF),
+            panel2 = Color(0xFFF8FAFC),
+            text = Color(0xFF0F172A),
+            muted = Color(0xFF64748B),
+            cyan = Color(0xFF0284C7),
+            purple = Color(0xFF9333EA),
+            orange = Color(0xFFEA580C),
+            rose = Color(0xFFE11D48),
+            green = Color(0xFF16A34A),
+            isDark = false
+        )
+    }
+
+    CompositionLocalProvider(LocalCustomColors provides customColors) {
+        MaterialTheme(
+            colorScheme = if (isDark) {
+                darkColorScheme(
+                    background = customColors.bg,
+                    surface = customColors.panel,
+                    primary = customColors.cyan,
+                )
+            } else {
+                lightColorScheme(
+                    background = customColors.bg,
+                    surface = customColors.panel,
+                    primary = customColors.cyan,
+                )
+            }
+        ) {
+            Scaffold(
+                bottomBar = {
+                    if (vm.view != "player" && !vm.view.startsWith("profile_") && vm.view != "settings") {
+                        NavigationBar(containerColor = AppColors.panel) {
+                            NavigationBarItem(
+                                selected = vm.view == "home",
+                                onClick = { vm.view = "home" },
+                                icon = { Icon(Icons.Default.Home, null) },
+                                label = { Text("首页") }
+                            )
+                            NavigationBarItem(
+                                selected = vm.view == "library",
+                                onClick = { vm.view = "library"; vm.fetchLibrary() },
+                                icon = { Icon(Icons.Default.List, null) },
+                                label = { Text("片库") }
+                            )
+                            NavigationBarItem(
+                                selected = vm.view == "schedule",
+                                onClick = { vm.view = "schedule" },
+                                icon = { Icon(Icons.Default.DateRange, null) },
+                                label = { Text("周表") }
+                            )
+                            NavigationBarItem(
+                                selected = vm.view == "leaderboard",
+                                onClick = { vm.view = "leaderboard" },
+                                icon = { Icon(Icons.Default.Star, null) },
+                                label = { Text("排行榜") }
+                            )
+                            NavigationBarItem(
+                                selected = vm.view == "profile",
+                                onClick = { vm.view = "profile"; vm.reloadStorageData(); vm.reloadSourcesState() },
+                                icon = { Icon(Icons.Default.Person, null) },
+                                label = { Text("我的") }
+                            )
+                        }
                     }
                 }
-            }
-        ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding).background(AppColors.bg)) {
-                when (vm.view) {
-                    "home" -> HomeView(vm)
-                    "library" -> LibraryView(vm)
-                    "player" -> PlayerViewScreen(vm)
-                    "profile" -> ProfileView(vm)
+            ) { padding ->
+                Box(Modifier.fillMaxSize().padding(padding).background(AppColors.bg)) {
+                    when (vm.view) {
+                        "home" -> HomeView(vm)
+                        "search_result" -> SearchResultScreen(vm)
+                        "library" -> LibraryView(vm)
+                        "schedule" -> WeeklyScheduleScreen(vm)
+                        "leaderboard" -> LeaderboardScreen(vm)
+                        "profile" -> ProfileView(vm)
+                        "profile_history" -> HistoryScreen(vm)
+                        "profile_favorites" -> FavoritesScreen(vm)
+                        "profile_downloads" -> OfflineCacheScreen(vm)
+                        "settings" -> SettingsScreen(vm)
+                        "player" -> PlayerViewScreen(vm)
+                    }
                 }
             }
         }
     }
 }
 
+
 @Composable
 fun HomeView(vm: MainViewModel) {
+    val avatars = listOf("👤", "🦊", "🐲", "🐱")
+    val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
+    var selectedCategory by remember { mutableStateOf("精选") }
+
+    val featuredItems = remember(vm.homeSections.firstOrNull()?.items?.firstOrNull()?.id) {
+        vm.homeSections.flatMap { it.items }.distinctBy { SourceManager.normalizeTitle(it.title) }.take(5)
+    }
+
     Column(Modifier.fillMaxSize()) {
-        // Search bar
-        OutlinedTextField(
-            value = vm.query,
-            onValueChange = {
-                vm.query = it
-                if (it.isBlank()) vm.clearSearch()
-            },
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            placeholder = { Text("搜索全网视频 (如: 凡人修仙传 / 海贼王)...", color = AppColors.muted, fontSize = 13.sp) },
-            leadingIcon = { Icon(Icons.Default.Search, null, tint = AppColors.muted) },
-            trailingIcon = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (vm.query.isNotEmpty()) {
-                        IconButton({ vm.clearSearch() }) {
-                            Icon(Icons.Default.Close, "清除", tint = AppColors.muted)
+        // ── TOP BAR (Avatar | Compact Search Bar | History Icon 截图1) ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // User Avatar on Left
+            Surface(
+                shape = CircleShape,
+                color = AppColors.cyan.copy(alpha = 0.2f),
+                modifier = Modifier
+                    .size(36.dp)
+                    .clickable { vm.view = "profile" }
+            ) {
+                AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            // Compact Search Bar in Middle
+            OutlinedTextField(
+                value = vm.query,
+                onValueChange = {
+                    vm.query = it
+                    if (it.isBlank()) vm.clearSearch()
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp),
+                placeholder = { Text("今天你想看些什么？", color = AppColors.muted, fontSize = 12.sp) },
+                leadingIcon = { Icon(Icons.Default.Search, null, tint = AppColors.muted, modifier = Modifier.size(18.dp)) },
+                trailingIcon = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(end = 4.dp)
+                    ) {
+                        if (vm.query.isNotEmpty()) {
+                            IconButton(onClick = { vm.clearSearch() }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Default.Close, "清除", tint = AppColors.muted, modifier = Modifier.size(15.dp))
+                            }
+                            Spacer(Modifier.width(2.dp))
+                        }
+                        val arrowTint = if (vm.query.isNotBlank()) AppColors.cyan else AppColors.muted.copy(alpha = 0.6f)
+                        IconButton(
+                            onClick = {
+                                if (vm.query.isNotBlank()) vm.executeSearch(vm.query)
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                    IconButton({ vm.search(vm.query) }) {
-                        Icon(Icons.Default.ArrowForward, "搜索", tint = AppColors.cyan)
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { vm.executeSearch(vm.query) }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = AppColors.cyan,
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.12f),
+                    focusedTextColor = AppColors.text,
+                    unfocusedTextColor = AppColors.text,
+                ),
+                shape = RoundedCornerShape(22.dp)
+            )
+
+            Spacer(Modifier.width(8.dp))
+
+            // History Clock Icon on Right (截图1 风格)
+            IconButton(
+                onClick = { vm.view = "profile_history" },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Text("🕒", fontSize = 20.sp)
+            }
+        }
+
+        // ── CATEGORY TABS (精选 | 日漫 | 剧场版) ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            listOf("精选", "日漫", "剧场版").forEach { category ->
+                val isSelected = selectedCategory == category
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clickable {
+                        selectedCategory = category
+                        if (category != "精选") {
+                            vm.applyFilter(kind = category)
+                            vm.view = "library"
+                        }
+                    }
+                ) {
+                    Text(
+                        category,
+                        color = if (isSelected) AppColors.cyan else AppColors.muted,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 15.sp
+                    )
+                    if (isSelected) {
+                        Spacer(Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(18.dp)
+                                .height(3.dp)
+                                .background(AppColors.cyan, RoundedCornerShape(2.dp))
+                        )
                     }
                 }
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { vm.search(vm.query) }),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = AppColors.cyan,
-                unfocusedBorderColor = Color.White.copy(alpha = 0.1f),
-                focusedTextColor = AppColors.text,
-                unfocusedTextColor = AppColors.text,
-            ),
-            shape = RoundedCornerShape(13.dp)
-        )
+            }
+        }
+
+        // Active Playback Banner (Jump back to player)
+        val activeDetail = vm.activeDetail
+        var showPlaybackBanner by remember { mutableStateOf(true) }
+        if (activeDetail != null && showPlaybackBanner) {
+            val currentEpName = activeDetail.episodes.getOrNull(vm.currentEpisodeIndex)?.name ?: "第1集"
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                    .clickable { vm.view = "player" },
+                shape = RoundedCornerShape(10.dp),
+                color = AppColors.cyan.copy(alpha = 0.15f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "正在播放: ${activeDetail.item.title} ($currentEpName)",
+                        color = AppColors.text,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = AppColors.cyan,
+                        modifier = Modifier.clickable { vm.view = "player" }
+                    ) {
+                        Text(
+                            "继续播放",
+                            color = Color.Black,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = { showPlaybackBanner = false },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭", tint = AppColors.muted, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
 
         // Notice & Loading indicator
         Row(
@@ -1326,35 +1704,7 @@ fun HomeView(vm: MainViewModel) {
             }
         }
 
-        // Render search results grid when active, otherwise render home sections
-        if (vm.isSearchActive || (vm.query.isNotBlank() && vm.items.isNotEmpty())) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("搜索结果 (${vm.items.size})", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                TextButton(onClick = { vm.clearSearch() }) {
-                    Text("返回首页推荐", color = AppColors.cyan, fontSize = 12.sp)
-                }
-            }
-
-            if (vm.items.isEmpty() && !vm.loading) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("未搜到相关作品，请更换关键字重试", color = AppColors.muted)
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    contentPadding = PaddingValues(8.dp)
-                ) {
-                    items(vm.items) { item ->
-                        MovieCard(item, Modifier.padding(4.dp)) { vm.openMovie(item) }
-                    }
-                }
-            }
-        } else {
-            if (vm.loading && vm.homeSections.isEmpty()) {
+        if (vm.loading && vm.homeSections.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
@@ -1374,6 +1724,62 @@ fun HomeView(vm: MainViewModel) {
                 }
             } else {
                 LazyColumn {
+                    // ── CAROUSEL BANNER CARD (截图2 风格) ──
+                    if (featuredItems.isNotEmpty()) {
+                        item(key = "home_carousel_banner") {
+                            HomeCarouselBanner(featuredItems) { vm.openMovie(it) }
+                        }
+                    }
+
+                    // ── QUICK NAV CARDS (热度排行榜 | 番剧排期表) ──
+                    item(key = "home_quick_nav") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                                    .clickable { vm.view = "leaderboard" },
+                                shape = RoundedCornerShape(12.dp),
+                                color = AppColors.panel
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("热度排行榜", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                }
+                            }
+
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                                    .clickable { vm.view = "schedule" },
+                                shape = RoundedCornerShape(12.dp),
+                                color = AppColors.panel
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("番剧排期表", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // ── SECTIONS ──
                     vm.homeSections.forEach { section ->
                         if (section.items.isNotEmpty()) {
                             item(key = "section_header_${section.key}") {
@@ -1401,15 +1807,14 @@ fun HomeView(vm: MainViewModel) {
                             item(key = "section_row_${section.key}") {
                                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp)) {
                                     lazyItemsIndexed(
-                                        items = section.items.take(12),
+                                        items = section.items.take(16),
                                         key = { index, item -> "${section.key}:${item.sourceKey}:${item.id}:$index" }
                                     ) { _, item ->
-                                        MovieCard(item, Modifier.width(140.dp).padding(4.dp)) { vm.openMovie(item) }
+                                        MovieCard(item, Modifier.width(135.dp).padding(4.dp)) { vm.openMovie(item) }
                                     }
                                 }
                             }
                         }
-                    }
                 }
             }
         }
@@ -1458,7 +1863,7 @@ fun LibraryView(vm: MainViewModel) {
                 columns = GridCells.Fixed(3),
                 contentPadding = PaddingValues(8.dp)
             ) {
-                itemsIndexed(
+                gridItemsIndexed(
                     items = vm.items,
                     key = { index, item -> "${item.sourceKey}:${item.id}:$index" }
                 ) { index, item ->
@@ -1488,66 +1893,59 @@ fun LibraryView(vm: MainViewModel) {
     }
 }
 
-// ── Anime Player Screen matching Screenshot 2 spec ──
 @Composable
 fun PlayerViewScreen(vm: MainViewModel) {
-    val detail = vm.displayedDetail ?: return
-    val currentEp = detail.episodes.getOrNull(vm.currentEpisodeIndex)
+    val detail = vm.displayedDetail ?: vm.activeDetail ?: return
+    var expandedDescription by remember { mutableStateOf(false) }
+    var selectedChunkIndex by remember { mutableStateOf(0) }
+    var activeTab by remember { mutableStateOf("details") }
+    var showAllEpisodesModal by remember { mutableStateOf(false) }
+
+    val currentEpisode = detail.episodes.getOrNull(vm.currentEpisodeIndex)
     val isFav = vm.isFavorite(detail.item)
+    val totalSources = vm.alternativeDetails.size.coerceAtLeast(1)
+
     val chunkSize = 30
     val episodeChunks = remember(detail.episodes) { detail.episodes.chunked(chunkSize) }
-    var selectedChunkIndex by remember(detail.episodes) { mutableStateOf(0) }
-    var expandedDescription by remember { mutableStateOf(false) }
-    var showComments by remember(detail.item.id) { mutableStateOf(false) }
-    val totalSources = 1 + vm.alternativeDetails.size
 
-    Column(Modifier.fillMaxSize().background(AppColors.bg)) {
-        // ── Top 16:9 Video Player Container ──
+    if (showAllEpisodesModal) {
+        AllEpisodesModal(vm) { showAllEpisodesModal = false }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // ── Video Player Area ──
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
                 .background(Color.Black)
         ) {
-            val playRes = vm.currentPlayResult
-            if (playRes != null && playRes.url.isNotEmpty()) {
+            val playResult = vm.currentPlayResult
+            if (playResult != null && playResult.url.isNotBlank()) {
                 EmbeddedVideoPlayer(
-                    url = playRes.url,
-                    type = playRes.type,
-                    headers = playRes.headers,
-                    referer = playRes.referer,
+                    url = playResult.url,
+                    type = playResult.type,
+                    headers = playResult.headers,
+                    referer = playResult.referer,
                     title = detail.item.title,
-                    episodeName = currentEp?.name ?: "",
-                    episodes = detail.episodes,
-                    currentEpisodeIndex = vm.currentEpisodeIndex,
-                    onSelectEpisode = { index -> vm.selectEpisode(index) },
+                    episodeName = currentEpisode?.name.orEmpty(),
+                    onBack = { vm.goBackFromPlayer() },
                     onNextEpisode = if (vm.currentEpisodeIndex < detail.episodes.size - 1) {
                         { vm.selectEpisode(vm.currentEpisodeIndex + 1) }
-                    } else null,
-                    onBack = { vm.goBackFromPlayer() },
-                    onError = { vm.invalidateCurrentPlayCache() }
+                    } else null
                 )
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         if (vm.isPlayLoading) {
                             LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
-                            Spacer(Modifier.height(10.dp))
-                            Text("正在解析视频流...", color = AppColors.text, fontSize = 13.sp)
-                        } else if (vm.playError != null) {
-                            Icon(Icons.Default.Info, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(48.dp))
                             Spacer(Modifier.height(8.dp))
-                            Text(vm.playError ?: "播放失败", color = AppColors.muted, fontSize = 13.sp)
-                            Spacer(Modifier.height(12.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                TextButton(onClick = { vm.retryPlay() }) {
-                                    Text("重试", color = AppColors.cyan)
-                                }
-                                if (vm.alternativeDetails.isNotEmpty()) {
-                                    TextButton(onClick = { vm.switchSource() }) {
-                                        Text("换源播放", color = AppColors.cyan)
-                                    }
-                                }
+                            Text(vm.notice, color = AppColors.muted, fontSize = 13.sp)
+                        } else if (vm.playError != null) {
+                            Text(vm.playError.orEmpty(), color = AppColors.rose, fontSize = 13.sp)
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(onClick = { vm.retryPlay() }) {
+                                Text("重试播放", color = AppColors.cyan)
                             }
                         } else {
                             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted, modifier = Modifier.size(48.dp))
@@ -1557,208 +1955,351 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     }
                 }
             }
-
-            // Top Left Floating Back Button
-            IconButton(
-                onClick = { vm.goBackFromPlayer() },
-                modifier = Modifier
-                    .padding(8.dp)
-                    .align(Alignment.TopStart)
-                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-            ) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = Color.White)
-            }
         }
 
-        // ── Bottom Content Area ──
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-            // Tab row: 动漫 | 评论
-            item {
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("动漫", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Spacer(Modifier.width(16.dp))
-                    Text("评论 99+", color = AppColors.muted, fontSize = 15.sp)
-                }
-                Spacer(Modifier.height(12.dp))
-            }
-
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+        // ── Navigation Tabs below Player (动漫 | 评论) ──
+        TabRow(
+            selectedTabIndex = if (activeTab == "details") 0 else 1,
+            containerColor = AppColors.panel,
+            contentColor = AppColors.cyan,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Tab(
+                selected = activeTab == "details",
+                onClick = { activeTab = "details" },
+                text = {
                     Text(
-                        "评论区",
-                        color = AppColors.cyan,
-                        fontSize = 14.sp,
-                        modifier = Modifier.clickable { showComments = !showComments }
+                        "动漫",
+                        fontWeight = if (activeTab == "details") FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 15.sp
                     )
-                    Text("${vm.comments.size} 条本地评论", color = AppColors.muted, fontSize = 12.sp)
                 }
-                if (showComments) {
-                    OutlinedTextField(
-                        value = vm.commentDraft,
-                        onValueChange = { vm.commentDraft = it },
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        placeholder = { Text("说点什么…") },
-                        trailingIcon = {
-                            TextButton(onClick = { vm.addComment() }) {
-                                Text("发布", color = AppColors.cyan)
-                            }
-                        },
-                        maxLines = 4
+            )
+            Tab(
+                selected = activeTab == "comments",
+                onClick = { activeTab = "comments" },
+                text = {
+                    Text(
+                        "评论 (${vm.comments.size})",
+                        fontWeight = if (activeTab == "comments") FontWeight.Bold else FontWeight.Normal,
+                        fontSize = 15.sp
                     )
-                    vm.comments.takeLast(5).forEach { comment ->
+                }
+            )
+        }
+
+        // ── Tab Content Area ──
+        if (activeTab == "details") {
+            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                // Title and Brief
+                item {
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            comment,
+                            detail.item.title,
                             color = AppColors.text,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 19.sp,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        TextButton(
+                            onClick = { expandedDescription = !expandedDescription }
+                        ) {
+                            Text(if (expandedDescription) "简介 \u2303" else "简介 >", color = AppColors.cyan, fontSize = 13.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+
+                // Meta tags + source count
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${detail.item.kind.ifEmpty { "动漫" }}  |  ${detail.item.year.ifEmpty { "2026" }}  |  ${detail.item.sourceTitle}",
+                            color = AppColors.muted,
+                            fontSize = 12.sp
+                        )
+                        if (totalSources > 1) {
+                            Spacer(Modifier.width(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = AppColors.cyan.copy(alpha = 0.2f)
+                            ) {
+                                Text(
+                                    " ${totalSources}源可用 ",
+                                    color = AppColors.cyan,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                // Synopsis description
+                if (detail.item.description.isNotEmpty()) {
+                    item {
+                        Text(
+                            detail.item.description,
+                            color = AppColors.muted.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            maxLines = if (expandedDescription) Int.MAX_VALUE else 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(14.dp))
+                    }
+                }
+
+                // Action Buttons Row (换源 | 缓存番剧 | 追番 | 分享)
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceAround
+                    ) {
+                        ActionButton(
+                            Icons.Default.Refresh, "换源",
+                            enabled = totalSources > 1,
+                            tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
+                        ) { vm.switchSource() }
+                        ActionButton(
+                            Icons.Default.Star,
+                            vm.downloadProgress?.let { "下载 $it" }
+                                ?: vm.episodeCacheProgress?.let { "预解析 $it" }
+                                ?: "下载番剧",
+                            enabled = vm.downloadProgress == null && vm.episodeCacheProgress == null
+                        ) { vm.downloadCurrentEpisodes() }
+                        ActionButton(
+                            if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            if (isFav) "已追番" else "追番",
+                            tint = if (isFav) AppColors.rose else AppColors.text
+                        ) { vm.toggleFavorite(detail.item) }
+                        ActionButton(Icons.Default.Share, "分享", enabled = false) {}
+                    }
+                    if (totalSources > 1) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("选择播放源", color = AppColors.muted, fontSize = 12.sp)
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            lazyItemsIndexed(vm.availableSourceLabels) { index, label ->
+                                FilterChip(
+                                    selected = index == vm.activeAlternativeIndex,
+                                    onClick = { vm.selectSource(index) },
+                                    label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
+                                        selectedLabelColor = AppColors.cyan
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                }
+
+                // Episodes Section Header
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("选集", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text(
+                            "共 ${detail.episodes.size} 集 >",
+                            color = AppColors.cyan,
                             fontSize = 13.sp,
-                            modifier = Modifier.padding(top = 8.dp)
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { showAllEpisodesModal = true }
                         )
                     }
-                }
-                Spacer(Modifier.height(10.dp))
-            }
-
-            // Title and Brief
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        detail.item.title,
-                        color = AppColors.text,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 19.sp,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    TextButton(
-                        onClick = { expandedDescription = !expandedDescription }
-                    ) {
-                        Text(if (expandedDescription) "简介 \u2303" else "简介 >", color = AppColors.cyan, fontSize = 13.sp)
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-
-            // Meta tags + source count
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${detail.item.kind.ifEmpty { "动漫" }}  |  ${detail.item.year.ifEmpty { "2026" }}  |  ${detail.item.sourceTitle}",
-                        color = AppColors.muted,
-                        fontSize = 12.sp
-                    )
-                    if (totalSources > 1) {
-                        Spacer(Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = AppColors.cyan.copy(alpha = 0.2f)
-                        ) {
-                            Text(
-                                " ${totalSources}源可用 ",
-                                color = AppColors.cyan,
-                                fontSize = 11.sp,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-
-            // Synopsis description
-            if (detail.item.description.isNotEmpty()) {
-                item {
-                    Text(
-                        detail.item.description,
-                        color = AppColors.muted.copy(alpha = 0.85f),
-                        fontSize = 12.sp,
-                        maxLines = if (expandedDescription) Int.MAX_VALUE else 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(14.dp))
-                }
-            }
-
-            // Action Buttons Row (换源 | 缓存番剧 | 追番 | 分享)
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
-                ) {
-                    ActionButton(
-                        Icons.Default.Refresh, "换源",
-                        enabled = totalSources > 1,
-                        tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
-                    ) { vm.switchSource() }
-                    ActionButton(
-                        Icons.Default.Star,
-                        vm.downloadProgress?.let { "下载 $it" }
-                            ?: vm.episodeCacheProgress?.let { "预解析 $it" }
-                            ?: "下载番剧",
-                        enabled = vm.downloadProgress == null && vm.episodeCacheProgress == null
-                    ) { vm.downloadCurrentEpisodes() }
-                    ActionButton(
-                        if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        if (isFav) "已追番" else "追番",
-                        tint = if (isFav) AppColors.rose else AppColors.text
-                    ) { vm.toggleFavorite(detail.item) }
-                    ActionButton(Icons.Default.Share, "分享", enabled = false) {}
-                }
-                if (totalSources > 1) {
                     Spacer(Modifier.height(8.dp))
-                    Text("选择播放源", color = AppColors.muted, fontSize = 12.sp)
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        lazyItemsIndexed(vm.availableSourceLabels) { index, label ->
-                            FilterChip(
-                                selected = index == vm.activeAlternativeIndex,
-                                onClick = { vm.selectSource(index) },
-                                label = { Text(label, fontSize = 11.sp, maxLines = 1) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
-                                    selectedLabelColor = AppColors.cyan
+                }
+
+                // Chunk selector if > 30 episodes
+                if (episodeChunks.size > 1) {
+                    item {
+                        LazyRow(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                            items(episodeChunks.size) { idx ->
+                                val start = idx * chunkSize + 1
+                                val end = minOf((idx + 1) * chunkSize, detail.episodes.size)
+                                FilterChip(
+                                    selected = idx == selectedChunkIndex,
+                                    onClick = { selectedChunkIndex = idx },
+                                    label = { Text("$start-$end", fontSize = 11.sp) },
+                                    modifier = Modifier.padding(end = 4.dp),
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
+                                        selectedLabelColor = AppColors.cyan
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
-                Spacer(Modifier.height(16.dp))
-            }
 
-            // Episodes Section Header
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("选集", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Text("共 ${detail.episodes.size} 集 >", color = AppColors.muted, fontSize = 13.sp)
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-
-            // Chunk selector if > 30 episodes
-            if (episodeChunks.size > 1) {
+                // Episode Grid (4-columns pill style)
+                val displayedEpisodes = episodeChunks.getOrNull(selectedChunkIndex) ?: detail.episodes
                 item {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        modifier = Modifier.heightIn(max = 280.dp),
+                        contentPadding = PaddingValues(vertical = 4.dp)
+                    ) {
+                        gridItemsIndexed(displayedEpisodes) { indexInChunk, ep ->
+                            val globalIndex = selectedChunkIndex * chunkSize + indexInChunk
+                            val isPlaying = globalIndex == vm.currentEpisodeIndex
+                            Surface(
+                                onClick = { vm.selectEpisode(globalIndex) },
+                                modifier = Modifier.padding(4.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isPlaying) AppColors.cyan.copy(alpha = 0.2f) else AppColors.panel2,
+                                border = if (isPlaying) androidx.compose.foundation.BorderStroke(1.5.dp, AppColors.cyan) else null
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        ep.name,
+                                        color = if (isPlaying) AppColors.cyan else AppColors.text,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Standalone Comments Tab Screen
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                OutlinedTextField(
+                    value = vm.commentDraft,
+                    onValueChange = { vm.commentDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("发表你的精彩评论…", color = AppColors.muted) },
+                    trailingIcon = {
+                        Button(
+                            onClick = { vm.addComment() },
+                            enabled = vm.commentDraft.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Text("发布", fontSize = 12.sp)
+                        }
+                    },
+                    maxLines = 3,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.cyan,
+                        unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
+                    )
+                )
+                if (vm.comments.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("暂无评论，快来发表首条评论吧！", color = AppColors.muted, fontSize = 14.sp)
+                    }
+                } else {
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        items(vm.comments.size) { idx ->
+                            val comment = vm.comments[idx]
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = AppColors.cyan.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text("👤", fontSize = 18.sp)
+                                        }
+                                    }
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("漫友_${1000 + idx}", color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("刚刚", color = AppColors.muted, fontSize = 11.sp)
+                                        }
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(comment, color = AppColors.text, fontSize = 14.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AllEpisodesModal(vm: MainViewModel, onDismiss: () -> Unit) {
+    val detail = vm.activeDetail ?: return
+    var isAscending by remember { mutableStateOf(true) }
+    var selectedChunkIndex by remember { mutableStateOf(0) }
+    val chunkSize = 30
+
+    val orderedEpisodes: List<Pair<Int, Episode>> = remember(detail.episodes, isAscending) {
+        val mapped = detail.episodes.mapIndexed { idx, ep -> idx to ep }
+        if (isAscending) mapped else mapped.reversed()
+    }
+
+    val chunks: List<List<Pair<Int, Episode>>> = remember(orderedEpisodes) { orderedEpisodes.chunked(chunkSize) }
+    val currentChunk: List<Pair<Int, Episode>> = chunks.getOrNull(selectedChunkIndex) ?: orderedEpisodes
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", color = AppColors.cyan)
+            }
+        },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("全部选集 (${detail.episodes.size}集)", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = { isAscending = !isAscending }) {
+                    Text(if (isAscending) "排序: 正序 ⬆" else "排序: 倒序 ⬇", color = AppColors.cyan, fontSize = 12.sp)
+                }
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                if (chunks.size > 1) {
                     LazyRow(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                        items(episodeChunks.size) { idx ->
-                            val start = idx * chunkSize + 1
-                            val end = minOf((idx + 1) * chunkSize, detail.episodes.size)
+                        items(chunks.size) { idx ->
+                            val chunkList = chunks[idx]
+                            val firstName = chunkList.firstOrNull()?.second?.name ?: ""
+                            val lastName = chunkList.lastOrNull()?.second?.name ?: ""
                             FilterChip(
                                 selected = idx == selectedChunkIndex,
                                 onClick = { selectedChunkIndex = idx },
-                                label = { Text("$start-$end", fontSize = 11.sp) },
+                                label = { Text("$firstName - $lastName", fontSize = 11.sp) },
                                 modifier = Modifier.padding(end = 4.dp),
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
@@ -1768,34 +2309,32 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         }
                     }
                 }
-            }
 
-            // Episode Grid (4-columns pill style)
-            val displayedEpisodes = episodeChunks.getOrNull(selectedChunkIndex) ?: detail.episodes
-            item {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
-                    modifier = Modifier.heightIn(max = 280.dp),
                     contentPadding = PaddingValues(vertical = 4.dp)
                 ) {
-                    itemsIndexed(displayedEpisodes) { indexInChunk, ep ->
-                        val globalIndex = selectedChunkIndex * chunkSize + indexInChunk
-                        val isPlaying = globalIndex == vm.currentEpisodeIndex
+                    items(currentChunk.size) { idx ->
+                        val (globalIdx, ep) = currentChunk[idx]
+                        val isPlaying = globalIdx == vm.currentEpisodeIndex
                         Surface(
-                            onClick = { vm.selectEpisode(globalIndex) },
-                            modifier = Modifier.padding(4.dp),
-                            shape = RoundedCornerShape(10.dp),
+                            onClick = {
+                                vm.selectEpisode(globalIdx)
+                                onDismiss()
+                            },
+                            modifier = Modifier.padding(3.dp),
+                            shape = RoundedCornerShape(8.dp),
                             color = if (isPlaying) AppColors.cyan.copy(alpha = 0.2f) else AppColors.panel2,
                             border = if (isPlaying) androidx.compose.foundation.BorderStroke(1.5.dp, AppColors.cyan) else null
                         ) {
                             Box(
-                                modifier = Modifier.padding(vertical = 12.dp),
+                                modifier = Modifier.padding(vertical = 10.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     ep.name,
                                     color = if (isPlaying) AppColors.cyan else AppColors.text,
-                                    fontSize = 13.sp,
+                                    fontSize = 12.sp,
                                     fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -1805,8 +2344,10 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     }
                 }
             }
-        }
-    }
+        },
+        containerColor = AppColors.panel,
+        shape = RoundedCornerShape(16.dp)
+    )
 }
 
 @Composable
@@ -1840,10 +2381,70 @@ fun ActionButton(
 
 @Composable
 fun ProfileView(vm: MainViewModel) {
+    val avatars = listOf("👤", "🦊", "🐲", "🐱")
+    val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
+
     LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
+        // User Profile Header Card with Settings Button
         item {
-            Text("个人中心", color = AppColors.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = AppColors.cyan.copy(alpha = 0.2f),
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("个人中心", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(2.dp))
+                        Text(vm.userEmail, color = AppColors.muted, fontSize = 13.sp)
+                    }
+                    IconButton(onClick = { vm.view = "settings" }) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = AppColors.cyan)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Secondary Entrance Buttons (二级界面入口)
+        item {
+            Text("管理与服务", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Spacer(Modifier.height(8.dp))
+
+            ProfileEntryCard(
+                title = "观看历史",
+                subtitle = "已播放 ${vm.historyList.size} 条记录",
+                icon = Icons.Default.Refresh,
+                onClick = { vm.view = "profile_history" }
+            )
+            Spacer(Modifier.height(8.dp))
+
+            ProfileEntryCard(
+                title = "我的追番 / 收藏",
+                subtitle = "已收藏 ${vm.favoritesList.size} 部作品",
+                icon = Icons.Default.Favorite,
+                onClick = { vm.view = "profile_favorites" }
+            )
+            Spacer(Modifier.height(8.dp))
+
+            ProfileEntryCard(
+                title = "离线缓存",
+                subtitle = "已缓存 ${vm.getDownloadedFilesList().size} 个本地视频文件",
+                icon = Icons.Default.PlayArrow,
+                onClick = { vm.view = "profile_downloads" }
+            )
+            Spacer(Modifier.height(16.dp))
         }
 
         // Source Management Card
@@ -1896,97 +2497,90 @@ fun ProfileView(vm: MainViewModel) {
         item {
             SourceDebugLogCard(vm)
         }
+    }
+}
 
-        // Watch History
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+@Composable
+fun ProfileEntryCard(title: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = AppColors.cyan.copy(alpha = 0.15f),
+                modifier = Modifier.size(40.dp)
             ) {
-                Text("观看历史 (${vm.historyList.size})", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                if (vm.historyList.isNotEmpty()) {
-                    TextButton(onClick = { vm.clearHistory() }) {
-                        Text("清空记录", color = AppColors.rose, fontSize = 13.sp)
-                    }
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = title, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
                 }
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, color = AppColors.muted, fontSize = 12.sp)
+            }
+            Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = AppColors.muted)
         }
+    }
+}
+
+@Composable
+fun HistoryScreen(vm: MainViewModel) {
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { vm.view = "profile" }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+            }
+            Text("观看历史", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            if (vm.historyList.isNotEmpty()) {
+                TextButton(onClick = { vm.clearHistory() }) {
+                    Text("清空记录", color = AppColors.rose, fontSize = 13.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
 
         if (vm.historyList.isEmpty()) {
-            item {
-                Text("暂无观看历史记录", color = AppColors.muted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无观看历史记录", color = AppColors.muted, fontSize = 14.sp)
             }
         } else {
-            items(vm.historyList) { history ->
-                Card(
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(vm.historyList) { history ->
+                    Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
                             .clickable { vm.openMovie(history.item, history.episodeName) },
-                    colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
                     ) {
-                        AsyncImage(
-                            model = coverRequest(LocalContext.current, history.item.cover),
-                            contentDescription = null,
-                            modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(history.item.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Spacer(Modifier.height(2.dp))
-                            Text("看到：${history.episodeName}", color = AppColors.cyan, fontSize = 13.sp)
-                            Text("数据源：${history.item.sourceTitle.ifEmpty { history.item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Favorites / Bookmarks
-        item {
-            Spacer(Modifier.height(16.dp))
-            Text("我的追番 / 收藏 (${vm.favoritesList.size})", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-            Spacer(Modifier.height(6.dp))
-        }
-
-        if (vm.favoritesList.isEmpty()) {
-            item {
-                Text("暂未添加任何收藏", color = AppColors.muted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
-            }
-        } else {
-            items(vm.favoritesList) { favorite ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .clickable { vm.openMovie(favorite) },
-                    colors = CardDefaults.cardColors(containerColor = AppColors.panel)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        AsyncImage(
-                            model = coverRequest(LocalContext.current, favorite.cover),
-                            contentDescription = null,
-                            modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(favorite.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Spacer(Modifier.height(2.dp))
-                            Text("${favorite.year} · ${favorite.kind}", color = AppColors.muted, fontSize = 12.sp)
-                        }
-                        IconButton(onClick = { vm.toggleFavorite(favorite) }) {
-                            Icon(Icons.Default.Favorite, contentDescription = "取消收藏", tint = AppColors.rose)
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = coverRequest(LocalContext.current, history.item.cover),
+                                contentDescription = null,
+                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(history.item.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(2.dp))
+                                Text("看到：${history.episodeName}", color = AppColors.cyan, fontSize = 13.sp)
+                                Text("数据源：${history.item.sourceTitle.ifEmpty { history.item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
+                            }
                         }
                     }
                 }
@@ -1994,6 +2588,618 @@ fun ProfileView(vm: MainViewModel) {
         }
     }
 }
+
+@Composable
+fun FavoritesScreen(vm: MainViewModel) {
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { vm.view = "profile" }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+            }
+            Text("我的追番 / 收藏", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        if (vm.favoritesList.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂未添加任何收藏", color = AppColors.muted, fontSize = 14.sp)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(vm.favoritesList) { favorite ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable { vm.openMovie(favorite) },
+                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = coverRequest(LocalContext.current, favorite.cover),
+                                contentDescription = null,
+                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(favorite.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(2.dp))
+                                Text("${favorite.year} · ${favorite.kind}", color = AppColors.muted, fontSize = 12.sp)
+                            }
+                            IconButton(onClick = { vm.toggleFavorite(favorite) }) {
+                                Icon(Icons.Default.Favorite, contentDescription = "取消收藏", tint = AppColors.rose)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OfflineCacheScreen(vm: MainViewModel) {
+    val downloads = vm.getDownloadedFilesList()
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { vm.view = "profile" }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+            }
+            Text("离线缓存", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        if (downloads.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted, modifier = Modifier.size(48.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text("暂无离线缓存视频", color = AppColors.muted, fontSize = 14.sp)
+                    Text("在播放页面点击下载按键可离线缓存剧集", color = AppColors.muted.copy(alpha = 0.7f), fontSize = 12.sp)
+                }
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(downloads) { (fileName, fileSize) ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = AppColors.cyan.copy(alpha = 0.2f),
+                                modifier = Modifier.size(42.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.cyan)
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(fileName, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(2.dp))
+                                Text("文件大小：$fileSize · 可离线播放", color = AppColors.muted, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SearchResultScreen(vm: MainViewModel) {
+    androidx.activity.compose.BackHandler {
+        vm.view = "home"
+        vm.isSearchActive = false
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = {
+                vm.view = "home"
+                vm.isSearchActive = false
+            }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text)
+            }
+            Spacer(Modifier.width(4.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("搜索结果", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                if (vm.query.isNotBlank()) {
+                    Text("「${vm.query}」", color = AppColors.cyan, fontSize = 12.sp)
+                }
+            }
+            if (vm.loading) {
+                LoadingSpinner(modifier = Modifier.size(20.dp), color = AppColors.cyan)
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        if (vm.notice.isNotBlank()) {
+            Text(vm.notice, color = AppColors.muted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+            Spacer(Modifier.height(8.dp))
+        }
+
+        if (vm.loading && vm.items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
+                    Spacer(Modifier.height(12.dp))
+                    Text("正在全网检索「${vm.query}」...", color = AppColors.muted, fontSize = 14.sp)
+                }
+            }
+        } else if (vm.items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("🔍", fontSize = 48.sp)
+                    Spacer(Modifier.height(12.dp))
+                    Text("未找到「${vm.query}」相关动漫作品", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text("请检查拼写或尝试简称（如：芙利莲）", color = AppColors.muted, fontSize = 13.sp)
+                }
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(vertical = 4.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(vm.items.size) { idx ->
+                    val item = vm.items[idx]
+                    MovieCard(item, Modifier.padding(4.dp)) { vm.openMovie(item) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(vm: MainViewModel) {
+    var emailInput by remember { mutableStateOf(vm.userEmail) }
+    var emailSuccess by remember { mutableStateOf(false) }
+
+    var oldPassInput by remember { mutableStateOf("") }
+    var newPassInput by remember { mutableStateOf("") }
+    var confirmPassInput by remember { mutableStateOf("") }
+    var passSuccess by remember { mutableStateOf(false) }
+
+    val avatars = listOf("👤", "🦊", "🐲", "🐱")
+
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { vm.view = "profile" }) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+                }
+                Text("系统设置", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Appearance Settings Card
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("外观设置", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("选择界面色彩风格与配色方案", color = AppColors.muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val modes = listOf("system" to "跟随系统", "light" to "浅色模式", "dark" to "深色模式")
+                        modes.forEach { (modeKey, label) ->
+                            val selected = vm.themeMode == modeKey
+                            FilterChip(
+                                selected = selected,
+                                onClick = { vm.updateThemeMode(modeKey) },
+                                label = { Text(label, fontSize = 12.sp) },
+                                modifier = Modifier.weight(1f),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AppColors.cyan.copy(alpha = 0.25f),
+                                    selectedLabelColor = AppColors.cyan
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Account Avatar Settings
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("本地头像设置", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("更换在本地保存展示的个性头像", color = AppColors.muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceAround
+                    ) {
+                        (0..3).forEach { idx ->
+                            val isSelected = vm.userAvatarIndex == idx
+                            Surface(
+                                onClick = { vm.updateUserAvatar(idx) },
+                                shape = CircleShape,
+                                color = if (isSelected) AppColors.cyan.copy(alpha = 0.3f) else AppColors.panel2,
+                                border = if (isSelected) androidx.compose.foundation.BorderStroke(2.5.dp, AppColors.cyan) else null,
+                                modifier = Modifier.size(58.dp)
+                            ) {
+                                AvatarImage(idx, modifier = Modifier.fillMaxSize())
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Change Email Settings
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("账户邮箱设置", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("输入新邮箱地址，须符合标准邮箱格式", color = AppColors.muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+
+                    val validEmail = isValidEmail(emailInput)
+                    OutlinedTextField(
+                        value = emailInput,
+                        onValueChange = { emailInput = it; emailSuccess = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("邮箱地址") },
+                        singleLine = true,
+                        isError = emailInput.isNotEmpty() && !validEmail,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AppColors.cyan,
+                            unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
+                        )
+                    )
+
+                    if (emailInput.isNotEmpty() && !validEmail) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("格式不合规（须包含 @ 与有效域名后缀）", color = AppColors.rose, fontSize = 12.sp)
+                    }
+
+                    if (emailSuccess) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("邮箱保存成功！", color = AppColors.green, fontSize = 12.sp)
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (validEmail) {
+                                vm.updateUserEmail(emailInput)
+                                emailSuccess = true
+                            }
+                        },
+                        enabled = validEmail && emailInput != vm.userEmail,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("保存邮箱修改")
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Change Password Settings
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("账户密码修改", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("密码规则：至少8位，且须包含大写字母、小写字母、数字、特殊字符中的至少3种", color = AppColors.muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = oldPassInput,
+                        onValueChange = { oldPassInput = it; passSuccess = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("当前原密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    val isStrong = isPasswordStrong(newPassInput)
+                    OutlinedTextField(
+                        value = newPassInput,
+                        onValueChange = { newPassInput = it; passSuccess = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("新密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        isError = newPassInput.isNotEmpty() && !isStrong,
+                        singleLine = true
+                    )
+                    if (newPassInput.isNotEmpty() && !isStrong) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("⚠️ 密码强度不达标：须至少8位并包含大/小写/数字/特殊字符中至少3种组合", color = AppColors.rose, fontSize = 12.sp)
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    val passMatches = confirmPassInput == newPassInput
+                    OutlinedTextField(
+                        value = confirmPassInput,
+                        onValueChange = { confirmPassInput = it; passSuccess = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("确认新密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        isError = confirmPassInput.isNotEmpty() && !passMatches,
+                        singleLine = true
+                    )
+                    if (confirmPassInput.isNotEmpty() && !passMatches) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("⚠️ 两次输入的密码不一致", color = AppColors.rose, fontSize = 12.sp)
+                    }
+
+                    if (passSuccess) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("✅ 密码已成功更新！", color = AppColors.green, fontSize = 12.sp)
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (isStrong && passMatches) {
+                                vm.updateUserPassword(newPassInput)
+                                passSuccess = true
+                                oldPassInput = ""
+                                newPassInput = ""
+                                confirmPassInput = ""
+                            }
+                        },
+                        enabled = isStrong && passMatches && newPassInput.isNotEmpty(),
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("确认修改密码")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WeeklyScheduleScreen(vm: MainViewModel) {
+    val days = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    val calDay = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
+    val defaultIndex = if (calDay == Calendar.SUNDAY) 6 else (calDay - 2).coerceIn(0, 6)
+    var selectedDayIndex by remember { mutableStateOf(defaultIndex) }
+
+    val pool = vm.allPoolItems()
+    val dayItems = remember(selectedDayIndex, pool) {
+        if (pool.isEmpty()) emptyList()
+        else {
+            val chunkSize = maxOf(1, pool.size / 7)
+            val chunked = pool.chunked(chunkSize)
+            chunked.getOrElse(selectedDayIndex) { pool.take(6) }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("番剧连载周表", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        ScrollableTabRow(
+            selectedTabIndex = selectedDayIndex,
+            containerColor = AppColors.panel,
+            contentColor = AppColors.cyan,
+            edgePadding = 0.dp
+        ) {
+            days.forEachIndexed { idx, dayName ->
+                Tab(
+                    selected = selectedDayIndex == idx,
+                    onClick = { selectedDayIndex = idx },
+                    text = {
+                        Text(
+                            text = if (idx == defaultIndex) "$dayName(今天)" else dayName,
+                            fontWeight = if (selectedDayIndex == idx) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 13.sp
+                        )
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        if (dayItems.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无当天连载更新计划", color = AppColors.muted, fontSize = 14.sp)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(dayItems.size) { index ->
+                    val item = dayItems[index]
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 5.dp)
+                            .clickable { vm.openMovie(item) },
+                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = coverRequest(LocalContext.current, item.cover),
+                                contentDescription = null,
+                                modifier = Modifier.size(60.dp, 84.dp).clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(4.dp))
+                                Text("更新至第 ${index + 12} 集 · 周${days[selectedDayIndex]} 23:30", color = AppColors.cyan, fontSize = 12.sp)
+                                Spacer(Modifier.height(2.dp))
+                                Text("分类: ${item.kind.ifEmpty { "日漫/热血" }} | 来源: ${item.sourceTitle.ifEmpty { item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LeaderboardScreen(vm: MainViewModel) {
+    val tabs = listOf("TV番剧", "剧场番剧", "国漫")
+    var selectedTabIdx by remember { mutableStateOf(0) }
+
+    val pool = vm.allPoolItems()
+    val filteredItems = remember(selectedTabIdx, pool) {
+        val targetKind = when (selectedTabIdx) {
+            0 -> "TV"
+            1 -> "剧场"
+            else -> "国漫"
+        }
+        val matches = pool.filter { it.kind.contains(targetKind) || (selectedTabIdx == 0 && !it.kind.contains("国漫") && !it.kind.contains("剧场")) }
+        if (matches.isNotEmpty()) matches else pool
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("热门作品排行榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        TabRow(
+            selectedTabIndex = selectedTabIdx,
+            containerColor = AppColors.panel,
+            contentColor = AppColors.cyan
+        ) {
+            tabs.forEachIndexed { idx, title ->
+                Tab(
+                    selected = selectedTabIdx == idx,
+                    onClick = { selectedTabIdx = idx },
+                    text = { Text(title, fontWeight = if (selectedTabIdx == idx) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp) }
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        if (filteredItems.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无排行榜数据", color = AppColors.muted, fontSize = 14.sp)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(filteredItems.size) { rankIdx ->
+                    val item = filteredItems[rankIdx]
+                    val rankNum = rankIdx + 1
+                    val badgeColor = when (rankNum) {
+                        1 -> Color(0xFFFFD700)
+                        2 -> Color(0xFFC0C0C0)
+                        3 -> Color(0xFFCD7F32)
+                        else -> AppColors.muted
+                    }
+                    val badgeIcon = when (rankNum) {
+                        1 -> "🥇"
+                        2 -> "🥈"
+                        3 -> "🥉"
+                        else -> "$rankNum"
+                    }
+                    val heatVal = (99 - rankIdx).coerceAtLeast(80) / 10.0
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable { vm.openMovie(item) },
+                        colors = CardDefaults.cardColors(containerColor = if (rankNum <= 3) AppColors.panel2 else AppColors.panel)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = badgeColor.copy(alpha = 0.2f),
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(badgeIcon, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = badgeColor)
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            AsyncImage(
+                                model = coverRequest(LocalContext.current, item.cover),
+                                contentDescription = null,
+                                modifier = Modifier.size(54.dp, 76.dp).clip(RoundedCornerShape(6.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(3.dp))
+                                Text("🔥 热度: ${heatVal}分 · 播放 18.${(9 - rankIdx).coerceAtLeast(1)}万", color = AppColors.orange, fontSize = 12.sp)
+                                Spacer(Modifier.height(2.dp))
+                                Text("${item.year} · ${item.kind.ifEmpty { "热血" }} | 来源: ${item.sourceTitle.ifEmpty { item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 fun FilterRow(label: String, options: List<Any>, active: String, onSelect: (String) -> Unit) {
@@ -2055,27 +3261,229 @@ private const val BROWSER_COVER_UA =
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36"
 
 @Composable
+fun AvatarImage(avatarIndex: Int, modifier: Modifier = Modifier) {
+    val assetPath = "file:///android_asset/avatars/anime_avatar_${(avatarIndex % 4) + 1}.jpg"
+    AsyncImage(
+        model = ImageRequest.Builder(LocalContext.current)
+            .data(assetPath)
+            .crossfade(true)
+            .build(),
+        contentDescription = "二次元头像",
+        modifier = modifier.clip(CircleShape),
+        contentScale = ContentScale.Crop
+    )
+}
+
+@Composable
+fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) {
+    if (items.isEmpty()) return
+    var currentIndex by remember { mutableStateOf(0) }
+
+    LaunchedEffect(items) {
+        while (true) {
+            kotlinx.coroutines.delay(3500)
+            currentIndex = (currentIndex + 1) % items.size
+        }
+    }
+
+    val currentItem = items[currentIndex]
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clickable { onSelect(currentItem) },
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            // Ambient Blurred Cover Background
+            AsyncImage(
+                model = coverRequest(LocalContext.current, currentItem.cover),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = 0.28f },
+                contentScale = ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        androidx.compose.ui.graphics.Brush.horizontalGradient(
+                            colors = listOf(AppColors.bg, Color.Transparent),
+                            startX = 0f,
+                            endX = 550f
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
+                        )
+                    )
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Left Metadata Info Column
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 12.dp),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = AppColors.cyan.copy(alpha = 0.25f)
+                    ) {
+                        Text(
+                            "🔥 热门推荐",
+                            color = AppColors.cyan,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        currentItem.title,
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${currentItem.status.ifEmpty { "热播中" }} · ${currentItem.kind.ifEmpty { "动漫" }}",
+                        color = AppColors.muted,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Right Poster Box (Complete, intact poster display)
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color.Black.copy(alpha = 0.4f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+                    modifier = Modifier
+                        .width(105.dp)
+                        .fillMaxHeight()
+                ) {
+                    AsyncImage(
+                        model = coverRequest(LocalContext.current, currentItem.cover),
+                        contentDescription = currentItem.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        alignment = Alignment.TopCenter
+                    )
+                }
+            }
+
+            // Carousel dots indicator on bottom left
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 14.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items.indices.forEach { idx ->
+                    Box(
+                        modifier = Modifier
+                            .size(if (idx == currentIndex) 14.dp else 5.dp, 5.dp)
+                            .clip(CircleShape)
+                            .background(if (idx == currentIndex) AppColors.cyan else Color.White.copy(alpha = 0.4f))
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun MovieCard(item: SourceItem, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val statusText = when {
+        item.status.isNotBlank() -> item.status
+        item.tags.any { it.contains("集") || it.contains("话") || it.contains("完结") } ->
+            item.tags.first { it.contains("集") || it.contains("话") || it.contains("完结") }
+        else -> "连载中"
+    }
+    val genreText = item.tags
+        .filter { !it.contains("集") && !it.contains("话") && !it.contains("完结") }
+        .joinToString(" ")
+        .ifBlank { item.kind.ifBlank { "动漫" } }
+
     Card(
         modifier = modifier.clickable { onClick() },
-        colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
         shape = RoundedCornerShape(12.dp)
     ) {
         Column {
-            AsyncImage(
-                model = coverRequest(LocalContext.current, item.cover),
-                contentDescription = item.title,
-                modifier = Modifier.fillMaxWidth().aspectRatio(0.7f).clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
-                contentScale = ContentScale.Crop
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.72f)
+                    .clip(RoundedCornerShape(12.dp))
+            ) {
+                AsyncImage(
+                    model = coverRequest(LocalContext.current, item.cover),
+                    contentDescription = item.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(36.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
+                            )
+                        )
+                ) {
+                    Text(
+                        statusText,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 6.dp, bottom = 4.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
             Text(
-                item.title, Modifier.padding(8.dp, 6.dp, 8.dp, 2.dp),
-                color = AppColors.text, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                item.title,
+                color = AppColors.text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 2.dp)
             )
+            Spacer(Modifier.height(2.dp))
             Text(
-                "${item.sourceTitle} · ${item.kind.ifEmpty { "视频" }}",
-                Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                color = AppColors.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                genreText,
+                color = AppColors.muted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 2.dp)
             )
         }
     }

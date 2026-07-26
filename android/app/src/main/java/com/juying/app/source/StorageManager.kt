@@ -66,4 +66,17 @@ class StorageManager(context: Context) {
         prefs.edit().putString("favorites", gson.toJson(list)).apply()
         return !exists
     }
+
+    fun getThemeMode(): String = prefs.getString("theme_mode", "dark") ?: "dark"
+    fun setThemeMode(mode: String) { prefs.edit().putString("theme_mode", mode).apply() }
+
+    fun getUserEmail(): String = prefs.getString("user_email", "user@juying.com") ?: "user@juying.com"
+    fun setUserEmail(email: String) { prefs.edit().putString("user_email", email).apply() }
+
+    fun getUserPassword(): String = prefs.getString("user_password", "Pass1234!") ?: "Pass1234!"
+    fun setUserPassword(password: String) { prefs.edit().putString("user_password", password).apply() }
+
+    fun getUserAvatar(): Int = prefs.getInt("user_avatar", 0)
+    fun setUserAvatar(avatarIndex: Int) { prefs.edit().putInt("user_avatar", avatarIndex).apply() }
 }
+

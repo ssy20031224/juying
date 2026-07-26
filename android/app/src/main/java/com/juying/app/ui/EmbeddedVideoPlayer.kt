@@ -417,6 +417,10 @@ fun EmbeddedVideoPlayer(
 
     DisposableEffect(exoPlayer) {
         onDispose {
+            try {
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+            } catch (_: Exception) {}
             exoPlayer.release()
         }
     }
@@ -497,15 +501,8 @@ fun EmbeddedVideoPlayer(
                             currentSpeed = if (offset.x < size.width * 0.5f) 0.5f else maxSpeed
                         }
                     },
-                    onDoubleTap = { offset ->
-                        val width = size.width
-                        if (offset.x < width * 0.35f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition - 15000L).coerceAtLeast(0L))
-                        } else if (offset.x > width * 0.65f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition + 15000L).coerceAtMost(exoPlayer.duration))
-                        } else {
-                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                        }
+                    onDoubleTap = {
+                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                     }
                 )
             }
@@ -656,7 +653,7 @@ fun EmbeddedVideoPlayer(
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
-                        Icon(Icons.Default.Lock, contentDescription = "锁定屏幕", tint = Color.White)
+                        Text("🔓", fontSize = 18.sp)
                     }
 
                     // ── BOTTOM OVERLAY CONTAINER ──
@@ -827,12 +824,13 @@ fun EmbeddedVideoPlayer(
 
                                 Spacer(Modifier.width(6.dp))
 
-                                // Super Resolution / Ratio
+                                // Screen Scale Mode (默认 / 铺满 / 裁剪 / 拉伸)
                                 Text(
                                     when (resizeMode) {
                                         AspectRatioFrameLayout.RESIZE_MODE_FILL -> "铺满"
-                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "拉伸"
-                                        else -> "超分辨率"
+                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "裁剪"
+                                        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> "拉伸"
+                                        else -> "默认"
                                     },
                                     color = Color.White,
                                     fontSize = 12.sp,
@@ -841,6 +839,7 @@ fun EmbeddedVideoPlayer(
                                             resizeMode = when (resizeMode) {
                                                 AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                                                 AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                                AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
                                                 else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                             }
                                         }

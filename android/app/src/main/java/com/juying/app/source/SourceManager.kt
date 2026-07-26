@@ -388,12 +388,16 @@ class SourceManager(private val context: Context) {
         fun sortByRelevance(items: List<SourceItem>, query: String): List<SourceItem> {
             val q = normalizeTitle(query)
             if (q.isEmpty()) return items
-            return items.withIndex()
+            val scored = items.mapNotNull { item ->
+                val score = relevanceScore(item, q)
+                if (score > 0) item to score else null
+            }
+            return scored.withIndex()
                 .sortedWith(
-                    compareByDescending<IndexedValue<SourceItem>> { relevanceScore(it.value, q) }
+                    compareByDescending<IndexedValue<Pair<SourceItem, Int>>> { it.value.second }
                         .thenBy { it.index }
                 )
-                .map { it.value }
+                .map { it.value.first }
         }
 
         /**
@@ -410,8 +414,6 @@ class SourceManager(private val context: Context) {
                 if (compact != raw) add(compact)
                 val withoutDe = compact.replace("的", "")
                 if (withoutDe.length >= 3 && withoutDe != compact) add(withoutDe)
-                // The final 3 characters are often the distinctive franchise
-                // name in Chinese titles (e.g. “葬送的芙莉莲” -> “芙莉莲”).
                 if (compact.length >= 5) add(compact.takeLast(3))
             }.toList()
         }
@@ -434,9 +436,9 @@ class SourceManager(private val context: Context) {
                 title.startsWith(query) -> 8_500 + overlap
                 title.contains(query) -> 7_500 + overlap
                 searchable.contains(query) -> 6_500 + overlap
-                overlap >= 70 -> 4_000 + overlap + editScore
-                overlap >= 45 -> 2_000 + overlap + editScore / 2
-                else -> editScore
+                overlap >= 50 -> 4_000 + overlap + editScore
+                overlap >= 30 -> 2_000 + overlap + editScore / 2
+                else -> 0
             }
         }
 
@@ -552,7 +554,7 @@ class SourceAdapter(
                     flagStr = fStr,
                     flag = mapFlag
                 )
-            } ?: emptyList()
+            }?.distinctBy { it.name.trim() } ?: emptyList()
             DetailResult(item, eps)
         } catch (_: Exception) {
             DetailResult(defaultItem, emptyList())
