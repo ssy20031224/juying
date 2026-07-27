@@ -1,5 +1,18 @@
 <libraries>
   <library
+      name="androidx.core:core-splashscreen:1.0.1@aar"
+      jars="C:\Users\songz\.gradle\caches\8.9\transforms\72f93e76fc77f59a315b8e631c8078a0\transformed\core-splashscreen-1.0.1\jars\classes.jar"
+      resolved="androidx.core:core-splashscreen:1.0.1"
+      folder="C:\Users\songz\.gradle\caches\8.9\transforms\72f93e76fc77f59a315b8e631c8078a0\transformed\core-splashscreen-1.0.1"
+      manifest="AndroidManifest.xml"
+      resFolder="res"
+      assetsFolder="assets"
+      lintJar="lint.jar"
+      publicResources="public.txt"
+      symbolFile="R.txt"
+      externalAnnotations="annotations.zip"
+      proguardRules="proguard.txt"/>
+  <library
       name="io.coil-kt:coil-compose:2.5.0@aar"
       jars="C:\Users\songz\.gradle\caches\8.9\transforms\b1aabf1d56f3c0c4a74fae64091580d6\transformed\coil-compose-2.5.0\jars\classes.jar"
       resolved="io.coil-kt:coil-compose:2.5.0"

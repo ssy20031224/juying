@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.juying.app-mergeReleaseResources-45:/values-ky/values-ky.xml",
+            "outputFile": "com.juying.app-mergeReleaseResources-46:/values-ky/values-ky.xml",
             "map": [
                 {
                     "source": "C:\\Users\\songz\\.gradle\\caches\\8.9\\transforms\\2361833ef1ae58bc59112fc97bf2f341\\transformed\\foundation-release\\res\\values-ky\\values-ky.xml",

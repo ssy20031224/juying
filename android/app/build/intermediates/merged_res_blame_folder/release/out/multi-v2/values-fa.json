@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.juying.app-mergeReleaseResources-45:/values-fa/values-fa.xml",
+            "outputFile": "com.juying.app-mergeReleaseResources-46:/values-fa/values-fa.xml",
             "map": [
                 {
                     "source": "C:\\Users\\songz\\.gradle\\caches\\8.9\\transforms\\53355124fb3193453da94fc98ab8f45e\\transformed\\ui-release\\res\\values-fa\\values-fa.xml",

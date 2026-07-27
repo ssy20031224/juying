@@ -120,6 +120,9 @@ fun VideoPlayerDialog(
                     }
                 },
                 update = { view ->
+                    if (view.player != exoPlayer) {
+                        view.player = exoPlayer
+                    }
                     view.resizeMode = resizeMode
                 },
                 modifier = Modifier.fillMaxSize()

@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.juying.app-mergeReleaseResources-45:/values-nb/values-nb.xml",
+            "outputFile": "com.juying.app-mergeReleaseResources-46:/values-nb/values-nb.xml",
             "map": [
                 {
                     "source": "C:\\Users\\songz\\.gradle\\caches\\8.9\\transforms\\aae2f2419b0aa4ac606076c000672635\\transformed\\material3-1.1.2\\res\\values-nb\\values-nb.xml",

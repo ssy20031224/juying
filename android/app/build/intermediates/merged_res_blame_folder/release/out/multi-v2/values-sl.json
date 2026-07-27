@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.juying.app-mergeReleaseResources-45:/values-sl/values-sl.xml",
+            "outputFile": "com.juying.app-mergeReleaseResources-46:/values-sl/values-sl.xml",
             "map": [
                 {
                     "source": "C:\\Users\\songz\\.gradle\\caches\\8.9\\transforms\\1146f17838f0595ffd01305223857cda\\transformed\\media3-ui-1.2.1\\res\\values-sl\\values-sl.xml",

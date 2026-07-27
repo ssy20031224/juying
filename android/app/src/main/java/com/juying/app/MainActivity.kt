@@ -7,6 +7,7 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.*
@@ -1604,6 +1605,17 @@ private fun JuyingStartupSplash(onFinished: () -> Unit) {
 @Composable
 fun JuyingApp(vm: MainViewModel) {
     val activity = LocalContext.current as? Activity
+
+    BackHandler {
+        when {
+            vm.view == "player" -> vm.goBackFromPlayer()
+            vm.view.startsWith("profile_") || vm.view == "settings" -> vm.view = "profile"
+            vm.view == "search_result" -> vm.view = "home"
+            vm.view != "home" -> vm.view = "home"
+            else -> activity?.finish()
+        }
+    }
+
     val systemDark = isSystemInDarkTheme()
     val isDark = when (vm.themeMode) {
         "light" -> false

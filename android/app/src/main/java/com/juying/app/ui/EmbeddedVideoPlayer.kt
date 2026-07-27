@@ -14,6 +14,7 @@ import android.view.OrientationEventListener
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -234,6 +235,12 @@ fun EmbeddedVideoPlayer(
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                 controller.show(WindowInsetsCompat.Type.systemBars())
             }
+        }
+    }
+
+    if (isFullscreen) {
+        BackHandler {
+            toggleFullscreen()
         }
     }
 
@@ -534,6 +541,9 @@ fun EmbeddedVideoPlayer(
                     }
                 },
                 update = { view ->
+                    if (view.player != exoPlayer) {
+                        view.player = exoPlayer
+                    }
                     view.resizeMode = resizeMode
                 },
                 modifier = Modifier.fillMaxSize()
@@ -594,7 +604,12 @@ fun EmbeddedVideoPlayer(
                                     colors = listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
                                 )
                             )
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(
+                                start = if (isFullscreen) 24.dp else 12.dp,
+                                end = if (isFullscreen) 24.dp else 12.dp,
+                                top = if (isFullscreen) 12.dp else 8.dp,
+                                bottom = 8.dp
+                            ),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = {
@@ -649,7 +664,7 @@ fun EmbeddedVideoPlayer(
                         onClick = { isLocked = true },
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
-                            .padding(end = 16.dp)
+                            .padding(end = if (isFullscreen) 24.dp else 16.dp)
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
@@ -666,7 +681,12 @@ fun EmbeddedVideoPlayer(
                                     colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
                                 )
                             )
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(
+                                start = if (isFullscreen) 24.dp else 12.dp,
+                                end = if (isFullscreen) 24.dp else 12.dp,
+                                bottom = if (isFullscreen) 18.dp else 6.dp,
+                                top = 6.dp
+                            )
                     ) {
                         // ── ROW 1: Time, Slider, Duration, PiP, Fullscreen ──
                         Row(

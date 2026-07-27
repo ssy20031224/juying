@@ -34,6 +34,7 @@
     <attr format="color" name="played_ad_marker_color"/>
     <attr format="color" name="played_color"/>
     <attr format="reference" name="player_layout_id"/>
+    <attr format="reference" name="postSplashScreenTheme"/>
     <attr format="reference" name="recyclerViewStyle"/>
     <attr name="repeat_toggle_modes">
     <flag name="none" value="0"/>
@@ -66,6 +67,7 @@
     <attr format="integer" name="show_timeout"/>
     <attr format="boolean" name="show_vr_button"/>
     <attr format="color" name="shutter_background_color"/>
+    <attr format="dimension" name="splashScreenIconSize"/>
     <attr format="enum" name="surface_type">
     <enum name="none" value="0"/>
     <enum name="surface_view" value="1"/>
@@ -78,6 +80,10 @@
     <attr format="color" name="unplayed_color"/>
     <attr format="boolean" name="use_artwork"/>
     <attr format="boolean" name="use_controller"/>
+    <attr format="reference" name="windowSplashScreenAnimatedIcon"/>
+    <attr format="integer" name="windowSplashScreenAnimationDuration"/>
+    <attr format="color" name="windowSplashScreenBackground"/>
+    <attr format="color" name="windowSplashScreenIconBackgroundColor"/>
     <color name="androidx_core_ripple_material_light">#1f000000</color>
     <color name="androidx_core_secondary_text_default_material_light">#8a000000</color>
     <color name="bg">#090E17</color>
@@ -91,6 +97,7 @@
     <color name="exo_styled_error_message_background">#80808080</color>
     <color name="exo_white">#ffffff</color>
     <color name="exo_white_opacity_70">#B3ffffff</color>
+    <color name="juying_splash_background">#050817</color>
     <color name="notification_action_color_filter">#ffffffff</color>
     <color name="notification_icon_bg_color">#ff9e9e9e</color>
     <color name="notification_material_background_media_default_color">#ff424242</color>
@@ -159,6 +166,13 @@
     <dimen name="notification_subtext_size">13sp</dimen>
     <dimen name="notification_top_pad">10dp</dimen>
     <dimen name="notification_top_pad_large_text">5dp</dimen>
+    <dimen name="splashscreen_icon_mask_size_no_background">410dp</dimen>
+    <dimen name="splashscreen_icon_mask_size_with_background">342dp</dimen>
+    <dimen name="splashscreen_icon_mask_stroke_no_background">109dp</dimen>
+    <dimen name="splashscreen_icon_mask_stroke_with_background">92dp</dimen>
+    <dimen name="splashscreen_icon_size">?splashScreenIconSize</dimen>
+    <dimen name="splashscreen_icon_size_no_background">288dp</dimen>
+    <dimen name="splashscreen_icon_size_with_background">240dp</dimen>
     <drawable name="exo_legacy_controls_fastforward">@drawable/exo_icon_fastforward</drawable>
     <drawable name="exo_legacy_controls_fullscreen_enter">@drawable/exo_icon_fullscreen_enter</drawable>
     <drawable name="exo_legacy_controls_fullscreen_exit">@drawable/exo_icon_fullscreen_exit</drawable>
@@ -315,6 +329,7 @@
     <id name="view_tree_view_model_store_owner"/>
     <item name="wrapped_composition_tag" type="id"/>
     <integer name="cancel_button_image_alpha">127</integer>
+    <integer name="default_icon_animation_duration">10000</integer>
     <integer name="exo_media_button_opacity_percentage_disabled">33</integer>
     <integer name="exo_media_button_opacity_percentage_enabled">100</integer>
     <integer name="status_bar_notification_info_maxnum">999</integer>
@@ -327,6 +342,7 @@
     <item quantity="other">Rewind <ns1:g example="30" id="rewind_amount">%d</ns1:g> seconds</item>
   </plurals>
     <string name="androidx_startup" translatable="false">androidx.startup</string>
+    <string name="app_name">juying</string>
     <string name="bottom_sheet_collapse_description">Collapse bottom sheet</string>
     <string name="bottom_sheet_dismiss_description">Dismiss bottom sheet</string>
     <string name="bottom_sheet_drag_handle_description">Drag handle</string>
@@ -467,6 +483,13 @@
     <string name="tooltip_label">show tooltip</string>
     <string name="tooltip_long_press_label">Show tooltip</string>
     <string name="tooltip_pane_description">Tooltip</string>
+    <style name="Base.Theme.SplashScreen" parent="Base.v21.Theme.SplashScreen"/>
+    <style name="Base.Theme.SplashScreen.DayNight" parent="Base.Theme.SplashScreen.Light"/>
+    <style name="Base.Theme.SplashScreen.Light" parent="Base.v21.Theme.SplashScreen.Light"/>
+    <style name="Base.v21.Theme.SplashScreen" parent="android:Theme.DeviceDefault.NoActionBar">
+    </style>
+    <style name="Base.v21.Theme.SplashScreen.Light" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+    </style>
     <style name="DialogWindowTheme">
         <item name="android:windowClipToOutline">false</item>
     </style>
@@ -664,6 +687,37 @@
         <item name="android:statusBarColor">#090E17</item>
         <item name="android:navigationBarColor">#101926</item>
         <item name="android:windowBackground">@color/bg</item>
+    </style>
+    <style name="Theme.Juying.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/juying_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/juying_splash_icon</item>
+        <item name="postSplashScreenTheme">@style/Theme.Juying</item>
+    </style>
+    <style name="Theme.SplashScreen" parent="Theme.SplashScreen.Common">
+        <item name="postSplashScreenTheme">?android:attr/theme</item>
+        <item name="windowSplashScreenAnimationDuration">
+            @integer/default_icon_animation_duration
+        </item>
+        <item name="windowSplashScreenBackground">?android:colorBackground</item>
+        <item name="windowSplashScreenAnimatedIcon">@android:drawable/sym_def_app_icon</item>
+
+    </style>
+    <style name="Theme.SplashScreen.Common" parent="Base.Theme.SplashScreen.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">
+            @drawable/compat_splash_screen_no_icon_background
+        </item>
+        <item name="android:opacity">opaque</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:fitsSystemWindows">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="splashScreenIconSize">@dimen/splashscreen_icon_size_no_background</item>
+    </style>
+    <style name="Theme.SplashScreen.IconBackground" parent="Theme.SplashScreen">
+        <item name="android:windowBackground">@drawable/compat_splash_screen</item>
+        <item name="splashScreenIconSize">@dimen/splashscreen_icon_size_with_background</item>
     </style>
     <style name="Widget.Compat.NotificationActionContainer" parent=""/>
     <style name="Widget.Compat.NotificationActionText" parent=""/>
