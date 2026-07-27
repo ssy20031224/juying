@@ -3,6 +3,32 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val configuredVersionCode = providers.gradleProperty("LANERC_VERSION_CODE")
+    .orNull
+    ?.toIntOrNull()
+val configuredVersionName = providers.gradleProperty("LANERC_VERSION_NAME")
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val configuredManifestUrls = providers.gradleProperty("LANERC_UPDATE_MANIFEST_URLS")
+    .orNull
+    ?.trim()
+    .orEmpty()
+
+val releaseStoreFile = providers.gradleProperty("LANERC_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.gradleProperty("LANERC_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.gradleProperty("LANERC_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.gradleProperty("LANERC_RELEASE_KEY_PASSWORD").orNull
+val releaseSigningAvailable = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
 android {
     namespace = "com.juying.app"
     compileSdk = 34
@@ -11,13 +37,32 @@ android {
         applicationId = "com.juying.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = configuredVersionCode ?: 2
+        versionName = configuredVersionName ?: "1.1.0"
+        buildConfigField(
+            "String",
+            "UPDATE_MANIFEST_URLS",
+            buildConfigString(configuredManifestUrls)
+        )
+    }
+
+    signingConfigs {
+        if (releaseSigningAvailable) {
+            create("release") {
+                storeFile = file(requireNotNull(releaseStoreFile))
+                storePassword = requireNotNull(releaseStorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseSigningAvailable) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -32,6 +77,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
