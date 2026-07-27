@@ -49,17 +49,22 @@ class StorageManager(context: Context) {
         } catch (_: Exception) { emptyList() }
     }
 
+    private fun isMatch(a: SourceItem, b: SourceItem): Boolean {
+        if (itemKey(a) == itemKey(b)) return true
+        val normA = SourceManager.normalizeTitle(a.title)
+        val normB = SourceManager.normalizeTitle(b.title)
+        return normA.isNotBlank() && normA == normB
+    }
+
     fun isFavorite(item: SourceItem): Boolean {
-        val key = itemKey(item)
-        return getFavorites().any { itemKey(it) == key }
+        return getFavorites().any { isMatch(it, item) }
     }
 
     fun toggleFavorite(item: SourceItem): Boolean {
         val list = getFavorites().toMutableList()
-        val key = itemKey(item)
-        val exists = list.any { itemKey(it) == key }
+        val exists = list.any { isMatch(it, item) }
         if (exists) {
-            list.removeAll { itemKey(it) == key }
+            list.removeAll { isMatch(it, item) }
         } else {
             list.add(0, item)
         }

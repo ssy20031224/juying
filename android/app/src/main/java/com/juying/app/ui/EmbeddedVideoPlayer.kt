@@ -89,14 +89,16 @@ private fun formatTime(ms: Long): String {
     }
 }
 
+private fun getScreenBrightness(activity: Activity?): Float {
+    activity ?: return 0.5f
+    val b = activity.window.attributes.screenBrightness
+    return if (b in 0.05f..1f) b else 0.5f
+}
+
 private fun adjustScreenBrightness(activity: Activity?, delta: Float) {
     activity ?: return
     val attributes = activity.window.attributes
-    val current = if (attributes.screenBrightness in 0.01f..1f) {
-        attributes.screenBrightness
-    } else {
-        0.5f
-    }
+    val current = getScreenBrightness(activity)
     attributes.screenBrightness = (current + delta).coerceIn(0.05f, 1f)
     activity.window.attributes = attributes
 }
@@ -219,6 +221,27 @@ fun EmbeddedVideoPlayer(
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showRatioMenu by remember { mutableStateOf(false) }
     var showEpisodeDrawer by remember { mutableStateOf(false) }
+
+    val playerScope = rememberCoroutineScope()
+    var gestureHudType by remember { mutableStateOf("") }
+    var gestureHudValue by remember { mutableStateOf(0) }
+    var gestureHudText by remember { mutableStateOf("") }
+    var gestureHudJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var scanlineProgress by remember { mutableStateOf(0f) }
+    var isScanlineActive by remember { mutableStateOf(false) }
+
+    val triggerHud = { type: String, value: Int, text: String, durationMs: Long ->
+        gestureHudType = type
+        gestureHudValue = value
+        gestureHudText = text
+        gestureHudJob?.cancel()
+        if (durationMs > 0L) {
+            gestureHudJob = playerScope.launch {
+                delay(durationMs)
+                gestureHudText = ""
+            }
+        }
+    }
 
     // Toggle fullscreen helper
     val toggleFullscreen = {
@@ -406,6 +429,7 @@ fun EmbeddedVideoPlayer(
     LaunchedEffect(selectedQuality) {
         val builder = exoPlayer.trackSelectionParameters.buildUpon()
         when (selectedQuality) {
+            "4K" -> builder.setMaxVideoSize(3840, 2160)
             "1080p" -> builder.setMaxVideoSize(1920, 1080)
             "720p" -> builder.setMaxVideoSize(1280, 720)
             "480p" -> builder.setMaxVideoSize(854, 480)
@@ -419,6 +443,17 @@ fun EmbeddedVideoPlayer(
             C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
         } else {
             C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        }
+        if (qualityEnhancement) {
+            isScanlineActive = true
+            val anim = androidx.compose.animation.core.Animatable(0f)
+            anim.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 1500, easing = LinearEasing)
+            ) {
+                scanlineProgress = value
+            }
+            isScanlineActive = false
         }
     }
 
@@ -449,63 +484,91 @@ fun EmbeddedVideoPlayer(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .then(if (isFullscreen) Modifier.pointerInput(duration, isLocked) {
+            .pointerInput(duration, isLocked) {
                 var startX = 0f
                 var totalX = 0f
                 var totalY = 0f
+                var volumeAcc = 0f
+
                 detectDragGestures(
                     onDragStart = { offset ->
                         startX = offset.x
                         totalX = 0f
                         totalY = 0f
+                        volumeAcc = 0f
                     },
-                    onDrag = { change, amount ->
+                    onDrag = { _, amount ->
                         totalX += amount.x
                         totalY += amount.y
-                        if (!isFullscreen || isLocked) return@detectDragGestures
+                        if (isLocked) return@detectDragGestures
+
+                        val width = size.width.coerceAtLeast(1)
+
                         if (kotlin.math.abs(totalY) > kotlin.math.abs(totalX)) {
-                            val delta = (-amount.y / 900f).coerceIn(-0.08f, 0.08f)
-                            val width = size.width.coerceAtLeast(1)
+                            val delta = (-amount.y / 700f).coerceIn(-0.08f, 0.08f)
                             if (startX < width * 0.5f) {
                                 adjustScreenBrightness(activity, delta)
+                                val currentB = getScreenBrightness(activity)
+                                val pct = (currentB * 100).toInt()
+                                triggerHud("brightness", pct, "亮度 $pct%", 1200L)
                             } else {
                                 audioManager?.let { manager ->
-                                    val max = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                                    val current = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                    val step = (amount.y / -36f).toInt()
-                                    manager.setStreamVolume(
-                                        AudioManager.STREAM_MUSIC,
-                                        (current + step).coerceIn(0, max),
-                                        0
-                                    )
+                                    val maxVol = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                    val curVol = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                    volumeAcc += -amount.y / 25f
+                                    val step = volumeAcc.toInt()
+                                    if (step != 0) {
+                                        volumeAcc -= step
+                                        val target = (curVol + step).coerceIn(0, maxVol)
+                                        manager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                                        val pct = if (maxVol > 0) (target * 100) / maxVol else 0
+                                        triggerHud("volume", target, "音量 $pct%", 1200L)
+                                    }
                                 }
                             }
+                        } else if (kotlin.math.abs(totalX) > 15f) {
+                            val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
+                            val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
+                            val targetMs = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, duration.coerceAtLeast(0L))
+                            val label = if (deltaMs >= 0) "快进" else "快退"
+                            triggerHud("seek", if (deltaMs >= 0) 1 else -1, "$label ${formatTime(targetMs)} / ${formatTime(duration)}", 1500L)
                         }
                     },
                     onDragEnd = {
-                        if (!isFullscreen || isLocked || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
+                        if (isLocked || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
-                        val proportion = (totalX / width.toFloat()).coerceIn(-0.35f, 0.35f)
+                        val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                         val deltaMs = if (kotlin.math.abs(totalX) < width * 0.35f) {
                             if (totalX > 0) 15_000L else -15_000L
                         } else {
                             (duration.coerceAtLeast(60_000L) * proportion).toLong()
                         }
                         exoPlayer.seekTo(
-                            (exoPlayer.currentPosition + deltaMs)
-                                .coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                            (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
                         )
                     }
                 )
-            } else Modifier)
+            }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = {
-                        controlsVisible = !controlsVisible
+                        if (currentSpeed != 1.0f) {
+                            currentSpeed = 1.0f
+                            gestureHudText = ""
+                        } else {
+                            controlsVisible = !controlsVisible
+                        }
                     },
                     onLongPress = { offset ->
-                        if (isFullscreen && !isLocked) {
-                            currentSpeed = if (offset.x < size.width * 0.5f) 0.5f else maxSpeed
+                        if (!isLocked) {
+                            val width = size.width.coerceAtLeast(1)
+                            if (offset.x < width * 0.5f) {
+                                currentSpeed = 0.5f
+                                triggerHud("speed", 0, "0.5X 慢速播放中", 0L)
+                            } else {
+                                currentSpeed = maxSpeed
+                                triggerHud("speed", 1, "${maxSpeed}X 极速播放中", 0L)
+                            }
                         }
                     },
                     onDoubleTap = {
@@ -548,6 +611,66 @@ fun EmbeddedVideoPlayer(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+        }
+
+        // ── Hardware Super-Res Scanline Comparison Line Animation (Monochrome) ──
+        if (isScanlineActive) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val lineX = maxWidth * scanlineProgress
+                Box(
+                    modifier = Modifier
+                        .offset(x = lineX)
+                        .width(2.dp)
+                        .fillMaxHeight()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color.White.copy(alpha = 0.8f), Color.White, Color.White.copy(alpha = 0.8f), Color.Transparent)
+                            )
+                        )
+                )
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color.Black.copy(alpha = 0.75f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 48.dp)
+                ) {
+                    Text(
+                        "硬件画质增强对比中",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+
+        // ── Gesture HUD OSD Badge Overlay (Monochrome White Icons) ──
+        if (gestureHudText.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color.Black.copy(alpha = 0.82f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    when (gestureHudType) {
+                        "brightness" -> Icon(Icons.Default.WbSunny, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                        "volume" -> Icon(if (gestureHudValue > 0) Icons.Default.VolumeUp else Icons.Default.VolumeOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                        "seek" -> Icon(if (gestureHudValue >= 0) Icons.Default.FastForward else Icons.Default.FastRewind, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                        "speed" -> Icon(Icons.Default.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                    }
+                    Text(gestureHudText, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                }
+            }
         }
 
         if (danmakuEnabled && sentDanmaku.isNotEmpty()) {
@@ -798,14 +921,14 @@ fun EmbeddedVideoPlayer(
                                     )
                                 }
 
-                                // Line / Setting
+                                 // Danmaku Setting
                                 IconButton(
-                                    onClick = { showRatioMenu = true },
+                                    onClick = { showDanmakuSettings = true },
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
                                         Icons.Default.Settings,
-                                        contentDescription = "清晰度/线路",
+                                        contentDescription = "弹幕设置",
                                         tint = Color.White,
                                         modifier = Modifier.size(18.dp)
                                     )
@@ -942,7 +1065,7 @@ fun EmbeddedVideoPlayer(
                 title = { Text("清晰度与画质增强", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                 text = {
                     Column {
-                        listOf("Auto", "1080p", "720p", "480p").forEach { quality ->
+                        listOf("Auto", "4K", "1080p", "720p", "480p").forEach { quality ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -968,7 +1091,7 @@ fun EmbeddedVideoPlayer(
                             Column(Modifier.weight(1f)) {
                                 Text("硬件画质增强", color = AppColors.text)
                                 Text(
-                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后会增加 GPU/解码负载",
+                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后使用 GPU 纹理色彩增强对比",
                                     color = AppColors.muted,
                                     fontSize = 11.sp
                                 )
@@ -1045,9 +1168,10 @@ fun EmbeddedVideoPlayer(
                 text = {
                     Column {
                         listOf(
-                            AspectRatioFrameLayout.RESIZE_MODE_FIT to "默认适应 (Fit)",
-                            AspectRatioFrameLayout.RESIZE_MODE_FILL to "铺满屏幕 (Fill)",
-                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "裁剪拉伸 (Zoom)"
+                            AspectRatioFrameLayout.RESIZE_MODE_FIT to "默认 (按原比例居中)",
+                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "铺满 (无黑边满屏)",
+                            AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH to "裁剪 (等比例裁剪)",
+                            AspectRatioFrameLayout.RESIZE_MODE_FILL to "拉伸 (强行填充整屏)"
                         ).forEach { (mode, label) ->
                             Row(
                                 modifier = Modifier

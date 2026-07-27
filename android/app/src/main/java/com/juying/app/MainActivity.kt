@@ -1045,11 +1045,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
-        playerReturnView = when (view) {
-            "library" -> "library"
-            "profile" -> "profile"
-            else -> "home"
-        }
+        playerReturnView = view
         pendingEpisodeName = preferredEpisodeName
         viewModelScope.launch {
             // Older/merged home cards may contain "sourceA,sourceB". The item id
@@ -1358,12 +1354,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun goBackFromPlayer() {
         val destination = playerReturnView
         view = destination
-        when (destination) {
-            "library" -> {
+        when {
+            destination == "library" -> {
                 items = libraryItems
                 reloadStorageData()
             }
-            "profile" -> reloadStorageData()
+            destination.startsWith("profile") -> reloadStorageData()
         }
     }
 
