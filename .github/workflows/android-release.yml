@@ -79,7 +79,7 @@ jobs:
           INPUT_VERSION_NAME: ${{ inputs.version_name }}
           INPUT_VERSION_CODE: ${{ inputs.version_code }}
         run: |
-          if [[ -z "${INPUT_VERSION_NAME//[[:space:]]/}" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -z "${INPUT_VERSION_NAME//[[:space:]]/}" ]]; then
             echo "::error::version_name is required for a manual Android release."
             exit 1
           fi
