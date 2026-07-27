@@ -1,5 +1,13 @@
 # 项目变更记录
 
+## 2026-07-27：Android 三渠道自动签名构建与更新发布
+
+- 新增 GitHub Actions Android Release 工作流，支持版本标签和手动触发，自动构建正式签名 APK、生成 SHA-256 与更新清单、保存构建产物并创建 GitHub Release。
+- 新增阿里云 OSS、腾讯云 COS 可选上传通道；完全未配置时自动跳过，云上传异常不会阻止 GitHub Release 兜底发布。
+- Android Gradle 构建支持从受保护属性注入版本、签名文件和国内更新清单 URL；keystore 与云密钥不进入仓库。
+- 新增 `scripts/release/android_release.py`，统一验证语义版本、生成稳定 `versionCode`、生成 `update.json`，并隔离各云渠道上传错误。
+- 重写 Android 更新分发文档，记录最小权限、GitHub Secrets/Variables、正式签名、触发发布和国内 CDN 配置方法。
+
 ## 2026-07-26：Android 多源播放失败隔离与诊断修复
 
 - 完整审计并语法校验 `remote_sources/` 的 14 个 JS 源脚本；将损坏的 Android 内置 `guazi.js`、`sanqiu.js` 资产与已校验远程版本同步，避免 APK 冷启动时因语法错误丢源。

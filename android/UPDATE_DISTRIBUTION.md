@@ -17,9 +17,9 @@
 
 | 文件 | 路径 |
 |---|---|
-| APK | `android/lanerc-版本号.apk` |
+| APK | `android/juying-版本号.apk` |
 | 更新清单 | `api/android/update.json` |
-| GitHub Release APK | `releases/download/v版本号/lanerc-版本号.apk` |
+| GitHub Release APK | `releases/download/v版本号/juying-版本号.apk` |
 
 Android 构建时会把已配置的 OSS/COS 清单地址写入 APK。客户端按顺序
 检查阿里云、腾讯云、`lanerc.app`，最后使用 GitHub Releases API 兜底。

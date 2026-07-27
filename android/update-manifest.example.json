@@ -1,12 +1,12 @@
 {
   "versionCode": 1002000,
   "versionName": "1.2.0",
-  "title": "Lanerc 1.2.0 更新",
+  "title": "juying 1.2.0 更新",
   "notes": "1. 优化多源解析\n2. 修复播放器问题\n3. 提升片库加载速度",
   "apkUrls": [
-    "https://download.example.com/android/lanerc-1.2.0.apk",
-    "https://download2.example.com/android/lanerc-1.2.0.apk",
-    "https://github.com/ssy20031224/juying/releases/download/v1.2.0/lanerc-1.2.0.apk"
+    "https://download.example.com/android/juying-1.2.0.apk",
+    "https://download2.example.com/android/juying-1.2.0.apk",
+    "https://github.com/ssy20031224/juying/releases/download/v1.2.0/juying-1.2.0.apk"
   ],
   "sha256": "填写发布 APK 的 64 位十六进制 SHA-256"
 }

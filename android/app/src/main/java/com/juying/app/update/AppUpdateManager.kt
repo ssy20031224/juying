@@ -116,14 +116,14 @@ class AppUpdateManager(private val context: Context) {
             "updates"
         )
         outputDir.mkdirs()
-        val output = File(outputDir, "lanerc-${safe(info.versionName)}.apk")
+        val output = File(outputDir, "juying-${safe(info.versionName)}.apk")
         val temporary = File(outputDir, "${output.name}.part")
 
         var lastError = "没有可用的下载地址"
         info.apkUrls.filter { it.startsWith("https://", ignoreCase = true) }.forEach { url ->
             val request = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Lanerc/${BuildConfig.VERSION_NAME} Android")
+                .header("User-Agent", "juying/${BuildConfig.VERSION_NAME} Android")
                 .get()
                 .build()
             try {
@@ -256,7 +256,7 @@ class AppUpdateManager(private val context: Context) {
         if (!url.startsWith("https://", ignoreCase = true)) return null
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "Lanerc/${BuildConfig.VERSION_NAME} Android")
+            .header("User-Agent", "juying/${BuildConfig.VERSION_NAME} Android")
             .apply { if (acceptJson) header("Accept", "application/vnd.github+json") }
             .get()
             .build()

@@ -572,7 +572,7 @@ fun EmbeddedVideoPlayer(
         ) {
             Box(Modifier.fillMaxSize()) {
                 if (isLocked) {
-                    // Lock Screen Only Button
+                    // Lock Screen Only Button (Monochrome white)
                     IconButton(
                         onClick = { isLocked = false },
                         modifier = Modifier
@@ -581,7 +581,7 @@ fun EmbeddedVideoPlayer(
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
-                        Icon(Icons.Default.Lock, contentDescription = "解锁屏幕", tint = AppColors.cyan)
+                        LockIcon(tint = Color.White)
                     }
                 } else {
                     // ── TOP BAR (Back, Title, PiP, Cast, More) ──
@@ -644,7 +644,7 @@ fun EmbeddedVideoPlayer(
                         }
                     }
 
-                    // ── RIGHT CENTER LOCK BUTTON ──
+                    // ── RIGHT CENTER LOCK BUTTON (Monochrome white) ──
                     IconButton(
                         onClick = { isLocked = true },
                         modifier = Modifier
@@ -653,7 +653,7 @@ fun EmbeddedVideoPlayer(
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
-                        Text("🔓", fontSize = 18.sp)
+                        UnlockIcon(tint = Color.White)
                     }
 
                     // ── BOTTOM OVERLAY CONTAINER ──
@@ -1100,5 +1100,41 @@ fun EmbeddedVideoPlayer(
                 containerColor = AppColors.panel
             )
         }
+    }
+}
+
+@Composable
+fun LockIcon(tint: Color = Color.White, modifier: Modifier = Modifier.size(22.dp)) {
+    Icon(Icons.Default.Lock, contentDescription = "已锁定", tint = tint, modifier = modifier)
+}
+
+@Composable
+fun UnlockIcon(tint: Color = Color.White, modifier: Modifier = Modifier.size(22.dp)) {
+    androidx.compose.foundation.Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = w * 0.11f
+
+        // Body (lower rounded box)
+        drawRoundRect(
+            color = tint,
+            topLeft = androidx.compose.ui.geometry.Offset(w * 0.15f, h * 0.45f),
+            size = androidx.compose.ui.geometry.Size(w * 0.7f, h * 0.48f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.12f)
+        )
+        // Shackle (upper arch, open/lifted up)
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(w * 0.32f, h * 0.45f)
+            lineTo(w * 0.32f, h * 0.28f)
+            cubicTo(w * 0.32f, h * 0.10f, w * 0.68f, h * 0.10f, w * 0.68f, h * 0.20f)
+        }
+        drawPath(
+            path = path,
+            color = tint,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = stroke,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        )
     }
 }

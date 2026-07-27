@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/juying_splash_vector">
+    <target
+        android:name="pulse"
+        android:animation="@animator/juying_splash_pulse" />
+</animated-vector>

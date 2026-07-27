@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="juying_splash_background">#050817</color>
+
+    <style name="Theme.Juying.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/juying_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/juying_splash_icon</item>
+        <item name="postSplashScreenTheme">@style/Theme.Juying</item>
+    </style>
+
     <style name="Theme.Juying" parent="android:Theme.Material.NoActionBar">
         <item name="android:colorBackground">#090E17</item>
         <item name="android:statusBarColor">#090E17</item>

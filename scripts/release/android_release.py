@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and publish Lanerc Android releases.
+"""Prepare and publish juying Android releases.
 
 The script deliberately reads cloud credentials from environment variables.
 It never accepts credentials as command-line arguments, which keeps them out
@@ -143,7 +143,7 @@ def metadata_command(args: argparse.Namespace) -> int:
         "version_name": version_name,
         "version_code": version_code,
         "tag": f"v{version_name}",
-        "apk_name": f"lanerc-{version_name}.apk",
+        "apk_name": f"juying-{version_name}.apk",
     }
     write_github_output(args.github_output, values)
     return 0
@@ -197,7 +197,7 @@ def manifest_command(args: argparse.Namespace) -> int:
     manifest = {
         "versionCode": version_code,
         "versionName": version_name,
-        "title": args.title.strip() or f"Lanerc {version_name} 更新",
+        "title": args.title.strip() or f"juying {version_name} 更新",
         "notes": notes,
         "apkUrls": urls,
         "sha256": sha256_file(apk_path),

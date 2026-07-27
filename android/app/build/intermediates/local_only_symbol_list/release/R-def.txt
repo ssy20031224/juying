@@ -1,0 +1,5 @@
+R_DEF: Internal format may change without notice
+local
+color bg
+style Theme.Juying
+xml update_file_paths

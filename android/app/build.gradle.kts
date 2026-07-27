@@ -113,4 +113,7 @@ dependencies {
 
     // Image loading
     implementation("io.coil-kt:coil-compose:2.5.0")
+
+    // Android 12+ compatible animated system splash screen
+    implementation("androidx.core:core-splashscreen:1.0.1")
 }

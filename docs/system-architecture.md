@@ -351,3 +351,12 @@ flowchart LR
 5. 八个 JS/Browser 来源尚无安全运行时。
 6. 数据库为空，没有持久化元数据、进度和来源健康。
 7. `config/source-manifests.json` 的部分 `adapterStatus` 与代码现状不同，需要在适配器验收后统一维护。
+
+## 16. Android 发布与更新分发
+
+- `.github/workflows/android-release.yml` 在版本标签或手动触发时构建正式签名 APK。
+- Android `versionName`、`versionCode`、签名参数和更新清单地址由 CI 通过 Gradle 属性注入，密钥不进入仓库。
+- `scripts/release/android_release.py` 生成带 SHA-256 的 `update.json`，并可独立上传到阿里云 OSS、腾讯云 COS。
+- GitHub Release 始终作为发布产物和更新兜底；国内 OSS/COS 渠道可选，未配置时自动跳过。
+- APK 只包含公开的清单 URL，不包含云 AccessKey、SecretKey、keystore 或签名密码。
+- 客户端依次检查构建时注入的国内清单、`lanerc.app` 默认清单和 GitHub Releases API；单一渠道失败不会影响其他渠道。

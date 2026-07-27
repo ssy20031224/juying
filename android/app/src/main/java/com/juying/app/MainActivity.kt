@@ -3,12 +3,14 @@
 package com.juying.app
 
 import android.app.Application
+import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -26,8 +28,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -36,9 +41,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -51,11 +58,16 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.juying.app.source.*
 import com.juying.app.ui.EmbeddedVideoPlayer
+import com.juying.app.update.AppUpdateInfo
+import com.juying.app.update.AppUpdateManager
+import com.juying.app.update.UpdateCheckResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -63,6 +75,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import java.io.File
 import java.util.Calendar
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 data class CustomColors(
     val bg: Color,
@@ -146,6 +159,7 @@ fun LoadingSpinner(modifier: Modifier = Modifier, color: Color = AppColors.cyan)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sourceManager = SourceManager(application)
     private val storageManager = StorageManager(application)
+    private val appUpdateManager = AppUpdateManager(application)
     private var isAppInitialized = false
     private var playerReturnView = "home"
     private var pendingEpisodeName: String? = null
@@ -191,6 +205,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var userEmail by mutableStateOf(storageManager.getUserEmail())
     var userPassword by mutableStateOf(storageManager.getUserPassword())
     var userAvatarIndex by mutableStateOf(storageManager.getUserAvatar())
+    var updateChecking by mutableStateOf(false)
+    var updateInfo by mutableStateOf<AppUpdateInfo?>(null)
+    var updateDialogVisible by mutableStateOf(false)
+    var updateMessage by mutableStateOf("")
+    var updateDownloadProgress by mutableStateOf<Int?>(null)
+
+    fun checkForAppUpdate(manual: Boolean = true) {
+        if (updateChecking || updateDownloadProgress != null) return
+        viewModelScope.launch {
+            updateChecking = true
+            if (manual) updateMessage = "正在检查更新…"
+            when (val result = appUpdateManager.check(manual)) {
+                is UpdateCheckResult.Available -> {
+                    updateInfo = result.info
+                    updateDialogVisible = true
+                    updateMessage = "发现新版本 ${result.info.versionName}"
+                }
+                UpdateCheckResult.Latest -> {
+                    if (manual) updateMessage = "当前已是最新版本"
+                }
+                is UpdateCheckResult.Failed -> {
+                    if (manual) updateMessage = "检查失败：${result.message}"
+                }
+            }
+            updateChecking = false
+        }
+    }
+
+    fun downloadAndInstallUpdate(activity: Activity) {
+        val info = updateInfo ?: return
+        if (updateDownloadProgress != null) return
+        viewModelScope.launch {
+            updateDownloadProgress = 0
+            updateMessage = "正在下载 ${info.versionName}"
+            val result = appUpdateManager.download(info) { progress ->
+                viewModelScope.launch { updateDownloadProgress = progress }
+            }
+            result.onSuccess { apk ->
+                updateDownloadProgress = 100
+                updateMessage = "下载完成，正在打开安装界面"
+                updateDialogVisible = false
+                appUpdateManager.installOrRequestPermission(activity, apk)
+            }.onFailure { error ->
+                updateDownloadProgress = null
+                updateMessage = "下载失败：${error.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        updateDialogVisible = false
+        updateMessage = "已跳过本次更新，可继续使用当前版本"
+    }
 
     fun updateThemeMode(mode: String) {
         themeMode = mode
@@ -324,11 +391,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         fun buildHomeSectionsList(): List<HomeSection> {
+            val hotTitles = presetSections["热门推荐"]
+                ?.map { SourceManager.normalizeTitle(it.title) }
+                ?.toSet() ?: emptySet()
+
             return presetSections.mapNotNull { (title, list) ->
                 val deduped = list.distinctBy { SourceManager.normalizeTitle(it.title) }
-                if (deduped.isEmpty()) null
+                val finalItems = if (title == "最新更新" && hotTitles.isNotEmpty()) {
+                    val distinctFromHot = deduped.filter { SourceManager.normalizeTitle(it.title) !in hotTitles }
+                    if (distinctFromHot.isNotEmpty()) distinctFromHot else deduped
+                } else {
+                    deduped
+                }
+                if (finalItems.isEmpty()) null
                 else {
-                    HomeSection(title = title, key = title, items = deduped.take(16))
+                    HomeSection(title = title, key = title, items = finalItems.take(16))
                 }
             }
         }
@@ -338,28 +415,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loading = true
             notice = "正在并发动态加载多源视频..."
             if (cachedHomePool.isNotEmpty()) {
-                cachedHomePool.forEach { item ->
+                cachedHomePool.forEachIndexed { index, item ->
                     val kind = item.kind + " " + item.title
                     val targetKey = when {
                         kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
                         kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
                         kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
-                        else -> "热门推荐"
+                        index % 2 == 0 -> "热门推荐"
+                        else -> "最新更新"
                     }
                     val targetList = presetSections[targetKey]
                     if (targetList != null) {
                         val norm = SourceManager.normalizeTitle(item.title)
                         if (targetList.none { SourceManager.normalizeTitle(it.title) == norm }) {
                             targetList.add(item)
-                        }
-                    }
-                    if (targetKey == "热门推荐") {
-                        val updateList = presetSections["最新更新"]
-                        if (updateList != null) {
-                            val norm = SourceManager.normalizeTitle(item.title)
-                            if (updateList.none { SourceManager.normalizeTitle(it.title) == norm }) {
-                                updateList.add(item)
-                            }
                         }
                     }
                 }
@@ -399,28 +468,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                         if (fetchedItems.isNotEmpty()) {
                             synchronized(presetSections) {
-                                fetchedItems.forEach { item ->
+                                fetchedItems.forEachIndexed { idx, item ->
                                     val kind = item.kind + " " + item.title + " " + item.tags.joinToString(" ")
                                     val targetKey = when {
                                         kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
                                         kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
                                         kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
-                                        else -> "热门推荐"
+                                        idx % 2 == 0 -> "热门推荐"
+                                        else -> "最新更新"
                                     }
                                     val targetList = presetSections[targetKey]
                                     if (targetList != null) {
                                         val norm = SourceManager.normalizeTitle(item.title)
                                         if (targetList.none { SourceManager.normalizeTitle(it.title) == norm }) {
                                             targetList.add(item)
-                                        }
-                                    }
-                                    if (targetKey == "热门推荐") {
-                                        val updateList = presetSections["最新更新"]
-                                        if (updateList != null) {
-                                            val norm = SourceManager.normalizeTitle(item.title)
-                                            if (updateList.none { SourceManager.normalizeTitle(it.title) == norm }) {
-                                                updateList.add(item)
-                                            }
                                         }
                                     }
                                 }
@@ -673,7 +734,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sort?.let { activeSort = it }
         source?.let { activeSource = it }
         page = 1
-        fetchLibrary()
+
+        val pool = (cachedHomePool + libraryItems).distinctBy { SourceManager.normalizeTitle(it.title) }
+        val instant = applyLibraryFiltersFast(pool)
+        libraryItems = instant
+        items = instant
+        totalLibrary = instant.size
+        loading = false
+        notice = "已为你即时筛选出 ${instant.size} 部作品"
+
+        fetchLibrary(reset = true)
     }
 
     private fun serverCategory(adapter: SourceAdapter, kind: String): String {
@@ -750,38 +820,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var libraryGeneration = 0
 
     private fun applyLibraryFiltersFast(input: List<SourceItem>): List<SourceItem> {
-        var filtered = input
+        var filtered = input.distinctBy { SourceManager.normalizeTitle(it.title) }
+
         if (activeKind != kinds.first()) {
             val key = activeKind.lowercase()
             filtered = filtered.filter { item ->
-                val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
-                metadata.isBlank() || metadata.contains(key)
+                val kindStr = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
+                when (activeKind) {
+                    "日漫" -> kindStr.contains("日漫") || kindStr.contains("日本") || kindStr.contains("日产")
+                    "国漫" -> kindStr.contains("国漫") || kindStr.contains("国产") || kindStr.contains("大陆") || kindStr.contains("华语")
+                    "剧场版" -> kindStr.contains("剧场") || kindStr.contains("电影") || item.title.contains("剧场版") || item.title.contains("电影")
+                    "欧美" -> kindStr.contains("欧美") || kindStr.contains("美国") || kindStr.contains("迪士尼")
+                    else -> kindStr.contains(key)
+                }
             }
         }
+
         if (activeGenre != genres.first()) {
             val key = activeGenre.lowercase()
             filtered = filtered.filter { item ->
-                val metadata = "${item.kind} ${item.tags.joinToString(" ")}".lowercase()
-                metadata.isBlank() || metadata.contains(key)
+                val metadata = "${item.kind} ${item.tags.joinToString(" ")} ${item.description}".lowercase()
+                metadata.contains(key)
             }
         }
-        if (activeYear != years.first() && activeYear != years.last()) {
+
+        if (activeYear != years.first()) {
+            if (activeYear == years.last()) {
+                filtered = filtered.filter { item ->
+                    (item.year.toIntOrNull() ?: 2024) < 2003
+                }
+            } else {
+                filtered = filtered.filter { item ->
+                    item.year.contains(activeYear)
+                }
+            }
+        }
+
+        if (activeSource != "全部") {
+            val srcLower = activeSource.lowercase()
             filtered = filtered.filter { item ->
-                item.year.isBlank() || item.year.contains(activeYear)
-            }
-        } else if (activeYear == years.last()) {
-            filtered = filtered.filter {
-                it.year.toIntOrNull()?.let { year -> year < 2003 } ?: true
+                val itemSourceStr = "${item.sourceTitle} ${item.sourceKey}".lowercase()
+                itemSourceStr.contains(srcLower)
             }
         }
-        if (activeStatus != statuses.first()) {
-            filtered = filtered.filter { item ->
-                val status = item.status
-                status.isBlank() ||
-                    (activeStatus == statuses[1] && (status.contains("\u8fde\u8f7d") || status.contains("\u66f4\u65b0"))) ||
-                    (activeStatus == statuses[2] && (status.contains("\u5b8c\u7ed3") || status.contains("\u5168\u96c6")))
-            }
-        }
+
         return when (activeSort) {
             "hot" -> filtered.sortedWith(compareByDescending<SourceItem> { it.sourceCount }
                 .thenByDescending { it.score.toDoubleOrNull() ?: 0.0 })
@@ -863,23 +945,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val done = completedSources.incrementAndGet()
                             withContext(Dispatchers.Main) {
                                 if (requestId != libraryGeneration) return@withContext
-                                val existingKeys = currentExisting
+                                val existingKeys = libraryItems
                                     .map { SourceManager.normalizeTitle(it.title) }
                                     .toSet()
-                                val newItems = streamed.filter {
+                                val appendOnly = streamed.filter {
                                     SourceManager.normalizeTitle(it.title) !in existingKeys
                                 }
-                                val merged = if (reset) {
-                                    SourceManager.mergeSearchItems(currentExisting + streamed)
-                                } else {
-                                    currentExisting + newItems
+                                if (appendOnly.isNotEmpty()) {
+                                    val finalList = libraryItems + appendOnly
+                                    libraryItems = finalList
+                                    items = finalList
+                                    totalLibrary = finalList.size
                                 }
-                                libraryItems = merged
-                                items = merged
-                                totalLibrary = merged.size
                                 loading = false
                                 libraryLoadingMore = false
-                                notice = "received ${merged.size} items; ${done}/${targetAdapters.size} sources complete"
+                                notice = "已检索呈现 ${items.size} 部符合要求作品 (${done}/${targetAdapters.size} 源就绪)"
                             }
                         }
                     }
@@ -1384,21 +1464,146 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 class MainActivity : ComponentActivity() {
+    private lateinit var updateManager: AppUpdateManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
+        updateManager = AppUpdateManager(this)
         enableEdgeToEdge()
         setContent {
             val vm: MainViewModel = viewModel()
+            var showStartupSplash by remember { mutableStateOf(true) }
             LaunchedEffect(Unit) {
                 vm.initApp()
+                vm.checkForAppUpdate(manual = false)
             }
-            JuyingApp(vm)
+            if (showStartupSplash) {
+                JuyingStartupSplash { showStartupSplash = false }
+            } else {
+                JuyingApp(vm)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::updateManager.isInitialized) {
+            updateManager.resumePendingInstall(this)
+        }
+    }
+}
+
+@Composable
+private fun JuyingStartupSplash(onFinished: () -> Unit) {
+    var entered by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        targetValue = if (entered) 1f else 0f,
+        animationSpec = tween(700, easing = FastOutSlowInEasing),
+        label = "juying-splash-alpha"
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (entered) 1f else 0.88f,
+        animationSpec = tween(900, easing = FastOutSlowInEasing),
+        label = "juying-splash-scale"
+    )
+    val glowTransition = rememberInfiniteTransition(label = "juying-splash-glow")
+    val glow by glowTransition.animateFloat(
+        initialValue = 0.65f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "juying-splash-glow-alpha"
+    )
+
+    LaunchedEffect(Unit) {
+        entered = true
+        delay(1850)
+        onFinished()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF050817))
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.juying_splash_art),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0x22050817),
+                            Color(0x44050817),
+                            Color(0xF2050817)
+                        )
+                    )
+                )
+        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 92.dp)
+                .graphicsLayer {
+                    this.alpha = alpha
+                    scaleX = scale
+                    scaleY = scale
+                }
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.juying_icon_art),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(92.dp)
+                    .clip(RoundedCornerShape(26.dp))
+            )
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                text = "juying",
+                color = Color.White,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "发现你的下一部心动番剧",
+                color = Color(0xFFD7E8FF),
+                fontSize = 13.sp
+            )
+            Spacer(modifier = Modifier.height(22.dp))
+            Box(
+                modifier = Modifier
+                    .width(112.dp)
+                    .height(3.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x5563E6FF))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(glow)
+                        .clip(CircleShape)
+                        .background(Color(0xFF63E6FF))
+                )
+            }
         }
     }
 }
 
 @Composable
 fun JuyingApp(vm: MainViewModel) {
+    val activity = LocalContext.current as? Activity
     val systemDark = isSystemInDarkTheme()
     val isDark = when (vm.themeMode) {
         "light" -> false
@@ -1506,6 +1711,82 @@ fun JuyingApp(vm: MainViewModel) {
                     }
                 }
             }
+
+            if (vm.updateDialogVisible) {
+                vm.updateInfo?.let { info ->
+                    AlertDialog(
+                        onDismissRequest = {
+                            if (vm.updateDownloadProgress == null) vm.dismissUpdate()
+                        },
+                        icon = {
+                            Icon(Icons.Default.Refresh, contentDescription = null, tint = AppColors.cyan)
+                        },
+                        title = {
+                            Text(
+                                info.title.ifBlank { "发现新版本 ${info.versionName}" },
+                                color = AppColors.text
+                            )
+                        },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    "当前版本 ${BuildConfig.VERSION_NAME} → ${info.versionName}",
+                                    color = AppColors.cyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    info.notes.ifBlank { "修复问题并提升使用体验" },
+                                    color = AppColors.muted,
+                                    maxLines = 8,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                vm.updateDownloadProgress?.let { progress ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(5.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(AppColors.panel2)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth((progress.coerceIn(0, 100)) / 100f)
+                                                .fillMaxHeight()
+                                                .background(AppColors.cyan)
+                                        )
+                                    }
+                                    Text("正在下载 $progress%", color = AppColors.muted, fontSize = 12.sp)
+                                }
+                                Text(
+                                    "更新不是强制的，暂不更新仍可继续使用当前版本。",
+                                    color = AppColors.muted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    activity?.let { vm.downloadAndInstallUpdate(it) }
+                                },
+                                enabled = activity != null && vm.updateDownloadProgress == null,
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                            ) {
+                                Text("下载并安装")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = { vm.dismissUpdate() },
+                                enabled = vm.updateDownloadProgress == null
+                            ) {
+                                Text("以后再说", color = AppColors.muted)
+                            }
+                        },
+                        containerColor = AppColors.panel
+                    )
+                }
+            }
         }
     }
 }
@@ -1543,50 +1824,69 @@ fun HomeView(vm: MainViewModel) {
             Spacer(Modifier.width(8.dp))
 
             // Compact Search Bar in Middle
-            OutlinedTextField(
-                value = vm.query,
-                onValueChange = {
-                    vm.query = it
-                    if (it.isBlank()) vm.clearSearch()
-                },
+            // Compact Search Bar in Middle (BasicTextField for zero text clipping)
+            Surface(
                 modifier = Modifier
                     .weight(1f)
-                    .height(44.dp),
-                placeholder = { Text("今天你想看些什么？", color = AppColors.muted, fontSize = 12.sp) },
-                leadingIcon = { Icon(Icons.Default.Search, null, tint = AppColors.muted, modifier = Modifier.size(18.dp)) },
-                trailingIcon = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(end = 4.dp)
-                    ) {
-                        if (vm.query.isNotEmpty()) {
-                            IconButton(onClick = { vm.clearSearch() }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.Close, "清除", tint = AppColors.muted, modifier = Modifier.size(15.dp))
+                    .height(40.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = Color.White.copy(alpha = 0.08f),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (vm.query.isNotBlank()) AppColors.cyan else Color.White.copy(alpha = 0.15f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = AppColors.muted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    BasicTextField(
+                        value = vm.query,
+                        onValueChange = {
+                            vm.query = it
+                            if (it.isBlank()) vm.clearSearch()
+                        },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        textStyle = TextStyle(color = AppColors.text, fontSize = 14.sp),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { vm.executeSearch(vm.query) }),
+                        cursorBrush = SolidColor(AppColors.cyan),
+                        decorationBox = @Composable { innerTextField ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (vm.query.isEmpty()) {
+                                    Text("今天你想看些什么？", color = AppColors.muted, fontSize = 12.sp)
+                                }
+                                innerTextField()
                             }
-                            Spacer(Modifier.width(2.dp))
                         }
-                        val arrowTint = if (vm.query.isNotBlank()) AppColors.cyan else AppColors.muted.copy(alpha = 0.6f)
-                        IconButton(
-                            onClick = {
-                                if (vm.query.isNotBlank()) vm.executeSearch(vm.query)
-                            },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    )
+                    if (vm.query.isNotEmpty()) {
+                        IconButton(onClick = { vm.clearSearch() }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Close, "清除", tint = AppColors.muted, modifier = Modifier.size(15.dp))
                         }
+                        Spacer(Modifier.width(2.dp))
                     }
-                },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { vm.executeSearch(vm.query) }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = AppColors.cyan,
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.12f),
-                    focusedTextColor = AppColors.text,
-                    unfocusedTextColor = AppColors.text,
-                ),
-                shape = RoundedCornerShape(22.dp)
-            )
+                    val arrowTint = if (vm.query.isNotBlank()) AppColors.cyan else AppColors.muted.copy(alpha = 0.5f)
+                    IconButton(
+                        onClick = {
+                            if (vm.query.isNotBlank()) vm.executeSearch(vm.query)
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
 
             Spacer(Modifier.width(8.dp))
 
@@ -1838,7 +2138,6 @@ fun LibraryView(vm: MainViewModel) {
         FilterRow("分类", vm.kinds, vm.activeKind) { vm.applyFilter(kind = it) }
         FilterRow("题材", vm.genres, vm.activeGenre) { vm.applyFilter(genre = it) }
         FilterRow("年份", vm.years, vm.activeYear) { vm.applyFilter(year = it) }
-        FilterRow("状态", vm.statuses, vm.activeStatus) { vm.applyFilter(status = it) }
         FilterRow("排序", vm.sorts, vm.activeSort) { vm.applyFilter(sort = it) }
         FilterRow("来源", vm.sourceOptions, vm.activeSource) { vm.applyFilter(source = it) }
 
@@ -2800,6 +3099,63 @@ fun SettingsScreen(vm: MainViewModel) {
             Spacer(Modifier.height(16.dp))
         }
 
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "软件更新",
+                                color = AppColors.text,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                            Text(
+                                "当前版本 ${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}）",
+                                color = AppColors.muted,
+                                fontSize = 12.sp
+                            )
+                        }
+                        Button(
+                            onClick = { vm.checkForAppUpdate(manual = true) },
+                            enabled = !vm.updateChecking && vm.updateDownloadProgress == null,
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                        ) {
+                            if (vm.updateChecking) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White.copy(alpha = 0.9f))
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(if (vm.updateChecking) "检查中" else "检查更新")
+                        }
+                    }
+                    if (vm.updateMessage.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            vm.updateMessage,
+                            color = if (vm.updateMessage.startsWith("检查失败") ||
+                                vm.updateMessage.startsWith("下载失败")
+                            ) AppColors.rose else AppColors.muted,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
         // Appearance Settings Card
         item {
             Card(
@@ -3411,18 +3767,54 @@ fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) 
     }
 }
 
+private val standardAnimeGenres = listOf(
+    "热血", "奇幻", "战斗", "穿越", "后宫", "恋爱", "校园", "日常",
+    "治愈", "搞笑", "悬疑", "科幻", "冒险", "魔法", "机战", "推理",
+    "运动", "音乐", "偶像", "职场", "历史", "美食", "萌系", "百合", "泡面番"
+)
+
+private fun resolveCardGenre(item: SourceItem): String {
+    val scope = "${item.tags.joinToString(" ")} ${item.kind} ${item.description} ${item.title}"
+    val matches = standardAnimeGenres.filter { scope.contains(it) }
+    if (matches.isNotEmpty()) {
+        return matches.distinct().take(2).joinToString(" · ")
+    }
+    val cleanKind = item.kind.replace(Regex("(全部|首页|推荐|热门|最新|分类)"), "").trim()
+    return when {
+        cleanKind.isNotBlank() -> cleanKind
+        item.year.isNotBlank() -> "${item.year} 动漫"
+        else -> "热血 · 奇幻"
+    }
+}
+
+private fun resolveCardStatus(item: SourceItem): String {
+    val rawStatus = item.status.trim()
+    val combined = "$rawStatus ${item.tags.joinToString(" ")}".trim()
+
+    val isFinished = combined.contains("完结") || combined.contains("全集")
+    val epMatch = Regex("(更新至)?(第?\\d+[集话])|([全共]?\\d+[集话])|(\\d+[集话])").find(combined)?.value ?: ""
+
+    return if (isFinished) {
+        val detail = when {
+            epMatch.isNotBlank() -> if (epMatch.startsWith("共") || epMatch.startsWith("全")) epMatch else "共$epMatch"
+            rawStatus.isNotBlank() && !rawStatus.contains("完结") -> rawStatus
+            else -> "全集"
+        }
+        "已完结 | $detail"
+    } else {
+        val detail = when {
+            epMatch.isNotBlank() -> if (epMatch.startsWith("更新")) epMatch else "更新至$epMatch"
+            rawStatus.isNotBlank() && rawStatus != "连载中" -> rawStatus
+            else -> "更新中"
+        }
+        "连载中 | $detail"
+    }
+}
+
 @Composable
 fun MovieCard(item: SourceItem, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val statusText = when {
-        item.status.isNotBlank() -> item.status
-        item.tags.any { it.contains("集") || it.contains("话") || it.contains("完结") } ->
-            item.tags.first { it.contains("集") || it.contains("话") || it.contains("完结") }
-        else -> "连载中"
-    }
-    val genreText = item.tags
-        .filter { !it.contains("集") && !it.contains("话") && !it.contains("完结") }
-        .joinToString(" ")
-        .ifBlank { item.kind.ifBlank { "动漫" } }
+    val statusText = resolveCardStatus(item)
+    val genreText = resolveCardGenre(item)
 
     Card(
         modifier = modifier.clickable { onClick() },

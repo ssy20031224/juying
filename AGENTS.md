@@ -71,6 +71,9 @@
 | `app/api/proxy/stream/route.ts` | 播放流代理（m3u8 重写、浏览器指纹转发） |
 | `app/api/cover/route.ts` | 封面防盗链代理 |
 | `config/source-manifests.json` | 来源运行时、状态和已知主机清单 |
+| `.github/workflows/android-release.yml` | Android 正式签名构建与 GitHub/OSS/COS 三渠道发布 |
+| `scripts/release/android_release.py` | Android 版本校验、更新清单生成与云对象上传 |
+| `android/UPDATE_DISTRIBUTION.md` | Android 签名、云凭据和更新发布操作手册 |
 | `C:\Users\songz\Desktop\public-work\remote_sources\*.js` | 本地审核过的来源脚本 |
 
 ### 播放器

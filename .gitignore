@@ -40,3 +40,8 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Local conversation records: contain deployment configuration guidance and must
+# remain local; never commit them to the repository.
+/docs/conversation/lanerc-android-ci-build-upload-qa.md
+/docs/conversation/lanerc-cloud-config-qa.md

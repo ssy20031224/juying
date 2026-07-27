@@ -158,7 +158,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lanerc-${{ steps.release.outputs.version_name }}
+          name: juying-${{ steps.release.outputs.version_name }}
           path: |
             release/${{ steps.release.outputs.apk_name }}
             release/update.json
@@ -188,7 +188,7 @@ jobs:
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" "release/$APK_NAME" release/update.json --clobber
             gh release edit "$TAG_NAME" \
-              --title "Lanerc $VERSION_NAME" \
+              --title "juying $VERSION_NAME" \
               --notes-file release/release-notes.md
           else
             EXTRA_ARGS=()
@@ -199,7 +199,7 @@ jobs:
               "release/$APK_NAME" \
               release/update.json \
               --target "$GITHUB_SHA" \
-              --title "Lanerc $VERSION_NAME" \
+              --title "juying $VERSION_NAME" \
               --notes-file release/release-notes.md \
               "${EXTRA_ARGS[@]}"
           fi

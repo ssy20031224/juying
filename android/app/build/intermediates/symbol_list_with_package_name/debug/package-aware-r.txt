@@ -1,4 +1,5 @@
 com.juying.app
+animator juying_splash_pulse
 array exo_controls_playback_speeds
 attr ad_marker_color
 attr ad_marker_width
@@ -37,6 +38,7 @@ attr nestedScrollViewStyle
 attr played_ad_marker_color
 attr played_color
 attr player_layout_id
+attr postSplashScreenTheme
 attr queryPatterns
 attr recyclerViewStyle
 attr repeat_toggle_modes
@@ -59,6 +61,7 @@ attr show_timeout
 attr show_vr_button
 attr shutter_background_color
 attr spanCount
+attr splashScreenIconSize
 attr stackFromEnd
 attr surface_type
 attr time_bar_min_update_interval
@@ -67,6 +70,10 @@ attr ttcIndex
 attr unplayed_color
 attr use_artwork
 attr use_controller
+attr windowSplashScreenAnimatedIcon
+attr windowSplashScreenAnimationDuration
+attr windowSplashScreenBackground
+attr windowSplashScreenIconBackgroundColor
 color androidx_core_ripple_material_light
 color androidx_core_secondary_text_default_material_light
 color bg
@@ -80,6 +87,7 @@ color exo_error_message_background_color
 color exo_styled_error_message_background
 color exo_white
 color exo_white_opacity_70
+color juying_splash_background
 color notification_action_color_filter
 color notification_icon_bg_color
 color notification_material_background_media_default_color
@@ -150,7 +158,16 @@ dimen notification_small_icon_size_as_large
 dimen notification_subtext_size
 dimen notification_top_pad
 dimen notification_top_pad_large_text
+dimen splashscreen_icon_mask_size_no_background
+dimen splashscreen_icon_mask_size_with_background
+dimen splashscreen_icon_mask_stroke_no_background
+dimen splashscreen_icon_mask_stroke_with_background
+dimen splashscreen_icon_size
+dimen splashscreen_icon_size_no_background
+dimen splashscreen_icon_size_with_background
 drawable abc_vector_test
+drawable compat_splash_screen
+drawable compat_splash_screen_no_icon_background
 drawable exo_edit_mode_logo
 drawable exo_ic_audiotrack
 drawable exo_ic_check
@@ -236,6 +253,11 @@ drawable ic_call_answer_video
 drawable ic_call_answer_video_low
 drawable ic_call_decline
 drawable ic_call_decline_low
+drawable icon_background
+drawable juying_icon_art
+drawable juying_splash_art
+drawable juying_splash_icon
+drawable juying_splash_vector
 drawable notification_action_background
 drawable notification_bg
 drawable notification_bg_low
@@ -384,6 +406,7 @@ id report_drawn
 id right_icon
 id right_side
 id spherical_gl_surface_view
+id splashscreen_icon_view
 id status_bar_latest_event_content
 id surface_view
 id tag_accessibility_actions
@@ -413,6 +436,7 @@ id when_playing
 id wrapped_composition_tag
 id zoom
 integer cancel_button_image_alpha
+integer default_icon_animation_duration
 integer exo_media_button_opacity_percentage_disabled
 integer exo_media_button_opacity_percentage_enabled
 integer status_bar_notification_info_maxnum
@@ -444,9 +468,13 @@ layout notification_template_media
 layout notification_template_media_custom
 layout notification_template_part_chronometer
 layout notification_template_part_time
+layout splash_screen_view
+mipmap ic_launcher
+mipmap ic_launcher_round
 plurals exo_controls_fastforward_by_amount_description
 plurals exo_controls_rewind_by_amount_description
 string androidx_startup
+string app_name
 string bottom_sheet_collapse_description
 string bottom_sheet_dismiss_description
 string bottom_sheet_drag_handle_description
@@ -583,6 +611,13 @@ string tooltip_description
 string tooltip_label
 string tooltip_long_press_label
 string tooltip_pane_description
+style Base_Theme_SplashScreen
+style Base_Theme_SplashScreen_DayNight
+style Base_Theme_SplashScreen_Light
+style Base_v21_Theme_SplashScreen
+style Base_v21_Theme_SplashScreen_Light
+style Base_v27_Theme_SplashScreen
+style Base_v27_Theme_SplashScreen_Light
 style DialogWindowTheme
 style ExoMediaButton
 style ExoMediaButton_FastForward
@@ -629,6 +664,10 @@ style TextAppearance_Compat_Notification_Time_Media
 style TextAppearance_Compat_Notification_Title
 style TextAppearance_Compat_Notification_Title_Media
 style Theme_Juying
+style Theme_Juying_Starting
+style Theme_SplashScreen
+style Theme_SplashScreen_Common
+style Theme_SplashScreen_IconBackground
 style Widget_Compat_NotificationActionContainer
 style Widget_Compat_NotificationActionText
 styleable AnimatedStateListDrawableCompat android_dither android_visible android_variablePadding android_constantSize android_enterFadeDuration android_exitFadeDuration
@@ -648,3 +687,4 @@ styleable PlayerView ad_marker_color ad_marker_width animation_enabled artwork_d
 styleable RecyclerView android_orientation android_clipToPadding android_descendantFocusability fastScrollEnabled fastScrollHorizontalThumbDrawable fastScrollHorizontalTrackDrawable fastScrollVerticalThumbDrawable fastScrollVerticalTrackDrawable layoutManager reverseLayout spanCount stackFromEnd
 styleable StateListDrawable android_dither android_visible android_variablePadding android_constantSize android_enterFadeDuration android_exitFadeDuration
 styleable StateListDrawableItem android_drawable
+xml update_file_paths

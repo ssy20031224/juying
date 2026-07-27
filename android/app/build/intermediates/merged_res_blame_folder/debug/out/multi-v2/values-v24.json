@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.juying.app-mergeDebugResources-45:/values-v24/values-v24.xml",
+            "outputFile": "com.juying.app-mergeDebugResources-46:/values-v24/values-v24.xml",
             "map": [
                 {
                     "source": "C:\\Users\\songz\\.gradle\\caches\\8.9\\transforms\\6433ce491a3c9152c6e730795c3dc5d1\\transformed\\media-1.6.0\\res\\values-v24\\values-v24.xml",

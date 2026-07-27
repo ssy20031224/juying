@@ -1,9 +1,20 @@
 -- Merging decision tree log ---
+provider#androidx.core.content.FileProvider
+INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:29:9-37:20
+	android:grantUriPermissions
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:33:13-47
+	android:authorities
+		INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:31:13-71
+	android:exported
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:32:13-37
+	android:name
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:30:13-62
 manifest
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-26:12
-INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-26:12
-INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-26:12
-INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-26:12
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-39:12
+INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-39:12
+INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-39:12
+INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:2:1-39:12
 MERGED from [androidx.compose.material3:material3:1.1.2] C:\Users\songz\.gradle\caches\8.9\transforms\aae2f2419b0aa4ac606076c000672635\transformed\material3-1.1.2\AndroidManifest.xml:17:1-22:12
 MERGED from [androidx.activity:activity:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\6ccdf0a670ebfbd98f207179cab997b3\transformed\activity-1.8.2\AndroidManifest.xml:17:1-22:12
 MERGED from [io.coil-kt:coil-compose:2.5.0] C:\Users\songz\.gradle\caches\8.9\transforms\b1aabf1d56f3c0c4a74fae64091580d6\transformed\coil-compose-2.5.0\AndroidManifest.xml:2:1-7:12
@@ -56,6 +67,7 @@ MERGED from [com.google.accompanist:accompanist-drawablepainter:0.32.0] C:\Users
 MERGED from [androidx.compose.ui:ui-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\53355124fb3193453da94fc98ab8f45e\transformed\ui-release\AndroidManifest.xml:2:1-7:12
 MERGED from [androidx.activity:activity-ktx:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\07452a36cc8155990ae1e17c41d5c54e\transformed\activity-ktx-1.8.2\AndroidManifest.xml:2:1-7:12
 MERGED from [androidx.activity:activity-compose:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\5c5e04f1a274dc2fd357b6a80303f9fa\transformed\activity-compose-1.8.2\AndroidManifest.xml:2:1-7:12
+MERGED from [androidx.core:core-splashscreen:1.0.1] C:\Users\songz\.gradle\caches\8.9\transforms\72f93e76fc77f59a315b8e631c8078a0\transformed\core-splashscreen-1.0.1\AndroidManifest.xml:17:1-24:12
 MERGED from [androidx.compose.runtime:runtime-saveable-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\8473fda064f43229e0b2538394254a23\transformed\runtime-saveable-release\AndroidManifest.xml:2:1-7:12
 MERGED from [androidx.compose.runtime:runtime-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\d20ff38cb612e67b83ebe02384f1d8ff\transformed\runtime-release\AndroidManifest.xml:2:1-7:12
 MERGED from [androidx.annotation:annotation-experimental:1.3.1] C:\Users\songz\.gradle\caches\8.9\transforms\49acb18083031dcb982db42e2fadc435\transformed\annotation-experimental-1.3.1\AndroidManifest.xml:17:1-22:12
@@ -87,9 +99,13 @@ MERGED from [androidx.media3:media3-exoplayer:1.2.1] C:\Users\songz\.gradle\cach
 MERGED from [androidx.media3:media3-exoplayer:1.2.1] C:\Users\songz\.gradle\caches\8.9\transforms\27705da977459770059afc73c14ae9d6\transformed\media3-exoplayer-1.2.1\AndroidManifest.xml:22:5-79
 	android:name
 		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:5:22-76
+uses-permission#android.permission.REQUEST_INSTALL_PACKAGES
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:6:5-83
+	android:name
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:6:22-80
 application
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:7:5-25:19
-INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:7:5-25:19
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:8:5-38:19
+INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:8:5-38:19
 MERGED from [androidx.emoji2:emoji2:1.3.0] C:\Users\songz\.gradle\caches\8.9\transforms\4cb18d8bbc992c0eece56ee195f2e51b\transformed\emoji2-1.3.0\AndroidManifest.xml:23:5-33:19
 MERGED from [androidx.emoji2:emoji2:1.3.0] C:\Users\songz\.gradle\caches\8.9\transforms\4cb18d8bbc992c0eece56ee195f2e51b\transformed\emoji2-1.3.0\AndroidManifest.xml:23:5-33:19
 MERGED from [androidx.lifecycle:lifecycle-process:2.7.0] C:\Users\songz\.gradle\caches\8.9\transforms\aa549e29ffc925a3da66be2f2985f637\transformed\lifecycle-process-2.7.0\AndroidManifest.xml:23:5-33:19
@@ -107,37 +123,47 @@ MERGED from [androidx.startup:startup-runtime:1.1.1] C:\Users\songz\.gradle\cach
 	android:appComponentFactory
 		ADDED from [androidx.core:core:1.12.0] C:\Users\songz\.gradle\caches\8.9\transforms\7066eb93bc0f412ada0c124253e67c33\transformed\core-1.12.0\AndroidManifest.xml:28:18-86
 	android:supportsRtl
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:11:9-35
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:14:9-35
 	android:label
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:10:9-27
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:12:9-41
+	android:roundIcon
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:13:9-54
+	android:icon
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:11:9-43
 	android:allowBackup
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:9:9-35
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:10:9-35
 	android:theme
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:12:9-44
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:15:9-53
 	android:usesCleartextTraffic
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:13:9-44
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:16:9-44
 	android:name
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:8:9-34
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:9:9-34
 activity#com.juying.app.MainActivity
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:15:9-24:20
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:18:9-27:20
 	android:windowSoftInputMode
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:19:13-55
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:22:13-55
 	android:exported
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:17:13-36
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:20:13-36
 	android:configChanges
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:18:13-87
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:21:13-87
 	android:name
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:16:13-41
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:19:13-41
 intent-filter#action:name:android.intent.action.MAIN+category:name:android.intent.category.LAUNCHER
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:20:13-23:29
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:23:13-26:29
 action#android.intent.action.MAIN
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:21:17-69
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:24:17-69
 	android:name
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:21:25-66
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:24:25-66
 category#android.intent.category.LAUNCHER
-ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:22:17-77
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:25:17-77
 	android:name
-		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:22:27-74
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:25:27-74
+meta-data#android.support.FILE_PROVIDER_PATHS
+ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:34:13-36:61
+	android:resource
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:36:17-58
+	android:name
+		ADDED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml:35:17-67
 uses-sdk
 INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml reason: use-sdk injection requested
 INJECTED from C:\Users\songz\Desktop\public-work\lanerc-platform\android\app\src\main\AndroidManifest.xml
@@ -246,6 +272,8 @@ MERGED from [androidx.activity:activity-ktx:1.8.2] C:\Users\songz\.gradle\caches
 MERGED from [androidx.activity:activity-ktx:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\07452a36cc8155990ae1e17c41d5c54e\transformed\activity-ktx-1.8.2\AndroidManifest.xml:5:5-44
 MERGED from [androidx.activity:activity-compose:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\5c5e04f1a274dc2fd357b6a80303f9fa\transformed\activity-compose-1.8.2\AndroidManifest.xml:5:5-44
 MERGED from [androidx.activity:activity-compose:1.8.2] C:\Users\songz\.gradle\caches\8.9\transforms\5c5e04f1a274dc2fd357b6a80303f9fa\transformed\activity-compose-1.8.2\AndroidManifest.xml:5:5-44
+MERGED from [androidx.core:core-splashscreen:1.0.1] C:\Users\songz\.gradle\caches\8.9\transforms\72f93e76fc77f59a315b8e631c8078a0\transformed\core-splashscreen-1.0.1\AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.core:core-splashscreen:1.0.1] C:\Users\songz\.gradle\caches\8.9\transforms\72f93e76fc77f59a315b8e631c8078a0\transformed\core-splashscreen-1.0.1\AndroidManifest.xml:20:5-22:41
 MERGED from [androidx.compose.runtime:runtime-saveable-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\8473fda064f43229e0b2538394254a23\transformed\runtime-saveable-release\AndroidManifest.xml:5:5-44
 MERGED from [androidx.compose.runtime:runtime-saveable-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\8473fda064f43229e0b2538394254a23\transformed\runtime-saveable-release\AndroidManifest.xml:5:5-44
 MERGED from [androidx.compose.runtime:runtime-android:1.6.0] C:\Users\songz\.gradle\caches\8.9\transforms\d20ff38cb612e67b83ebe02384f1d8ff\transformed\runtime-release\AndroidManifest.xml:5:5-44
