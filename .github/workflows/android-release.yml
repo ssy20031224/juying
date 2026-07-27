@@ -79,10 +79,22 @@ jobs:
           INPUT_VERSION_NAME: ${{ inputs.version_name }}
           INPUT_VERSION_CODE: ${{ inputs.version_code }}
         run: |
-          python scripts/release/android_release.py metadata \
-            --version-name "$INPUT_VERSION_NAME" \
-            --version-code "$INPUT_VERSION_CODE" \
-            --ref-name "$GITHUB_REF_NAME" \
+          if [[ -z "${INPUT_VERSION_NAME//[[:space:]]/}" ]]; then
+            echo "::error::version_name is required for a manual Android release."
+            exit 1
+          fi
+
+          metadata_args=(
+            metadata
+            --version-name "$INPUT_VERSION_NAME"
+            --ref-name "$GITHUB_REF_NAME"
+          )
+          if [[ -n "${INPUT_VERSION_CODE//[[:space:]]/}" ]]; then
+            metadata_args+=(--version-code "$INPUT_VERSION_CODE")
+          fi
+
+          python scripts/release/android_release.py \
+            "${metadata_args[@]}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Restore signing keystore
