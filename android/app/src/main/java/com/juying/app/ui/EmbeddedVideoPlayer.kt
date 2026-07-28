@@ -84,6 +84,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -585,6 +586,7 @@ fun EmbeddedVideoPlayer(
             // Media3 requires the effects pipeline to be initialized before
             // prepare(). The previous first call happened from LaunchedEffect
             // after prepare(), which could race the initial video surface.
+            setSeekParameters(SeekParameters.CLOSEST_SYNC)
             setVideoEffects(emptyList())
             setMediaSource(createMediaSource(url, type))
             prepare()
@@ -982,8 +984,7 @@ fun EmbeddedVideoPlayer(
                             val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                             val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
                             val targetMs = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, duration.coerceAtLeast(0L))
-                            val label = if (deltaMs >= 0) "快进" else "快退"
-                            triggerHud("seek", if (deltaMs >= 0) 1 else -1, "$label ${formatTime(targetMs)} / ${formatTime(duration)}", 1500L)
+                            triggerHud("seek", if (deltaMs >= 0) 1 else -1, "${formatTime(targetMs)} / ${formatTime(duration)}", 1500L)
                         }
                     },
                     onDragEnd = {
@@ -1003,15 +1004,11 @@ fun EmbeddedVideoPlayer(
                     onTap = {
                         if (System.currentTimeMillis() - lastDragTime < 300L) return@detectTapGestures
                         controlsVisible = !controlsVisible
-                    },
-                    onDoubleTap = {
-                        if (System.currentTimeMillis() - lastDragTime < 300L) return@detectTapGestures
-                        if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
                     }
                 )
             }
             // 长按手势（独立检测，支持松手回调）：
-            // 左侧长按 = 连续快退回放；右侧长按 = 倍速播放；松手后都恢复长按前的倍速设置。
+            // 左侧长按 = 3X << 3倍速快退；右侧长按 = 3X >> 3倍速快进；松手后恢复长按前的状态。
             .pointerInput(isLocked) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -1020,32 +1017,39 @@ fun EmbeddedVideoPlayer(
 
                     val width = size.width.coerceAtLeast(1)
                     val holdLeft = longPress.position.x < width * 0.5f
+                    val wasPlaying = exoPlayer.playWhenReady
                     speedBeforeHold = currentSpeed
+
                     if (holdLeft) {
-                        // 左侧长按：往回放视频（连续快退，约 7x 回退速度）
-                        triggerHud("seek", -1, "快退回放中...", 0L)
+                        // 左侧长按：3X << 3倍速快退（控制 Seek 频率并挂起播放器防止爆栈卡死）
+                        triggerHud("seek", -1, "3X <<", 0L)
                         rewindJob?.cancel()
+                        exoPlayer.playWhenReady = false
                         rewindJob = playerScope.launch {
                             while (true) {
-                                val target = (exoPlayer.currentPosition - 2_000L).coerceAtLeast(0L)
-                                exoPlayer.seekTo(target)
-                                gestureHudText = "快退中 ${formatTime(target)} / ${formatTime(duration)}"
-                                delay(280L)
+                                delay(450L)
+                                if (exoPlayer.playbackState != Player.STATE_BUFFERING) {
+                                    val target = (exoPlayer.currentPosition - 3_500L).coerceAtLeast(0L)
+                                    exoPlayer.seekTo(target)
+                                }
+                                gestureHudText = "3X <<"
                             }
                         }
                     } else {
-                        // 右侧长按：倍速播放
+                        // 右侧长按：3X >> 3倍速快进
                         currentSpeed = maxSpeed
-                        triggerHud("speed", 1, "${maxSpeed}X 极速播放中", 0L)
+                        triggerHud("speed", 1, "${maxSpeed.toInt()}X >>", 0L)
                     }
 
                     // 等待松手（或手势被取消）
                     waitForUpOrCancellation()
 
-                    // 松手恢复：停止快退、恢复长按前的倍速设置
+                    // 松手恢复：停止快退、恢复长按前的倍速与播放状态
                     rewindJob?.cancel()
                     rewindJob = null
-                    if (!holdLeft && currentSpeed != speedBeforeHold) {
+                    if (holdLeft) {
+                        exoPlayer.playWhenReady = wasPlaying
+                    } else if (currentSpeed != speedBeforeHold) {
                         currentSpeed = speedBeforeHold
                     }
                     triggerHud("speed", 0, "", 1L)
@@ -1140,16 +1144,15 @@ fun EmbeddedVideoPlayer(
         if (gestureHudText.isNotBlank()) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
-                color = Color.Black.copy(alpha = 0.82f),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                color = Color.Black.copy(alpha = 0.40f),
                 modifier = Modifier
                     .align(Alignment.Center)
                     .padding(16.dp)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     HudIcon(gestureHudType, gestureHudValue)
                     Text(gestureHudText, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
