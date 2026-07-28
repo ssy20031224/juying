@@ -3,11 +3,12 @@ import { NextResponse } from "next/server";
 import { getDb } from "../../../../db";
 import { users } from "../../../../db/schema";
 import { consumeVerificationCode } from "../../../lib/email";
-import { getCurrentUser, normalizeEmail, publicUser } from "../../../lib/auth";
+import { ACCOUNT_AUTH_ENABLED, accountAuthDisabledResponse, getCurrentUser, normalizeEmail, publicUser } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (!ACCOUNT_AUTH_ENABLED) return accountAuthDisabledResponse();
   const current = await getCurrentUser(request);
   if (!current) return NextResponse.json({ error: "authentication required" }, { status: 401 });
   let body: { email?: unknown; code?: unknown };

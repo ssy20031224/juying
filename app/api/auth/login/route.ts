@@ -3,6 +3,8 @@ import { getDb } from "../../../../db";
 import { users } from "../../../../db/schema";
 import {
   createSession,
+  ACCOUNT_AUTH_ENABLED,
+  accountAuthDisabledResponse,
   publicUser,
   sessionCookie,
   normalizeEmail,
@@ -12,6 +14,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (!ACCOUNT_AUTH_ENABLED) return accountAuthDisabledResponse();
   let body: { email?: unknown; password?: unknown };
   try {
     body = await request.json();

@@ -3,11 +3,12 @@ import { NextResponse } from "next/server";
 import { getDb } from "../../../../db";
 import { authSessions, users } from "../../../../db/schema";
 import { consumeVerificationCode } from "../../../lib/email";
-import { hashPassword, isStrongPassword, normalizeEmail } from "../../../lib/auth";
+import { ACCOUNT_AUTH_ENABLED, accountAuthDisabledResponse, hashPassword, isStrongPassword, normalizeEmail } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (!ACCOUNT_AUTH_ENABLED) return accountAuthDisabledResponse();
   let body: { email?: unknown; code?: unknown; password?: unknown; confirmPassword?: unknown };
   try {
     body = await request.json();

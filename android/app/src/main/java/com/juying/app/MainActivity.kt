@@ -89,6 +89,11 @@ import java.io.File
 import java.util.Calendar
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
+// 临时关闭账号体系入口：保留原登录/注册实现，后续只需改为 false 即可恢复。
+private const val TEMP_ACCOUNT_AUTH_DISABLED = true
+// 临时关闭评论发送；评论读取仍保留，便于展示已有或外部评论数据。
+private const val TEMP_COMMENT_POSTING_DISABLED = true
+
 data class CustomColors(
     val bg: Color,
     val panel: Color,
@@ -533,8 +538,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addComment() {
-        if (accountUser == null) {
-            accountMessage = "请先登录后发表评论"
+        // TEMP: 评论发送暂时关闭；不要删除下面原有发送逻辑，恢复开关即可继续使用。
+        if (TEMP_COMMENT_POSTING_DISABLED) {
+            accountMessage = "评论发送暂时关闭，仅展示已有评论"
             return
         }
         val text = commentDraft.trim()
@@ -592,7 +598,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isAppInitialized = true
         reloadStorageData()
         reloadSourcesState()
-        restoreAccount()
+        // TEMP: 登录/注册暂时关闭，保持本地模式，避免启动时访问账号服务。
+        if (!TEMP_ACCOUNT_AUTH_DISABLED) restoreAccount()
         viewModelScope.launch {
             withContext(Dispatchers.Main) { notice = "正在加载视频源..." }
             withContext(Dispatchers.IO) { sourceManager.init() }
@@ -3030,43 +3037,16 @@ fun PlayerViewScreen(vm: MainViewModel) {
         } else {
             // Standalone Comments Tab Screen
             Column(Modifier.fillMaxSize().padding(16.dp)) {
-                OutlinedTextField(
-                    value = vm.commentNick,
-                    onValueChange = { vm.updateCommentNick(it) },
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    singleLine = true,
-                    label = { Text("评论昵称", color = AppColors.muted, fontSize = 12.sp) },
-                    placeholder = { Text("请输入昵称", color = AppColors.muted) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AppColors.cyan,
-                        unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
-                    )
-                )
-                OutlinedTextField(
-                    value = vm.commentDraft,
-                    onValueChange = { vm.commentDraft = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("发表你的精彩评论…", color = AppColors.muted) },
-                    trailingIcon = {
-                        Button(
-                            onClick = { vm.addComment() },
-                            enabled = vm.commentDraft.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.padding(end = 4.dp)
-                        ) {
-                            Text("发布", fontSize = 12.sp)
-                        }
-                    },
-                    maxLines = 3,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AppColors.cyan,
-                        unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
-                    )
+                // TEMP: 评论发送入口暂时隐藏，只保留评论读取和展示。
+                Text(
+                    "评论发送暂时关闭，仅展示已有评论",
+                    color = AppColors.muted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 10.dp)
                 )
                 if (vm.comments.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("暂无评论，快来发表首条评论吧！", color = AppColors.muted, fontSize = 14.sp)
+                        Text("暂无可展示评论", color = AppColors.muted, fontSize = 14.sp)
                     }
                 } else {
                     LazyColumn(Modifier.fillMaxSize()) {
@@ -3245,7 +3225,6 @@ fun ActionButton(
 
 @Composable
 fun AccountEntryCard(vm: MainViewModel) {
-    var dialogVisible by remember { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = AppColors.panel),
         shape = RoundedCornerShape(16.dp),
@@ -3253,21 +3232,24 @@ fun AccountEntryCard(vm: MainViewModel) {
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(
-                if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
+                if (TEMP_ACCOUNT_AUTH_DISABLED) "当前为本地使用模式" else if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
                 color = AppColors.text,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                if (vm.accountUser == null) "未登录时观看和离线缓存仍可使用，登录后开启账号数据同步。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
+                if (TEMP_ACCOUNT_AUTH_DISABLED) "登录、注册、邮箱和云端同步暂时关闭；观看记录、收藏和离线缓存均可直接使用。"
+                else if (vm.accountUser == null) "未登录时观看和离线缓存仍可使用，登录后开启账号数据同步。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
                 color = AppColors.muted,
                 fontSize = 12.sp
             )
             Spacer(Modifier.height(10.dp))
-            if (vm.accountUser == null) {
+            if (TEMP_ACCOUNT_AUTH_DISABLED) {
+                Text("账号功能暂时停用", color = AppColors.muted, fontSize = 12.sp)
+            } else if (vm.accountUser == null) {
                 Button(
-                    onClick = { dialogVisible = true },
+                    onClick = { /* account dialog is enabled when TEMP_ACCOUNT_AUTH_DISABLED is false */ },
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("登录 / 注册") }
@@ -3280,11 +3262,14 @@ fun AccountEntryCard(vm: MainViewModel) {
             }
         }
     }
+    /* TEMP: 保留原 AccountDialog 调用位置，恢复账号开关后可重新接入。
     if (dialogVisible) {
         AccountDialog(vm) { dialogVisible = false }
     }
+    */
 }
 
+// TEMP: 账号登录/注册弹窗暂时不可达，保留实现以便后续恢复。
 @Composable
 fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var registering by remember { mutableStateOf(false) }
@@ -3471,22 +3456,20 @@ fun ProfileView(vm: MainViewModel) {
 
             ProfileEntryCard(
                 title = "观看历史",
-                subtitle = if (vm.accountUser == null) "登录后查看云端记录" else "已播放 ${vm.historyList.size} 条记录",
+                subtitle = "已播放 ${vm.historyList.size} 条本机记录",
                 icon = Icons.Default.Refresh,
                 onClick = {
-                    if (vm.accountUser == null) vm.accountMessage = "登录后才能查看观看记录"
-                    else vm.view = "profile_history"
+                    vm.view = "profile_history"
                 }
             )
             Spacer(Modifier.height(8.dp))
 
             ProfileEntryCard(
                 title = "我的追番 / 收藏",
-                subtitle = if (vm.accountUser == null) "登录后查看云端收藏" else "已收藏 ${vm.favoritesList.size} 部作品",
+                subtitle = "已收藏 ${vm.favoritesList.size} 部本机作品",
                 icon = Icons.Default.Favorite,
                 onClick = {
-                    if (vm.accountUser == null) vm.accountMessage = "登录后才能查看收藏"
-                    else vm.view = "profile_favorites"
+                    vm.view = "profile_favorites"
                 }
             )
             Spacer(Modifier.height(8.dp))
@@ -3586,10 +3569,6 @@ fun ProfileEntryCard(title: String, subtitle: String, icon: androidx.compose.ui.
 
 @Composable
 fun HistoryScreen(vm: MainViewModel) {
-    if (vm.accountUser == null) {
-        LoginRequiredScreen(vm, "登录后查看观看记录")
-        return
-    }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3648,10 +3627,6 @@ fun HistoryScreen(vm: MainViewModel) {
 
 @Composable
 fun FavoritesScreen(vm: MainViewModel) {
-    if (vm.accountUser == null) {
-        LoginRequiredScreen(vm, "登录后查看收藏")
-        return
-    }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),

@@ -93,6 +93,8 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 
 private const val BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+// TEMP: 弹幕发送暂时关闭；保留输入弹窗实现，后续接入授权外部弹幕 API 时恢复。
+private const val TEMP_DANMAKU_POSTING_DISABLED = true
 
 private fun Context.findActivity(): Activity? {
     var context = this
@@ -1253,19 +1255,21 @@ fun EmbeddedVideoPlayer(
                                 }
                             }
 
-                            // Danmaku Input (点击打开输入框打字发弹幕，不再跳转弹幕设置)
+                            // TEMP: 发送入口保留为提示态，避免误调用未接入的弹幕写入 API。
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
                                     .padding(horizontal = 6.dp)
                                     .height(28.dp)
                                     .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                                    .clickable { showDanmakuInput = true }
+                                    .clickable {
+                                        if (!TEMP_DANMAKU_POSTING_DISABLED) showDanmakuInput = true
+                                    }
                                     .padding(horizontal = 12.dp),
                                 contentAlignment = Alignment.CenterStart
                             ) {
                                 Text(
-                                    "发送一条友善的弹幕吧~",
+                                    if (TEMP_DANMAKU_POSTING_DISABLED) "弹幕发送暂时关闭" else "发送一条友善的弹幕吧~",
                                     color = Color.White.copy(alpha = 0.6f),
                                     fontSize = 11.sp,
                                     maxLines = 1
@@ -1614,7 +1618,7 @@ fun EmbeddedVideoPlayer(
         }
 
         // ── Send Danmaku Input Dialog ──
-        if (showDanmakuInput) {
+        if (showDanmakuInput && !TEMP_DANMAKU_POSTING_DISABLED) {
             AlertDialog(
                 onDismissRequest = { showDanmakuInput = false },
                 title = { Text("发送弹幕", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },

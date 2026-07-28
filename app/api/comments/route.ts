@@ -5,6 +5,8 @@ import { comments as commentsTable, users } from "../../../db/schema";
 import { getCurrentUser } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
+// TEMP: 评论写入暂时关闭；GET 仍允许读取已有评论数据。
+const COMMENTS_POSTING_ENABLED = process.env.COMMENTS_POSTING_ENABLED === "true";
 
 const MAX_COMMENTS = 500;
 const MAX_TEXT_LEN = 200;
@@ -151,6 +153,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!COMMENTS_POSTING_ENABLED) {
+    return NextResponse.json({ error: "comment posting is temporarily disabled" }, { status: 503 });
+  }
   let body: { media?: unknown; nick?: unknown; text?: unknown };
   try {
     body = await request.json();

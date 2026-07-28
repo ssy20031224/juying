@@ -18,6 +18,10 @@ if (!ossEndpoint && !ossRegion) {
 
 export const config = {
   port: Number(process.env.PORT || 3001),
+  // TEMP: 账号登录/注册默认关闭，设置 ACCOUNT_AUTH_ENABLED=true 可恢复。
+  accountAuthEnabled: process.env.ACCOUNT_AUTH_ENABLED === "true",
+  // TEMP: 评论写入默认关闭，GET 读取仍可用。
+  commentsPostingEnabled: process.env.COMMENTS_POSTING_ENABLED === "true",
   publicApiOrigin: String(process.env.PUBLIC_API_ORIGIN || "").replace(/\/+$/, ""),
   mysql: {
     host: required("MYSQL_HOST"),

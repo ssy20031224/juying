@@ -3,13 +3,14 @@ import { NextResponse } from "next/server";
 import { getDb } from "../../../../db";
 import { users } from "../../../../db/schema";
 import { issueVerificationCode, type VerificationPurpose } from "../../../lib/email";
-import { getCurrentUser, normalizeEmail } from "../../../lib/auth";
+import { ACCOUNT_AUTH_ENABLED, accountAuthDisabledResponse, getCurrentUser, normalizeEmail } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
 
 const purposes = new Set<VerificationPurpose>(["register", "change-email", "reset-password"]);
 
 export async function POST(request: Request) {
+  if (!ACCOUNT_AUTH_ENABLED) return accountAuthDisabledResponse();
   let body: { email?: unknown; purpose?: unknown };
   try {
     body = await request.json();

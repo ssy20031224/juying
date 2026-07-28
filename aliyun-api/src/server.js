@@ -43,6 +43,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// TEMP: 账号接口保留但默认停用，避免删除后续恢复所需的登录/注册逻辑。
+app.use("/api/auth", (req, res, next) => {
+  if (!config.accountAuthEnabled) {
+    return res.status(503).json({ error: "account login and registration are temporarily disabled" });
+  }
+  next();
+});
+
 function safeText(value, max = 180) {
   return String(value ?? "").trim().slice(0, max);
 }
@@ -430,7 +438,13 @@ app.get("/api/comments", async (req, res, next) => {
   }
 });
 
-app.post("/api/comments", requireUser, async (req, res, next) => {
+app.post("/api/comments", (req, res, next) => {
+  // TEMP: 评论发送关闭；GET /api/comments 读取仍保持可用。
+  if (!config.commentsPostingEnabled) {
+    return res.status(503).json({ error: "comment posting is temporarily disabled" });
+  }
+  requireUser(req, res, next);
+}, async (req, res, next) => {
   try {
     const media = mediaKey(req.body?.media);
     const text = safeText(req.body?.text, 200);

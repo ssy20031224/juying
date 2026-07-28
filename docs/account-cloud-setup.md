@@ -20,6 +20,16 @@ Android 可通过 Gradle 参数覆盖 API 地址：
 LANERC_ACCOUNT_API_BASE=https://api.lanerc.app
 ```
 
+当前阶段暂时关闭登录、注册、邮箱验证、账号同步和评论写入：
+
+```text
+ACCOUNT_AUTH_ENABLED=false
+COMMENTS_POSTING_ENABLED=false
+```
+
+这些是可恢复开关，后续将对应值改为 `true` 即可恢复服务端接口；客户端的本地观看记录、
+收藏和离线缓存不依赖账号服务。
+
 ## 邮件推送环境变量
 
 ```text

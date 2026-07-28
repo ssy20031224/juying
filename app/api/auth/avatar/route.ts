@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getDb } from "../../../../db";
 import { users } from "../../../../db/schema";
-import { getCurrentUser, publicUser } from "../../../lib/auth";
+import { ACCOUNT_AUTH_ENABLED, accountAuthDisabledResponse, getCurrentUser, publicUser } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +32,7 @@ async function hmac(secret: string, value: string): Promise<string> {
 }
 
 export async function POST(request: Request) {
+  if (!ACCOUNT_AUTH_ENABLED) return accountAuthDisabledResponse();
   const current = await getCurrentUser(request);
   if (!current) return NextResponse.json({ error: "authentication required" }, { status: 401 });
   const form = await request.formData();
