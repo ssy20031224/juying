@@ -320,3 +320,11 @@ COMMENTS_POSTING_ENABLED=false
 - `SourceManager` 解析播放脚本返回的 `resolutions` 数组为 `PlayResult.qualities`，不再丢弃源脚本已经提供的多档播放 URL。
 - 清晰度弹窗优先显示源实际提供的档位；切换具体档位时复用当前来源请求头、尽量保留播放位置并替换 Media3 media source。没有多档 URL 的普通直连视频只显示 `Auto` 并明确提示不可切换；自适应 HLS 仍可使用视频尺寸约束。
 - 本次播放器变更只影响首帧绑定和清晰度链路，不改变来源解析、换源和播放错误回退状态机。
+
+### 15.1 首帧问题第二轮定位
+
+- 不得再用 `Player.Listener.onRenderedFirstFrame()` 作为开始播放的触发器；它是渲染结果事件，不是 Surface 就绪事件。
+- 播放器应等待 `PlayerView.videoSurfaceView` 已附着、尺寸非零且 TextureView 可用（或 Surface 有效）后再设置 `playWhenReady=true`。
+- Media3 `setVideoEffects()` 第一次调用必须发生在 `prepare()` 之前。播放器构建时先用空列表初始化效果管线；默认未开启画质增强时，不再于首轮 Compose effect 中重复异步重配视频渲染器。
+- 诊断日志统一使用 `JuyingPlayerDiag`，仅记录播放状态、视频尺寸、Surface 类型/尺寸和来源 host，不记录带签名参数的完整播放 URL、Cookie 或令牌。
+- 复现时通过 `adb logcat -s JuyingPlayerDiag:* EmbeddedPlayer:*` 区分：没有 `video-size` 是视频轨道/解码问题；有 `video-size` 但 Surface 未 ready 是视图生命周期问题；Surface ready 且有 `first-frame-rendered` 仍黑屏才是设备合成层或 TextureView 输出问题。

@@ -10,6 +10,8 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.OrientationEventListener
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -73,12 +75,15 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.VideoSize
+import androidx.media3.common.util.Size as Media3Size
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.Contrast
 import androidx.media3.effect.RgbAdjustment
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -95,6 +100,7 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 
 private const val BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+private const val PLAYER_DIAG_TAG = "JuyingPlayerDiag"
 // TEMP: 弹幕发送暂时关闭；保留输入弹窗实现，后续接入授权外部弹幕 API 时恢复。
 private const val TEMP_DANMAKU_POSTING_DISABLED = true
 
@@ -369,7 +375,9 @@ fun EmbeddedVideoPlayer(
     }
     val sentDanmaku = remember { mutableStateListOf<String>() }
 
-    var isPlaying by remember { mutableStateOf(true) }
+    // The player is prepared paused and only starts after the output surface
+    // is ready. Do not show a false pause state before Media3 starts.
+    var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableStateOf(0L) }
     var duration by remember { mutableStateOf(0L) }
     var isSeeking by remember { mutableStateOf(false) }
@@ -552,6 +560,8 @@ fun EmbeddedVideoPlayer(
         }
     }
 
+    var boundPlayerView by remember(playbackKey) { mutableStateOf<PlayerView?>(null) }
+
     val exoPlayer = remember(playbackKey) {
 
         val loadControl = DefaultLoadControl.Builder()
@@ -570,37 +580,92 @@ fun EmbeddedVideoPlayer(
             .setLoadControl(loadControl)
             .build()
             .apply {
+            // Media3 requires the effects pipeline to be initialized before
+            // prepare(). The previous first call happened from LaunchedEffect
+            // after prepare(), which could race the initial video surface.
+            setVideoEffects(emptyList())
             setMediaSource(createMediaSource(url, type))
             prepare()
-            // 不在构建时自动开播：等待首帧真正渲染成功（onRenderedFirstFrame）后再 play()。
-            // 若解码器在 surface 就绪前启动，部分机型会“有声音无画面、切全屏重建 surface 才恢复”。
+            // AndroidView below starts playback only after its actual output
+            // surface is attached, available and has non-zero dimensions.
             playWhenReady = false
             addListener(object : Player.Listener {
-                private var autoStarted = false
+                private var renderedBeforeVideoSize = false
 
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
+                    android.util.Log.i(
+                        PLAYER_DIAG_TAG,
+                        "isPlaying=$playing state=$playbackState videoSize=${videoSize.width}x${videoSize.height}"
+                    )
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    val videoGroups = currentTracks.groups.count { it.type == C.TRACK_TYPE_VIDEO }
+                    android.util.Log.i(
+                        PLAYER_DIAG_TAG,
+                        "state=$playbackState playWhenReady=$playWhenReady videoGroups=$videoGroups"
+                    )
                     if (playbackState == Player.STATE_READY) {
                         duration = duration.coerceAtLeast(this@apply.duration.coerceAtLeast(0L))
-                        // 纯音频流没有视频首帧事件，立即开播
-                        val hasVideoTrack = this@apply.currentTracks.groups.any { group ->
-                            group.type == C.TRACK_TYPE_VIDEO && group.length > 0
-                        }
-                        if (!hasVideoTrack && !autoStarted) {
-                            autoStarted = true
-                            this@apply.play()
-                        }
                     }
                 }
 
                 override fun onRenderedFirstFrame() {
-                    // 视频管线已就绪（surface + 首帧解码渲染成功），此时开播画面声音同步出现
-                    if (!autoStarted) {
-                        autoStarted = true
-                        this@apply.play()
+                    // This is evidence, not a start trigger: Media3 reports
+                    // that a frame reached its configured video output.
+                    renderedBeforeVideoSize = videoSize.width <= 0 || videoSize.height <= 0
+                    android.util.Log.i(
+                        PLAYER_DIAG_TAG,
+                        "first-frame-rendered position=${currentPosition}ms size=${videoSize.width}x${videoSize.height}"
+                    )
+                }
+
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    android.util.Log.i(
+                        PLAYER_DIAG_TAG,
+                        "video-size=${videoSize.width}x${videoSize.height} ratio=${videoSize.pixelWidthHeightRatio}"
+                    )
+                    if (videoSize.width > 0 && videoSize.height > 0) {
+                        val player = this@apply
+                        boundPlayerView?.post {
+                            val view = boundPlayerView ?: return@post
+                            view.videoSurfaceView?.requestLayout()
+                            view.requestLayout()
+                            view.invalidate()
+
+                            // Some decoders report a rendered frame while its
+                            // size is still 0x0. That frame never becomes
+                            // visible until fullscreen rebinds the surface.
+                            // Rebind once when the real dimensions arrive so
+                            // Media3 renders a correctly-sized frame now.
+                            if (renderedBeforeVideoSize) {
+                                android.util.Log.i(
+                                    PLAYER_DIAG_TAG,
+                                    "redraw-after-zero-size-frame view=${view.width}x${view.height}"
+                                )
+                                renderedBeforeVideoSize = false
+                                // The effects video sink rendered once while
+                                // its output resolution was still 0x0. Notify
+                                // only the video renderer of the real surface
+                                // size, then re-seek the current position to
+                                // draw a fresh frame. This keeps PlayerView
+                                // attached and preserves the playback clock.
+                                val outputWidth = view.videoSurfaceView?.width
+                                    ?.takeIf { it > 0 } ?: view.width
+                                val outputHeight = view.videoSurfaceView?.height
+                                    ?.takeIf { it > 0 } ?: view.height
+                                repeat(player.rendererCount) { rendererIndex ->
+                                    if (player.getRendererType(rendererIndex) == C.TRACK_TYPE_VIDEO) {
+                                        player.createMessage(player.getRenderer(rendererIndex))
+                                            .setType(Renderer.MSG_SET_VIDEO_OUTPUT_RESOLUTION)
+                                            .setPayload(Media3Size(outputWidth, outputHeight))
+                                            .send()
+                                    }
+                                }
+                                player.seekTo(player.currentPosition.coerceAtLeast(0L))
+                            }
+                        }
                     }
                 }
 
@@ -617,6 +682,54 @@ fun EmbeddedVideoPlayer(
                 }
             })
         }
+    }
+
+    // Do not infer surface readiness from a posted callback or from
+    // onRenderedFirstFrame. Wait for the actual PlayerView output surface.
+    // The diagnostic snapshots let logcat distinguish decoder, surface and
+    // zero-size layout failures without exposing the signed playback URL.
+    LaunchedEffect(exoPlayer, boundPlayerView) {
+        val view = boundPlayerView ?: return@LaunchedEffect
+        val sourceHost = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
+        repeat(180) { attempt ->
+            val output = view.videoSurfaceView
+            val outputReady = when (output) {
+                is TextureView -> output.isAvailable
+                is SurfaceView -> output.holder.surface?.isValid == true
+                else -> output != null
+            }
+            val layoutReady = view.isAttachedToWindow &&
+                view.width > 0 &&
+                view.height > 0 &&
+                (output?.width ?: 0) > 0 &&
+                (output?.height ?: 0) > 0
+
+            if (attempt == 0 || attempt % 30 == 0 || (outputReady && layoutReady)) {
+                android.util.Log.i(
+                    PLAYER_DIAG_TAG,
+                    "surface-check attempt=$attempt host=$sourceHost " +
+                        "view=${view.width}x${view.height} attached=${view.isAttachedToWindow} " +
+                        "output=${output?.javaClass?.simpleName}:${output?.width}x${output?.height} " +
+                        "ready=$outputReady layoutReady=$layoutReady"
+                )
+            }
+
+            if (outputReady && layoutReady) {
+                exoPlayer.playWhenReady = true
+                return@LaunchedEffect
+            }
+            delay(16)
+        }
+
+        android.util.Log.e(
+            PLAYER_DIAG_TAG,
+            "surface-timeout view=${view.width}x${view.height}; rebind player once"
+        )
+        view.player = null
+        view.player = exoPlayer
+        view.requestLayout()
+        delay(100)
+        exoPlayer.playWhenReady = true
     }
 
     // Twice per second is smooth enough for the progress bar and avoids
@@ -690,6 +803,7 @@ fun EmbeddedVideoPlayer(
 
     // 扫描线动画进度持久化：remember 一个 Animatable，保证中途取消后能接着当前位置回退
     val scanlineAnim = remember { androidx.compose.animation.core.Animatable(0f) }
+    var effectsWereEnabled by remember(exoPlayer) { mutableStateOf(false) }
 
     LaunchedEffect(qualityEnhancement) {
         exoPlayer.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
@@ -705,10 +819,15 @@ fun EmbeddedVideoPlayer(
                             .setGreenScale(1.03f)
                             .setBlueScale(1.03f)
                             .build()
+                        )
                     )
-                )
-            } else {
+                effectsWereEnabled = true
+            } else if (effectsWereEnabled) {
+                // Avoid a redundant asynchronous renderer reconfiguration on
+                // every first composition. Only clear effects after they were
+                // actually enabled.
                 exoPlayer.setVideoEffects(emptyList())
+                effectsWereEnabled = false
             }
         } catch (e: Exception) {
             Toast.makeText(context, "当前设备不支持硬件画质增强", Toast.LENGTH_SHORT).show()
@@ -943,6 +1062,7 @@ fun EmbeddedVideoPlayer(
                     // 修复部分机型“开始没画面、切全屏才有画面”的 SurfaceView 绑定问题
                     (android.view.LayoutInflater.from(ctx)
                         .inflate(R.layout.juying_player_view, FrameLayout(ctx), false) as PlayerView).apply {
+                        boundPlayerView = this
                         player = exoPlayer
                         useController = false
                         setKeepContentOnPlayerReset(true)
@@ -954,11 +1074,14 @@ fun EmbeddedVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        // 注意：不在此处开播。开播由播放器监听器的 onRenderedFirstFrame 驱动，
-                        // post{} 时 TextureView 的 surface 仍可能未就绪，提前 play 会导致有声无画面。
+                        // Playback is started by the surface-readiness effect,
+                        // not by post{} or onRenderedFirstFrame.
                     }
                 },
                 update = { view ->
+                    if (boundPlayerView !== view) {
+                        boundPlayerView = view
+                    }
                     if (view.player != exoPlayer) {
                         view.player = exoPlayer
                     }
