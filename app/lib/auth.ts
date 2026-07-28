@@ -132,7 +132,8 @@ export async function createSession(userId: string): Promise<string> {
   const token = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await digestSha256(token);
   const now = Math.floor(Date.now() / 1000);
-  await getDb().insert(authSessions).values({
+  const db = await getDb();
+  await db.insert(authSessions).values({
     id: crypto.randomUUID(),
     userId,
     tokenHash,
@@ -163,7 +164,8 @@ export async function getCurrentUser(request: Request): Promise<AuthUser | null>
 
   const tokenHash = await digestSha256(token);
   const now = Math.floor(Date.now() / 1000);
-  const rows = await getDb()
+  const db = await getDb();
+  const rows = await db
     .select({
       id: users.id,
       email: users.email,
@@ -179,7 +181,8 @@ export async function getCurrentUser(request: Request): Promise<AuthUser | null>
 export async function revokeCurrentSession(request: Request): Promise<void> {
   const token = tokenFromRequest(request);
   if (!token) return;
-  await getDb()
+  const db = await getDb();
+  await db
     .delete(authSessions)
     .where(eq(authSessions.tokenHash, await digestSha256(token)));
 }

@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const db = getDb();
+  const db = await getDb();
   const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
   if (existing.length > 0) {
     return Response.json({ error: "email already registered" }, { status: 409 });

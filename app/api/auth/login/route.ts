@@ -21,7 +21,8 @@ export async function POST(request: Request) {
 
   const email = normalizeEmail(String(body.email ?? ""));
   const password = String(body.password ?? "");
-  const rows = await getDb().select().from(users).where(eq(users.email, email)).limit(1);
+  const db = await getDb();
+  const rows = await db.select().from(users).where(eq(users.email, email)).limit(1);
   const user = rows[0];
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return Response.json({ error: "invalid email or password" }, { status: 401 });

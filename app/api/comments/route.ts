@@ -101,7 +101,7 @@ async function writeComments(cfg: OssConfig, objectKey: string, comments: CloudC
 }
 
 async function readDbComments(media: string): Promise<CloudComment[]> {
-  const db = getDb();
+  const db = await getDb();
   const rows = await db
     .select({
       id: commentsTable.id,
@@ -123,7 +123,7 @@ async function readDbComments(media: string): Promise<CloudComment[]> {
 }
 
 async function writeDbComment(userId: string, media: string, text: string): Promise<CloudComment[]> {
-  const db = getDb();
+  const db = await getDb();
   await db.insert(commentsTable).values({
     id: crypto.randomUUID(),
     userId,

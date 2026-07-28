@@ -38,7 +38,7 @@ export async function GET(request: Request) {
   if (!user) return NextResponse.json({ error: "authentication required" }, { status: 401 });
 
   const since = asInt(new URL(request.url).searchParams.get("since"), 0, 9_999_999_999);
-  const db = getDb();
+  const db = await getDb();
   const [favoriteRows, progressRows, cacheRows] = await Promise.all([
     db
       .select()
@@ -81,7 +81,7 @@ export async function POST(request: Request) {
   const favoriteItems = Array.isArray(body.favorites) ? body.favorites.slice(0, MAX_ITEMS) : [];
   const progressItems = Array.isArray(body.progress) ? body.progress.slice(0, MAX_ITEMS) : [];
   const cacheItems = Array.isArray(body.deviceCache) ? body.deviceCache.slice(0, MAX_ITEMS) : [];
-  const db = getDb();
+  const db = await getDb();
 
   await db.transaction(async (tx) => {
     for (const raw of favoriteItems) {
