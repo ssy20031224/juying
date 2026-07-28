@@ -533,7 +533,7 @@ class QuickJsEngine(private val context: Context) {
             // JS source receives a response instead of "Expected leading hex character".
             if (!headers.containsKey("accept-encoding")) headers["accept-encoding"] = "identity"
 
-            val timeoutMs = opts["timeout"]?.toLongOrNull() ?: 15000L
+            val timeoutMs = opts["timeout"]?.toLongOrNull() ?: 3000L
             val requestClient = if (timeoutMs != 15000L) {
                 client.newBuilder()
                     .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -579,7 +579,7 @@ class QuickJsEngine(private val context: Context) {
             if (!headers.containsKey("user-agent")) headers["user-agent"] = "okhttp/3.15"
             if (!headers.containsKey("accept-encoding")) headers["accept-encoding"] = "identity"
 
-            val timeoutMs = opts["timeout"]?.toLongOrNull() ?: 15000L
+            val timeoutMs = opts["timeout"]?.toLongOrNull() ?: 3000L
             val requestClient = if (timeoutMs != 15000L) {
                 client.newBuilder()
                     .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -795,9 +795,14 @@ class SourceExports(private val sourceKey: String, private val gson: Gson) {
 
     private inline fun <T> evalSafe(crossinline block: QuickJs.() -> T): T {
         val instance = qjs ?: throw IllegalStateException("QuickJS not initialized for $sourceKey")
-        return executor.submit(java.util.concurrent.Callable {
-            instance.block()
-        }).get(30, TimeUnit.SECONDS)
+        return try {
+            executor.submit(java.util.concurrent.Callable {
+                instance.block()
+            }).get(4, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            android.util.Log.w("QuickJsEngine", "[$sourceKey] evalSafe timeout or failed: ${e.message}")
+            throw e
+        }
     }
 
     private fun callFn(fnName: String, argsJs: String, fallback: String): String {

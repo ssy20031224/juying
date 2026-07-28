@@ -1254,6 +1254,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                     }
+
+                    // Absolute 2.5s safety timer to force dismiss loading spinner on UI
+                    launch {
+                        delay(2500L)
+                        withContext(Dispatchers.Main) {
+                            if (requestId == libraryGeneration && libraryLoadingMore) {
+                                libraryLoadingMore = false
+                            }
+                        }
+                    }
                 }
             }
 
