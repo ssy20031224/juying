@@ -6,6 +6,16 @@ function required(name) {
   return value;
 }
 
+function optional(name) {
+  return String(process.env[name] || "").trim();
+}
+
+const ossEndpoint = optional("ALIYUN_OSS_ENDPOINT");
+const ossRegion = optional("ALIYUN_OSS_REGION");
+if (!ossEndpoint && !ossRegion) {
+  throw new Error("Missing required environment variable: ALIYUN_OSS_ENDPOINT or ALIYUN_OSS_REGION");
+}
+
 export const config = {
   port: Number(process.env.PORT || 3001),
   publicApiOrigin: String(process.env.PUBLIC_API_ORIGIN || "").replace(/\/+$/, ""),
@@ -27,8 +37,10 @@ export const config = {
   oss: {
     accessKeyId: required("ALIYUN_OSS_ACCESS_KEY_ID"),
     accessKeySecret: required("ALIYUN_OSS_ACCESS_KEY_SECRET"),
-    region: required("ALIYUN_OSS_REGION"),
+    endpoint: ossEndpoint,
+    region: ossRegion,
     bucket: required("ALIYUN_OSS_BUCKET"),
     publicBaseUrl: required("ALIYUN_OSS_PUBLIC_BASE_URL").replace(/\/+$/, ""),
+    stsToken: optional("ALIYUN_OSS_SECURITY_TOKEN"),
   },
 };

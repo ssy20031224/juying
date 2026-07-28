@@ -12,6 +12,10 @@
 5. 创建 OSS Bucket 和仅允许头像目录读写的 RAM 用户。
 6. 复制 `env.example` 为 `.env` 或配置到云服务环境变量中，禁止提交真实密钥。
 
+OSS 可配置 `ALIYUN_OSS_ENDPOINT`（推荐在阿里云内网部署时使用内网 Endpoint）或
+`ALIYUN_OSS_REGION`，两者至少填写一项；临时 RAM 凭证可额外填写
+`ALIYUN_OSS_SECURITY_TOKEN`。
+
 ## 本地检查
 
 ```bash

@@ -423,6 +423,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun changeAccountNickname(nickname: String) {
+        val token = storageManager.getAuthToken()
+        val normalized = nickname.trim().take(24)
+        if (token.isBlank() || normalized.isBlank() || accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                val result = accountRepository.changeNickname(token, normalized)
+                if (result.user != null) {
+                    accountUser = result.user
+                    commentNick = result.user.nickname
+                    storageManager.setAccountNickname(result.user.nickname)
+                    storageManager.setCommentNick(result.user.nickname)
+                    accountMessage = "昵称修改成功"
+                } else {
+                    accountMessage = result.error ?: "昵称修改失败"
+                }
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "昵称修改失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
     fun logoutAccount() {
         val token = storageManager.getAuthToken()
         viewModelScope.launch {
@@ -3917,6 +3943,9 @@ fun SettingsScreen(vm: MainViewModel) {
     var emailInput by remember { mutableStateOf(vm.userEmail) }
     var emailCodeInput by remember { mutableStateOf("") }
     var emailSuccess by remember { mutableStateOf(false) }
+    var nicknameInput by remember(vm.accountUser?.nickname) {
+        mutableStateOf(vm.accountUser?.nickname.orEmpty())
+    }
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) vm.uploadAccountAvatar(uri)
     }
@@ -4027,6 +4056,43 @@ fun SettingsScreen(vm: MainViewModel) {
                                 )
                             )
                         }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // Account Nickname Settings
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("账号昵称", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("昵称会跟随账号同步，并显示在你发表的评论中", color = AppColors.muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = nicknameInput,
+                        onValueChange = { nicknameInput = it.take(24) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("昵称") },
+                        singleLine = true,
+                        enabled = vm.accountUser != null && !vm.accountBusy
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = { vm.changeAccountNickname(nicknameInput) },
+                        enabled = vm.accountUser != null &&
+                            nicknameInput.trim().isNotEmpty() &&
+                            nicknameInput.trim() != vm.accountUser?.nickname &&
+                            !vm.accountBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("保存昵称")
                     }
                 }
             }

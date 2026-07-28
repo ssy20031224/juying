@@ -71,6 +71,18 @@ class AccountRepository(context: Context) {
             )
         }
 
+    suspend fun changeNickname(token: String, nickname: String): AccountResult =
+        withContext(Dispatchers.IO) {
+            parseResult(
+                request(
+                    "/api/auth/nickname",
+                    token,
+                    "POST",
+                    gson.toJson(mapOf("nickname" to nickname.trim())),
+                ),
+            )
+        }
+
     suspend fun resetPassword(email: String, code: String, password: String, confirmPassword: String) {
         withContext(Dispatchers.IO) {
             request(

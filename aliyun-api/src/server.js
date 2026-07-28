@@ -26,10 +26,11 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
 });
 const oss = new OSS({
-  region: config.oss.region,
+  ...(config.oss.endpoint ? { endpoint: config.oss.endpoint } : { region: config.oss.region }),
   accessKeyId: config.oss.accessKeyId,
   accessKeySecret: config.oss.accessKeySecret,
   bucket: config.oss.bucket,
+  ...(config.oss.stsToken ? { stsToken: config.oss.stsToken } : {}),
   secure: true,
 });
 
@@ -246,6 +247,22 @@ app.post("/api/auth/change-email", requireUser, async (req, res, next) => {
       ]);
     });
     res.json({ user: publicUser({ ...req.accountUser, email }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/nickname", requireUser, async (req, res, next) => {
+  try {
+    const nickname = normalizeNickname(req.body?.nickname);
+    if (!nickname) return res.status(400).json({ error: "nickname required" });
+    const now = nowSeconds();
+    await pool.execute("UPDATE users SET nickname = ?, updated_at = ? WHERE id = ?", [
+      nickname,
+      now,
+      req.accountUser.id,
+    ]);
+    res.json({ user: publicUser({ ...req.accountUser, nickname }) });
   } catch (error) {
     next(error);
   }
