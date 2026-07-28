@@ -189,3 +189,120 @@ npm run dev
 5. 补齐播放器清晰度重解析、横屏手势和真实来源健康切换。
 6. 分批完成 JS Worker 和 Browser Worker 来源。
 7. 最后接入有明确来源的弹幕和设备端缓存。
+
+## 12. 近期已完成的账号与云端改动（2026-07）
+
+以下内容是当前仓库已经完成、后续 Agent 必须视为现状的变更记录。
+
+### 12.1 Android 本地使用模式（当前默认）
+
+- Android 客户端当前不要求登录即可使用。
+- 观看历史和收藏直接读取本机 `StorageManager`，不再因为未登录显示登录拦截页。
+- 离线缓存始终是设备本地能力，不依赖账号。
+- 账号登录、注册、邮箱验证码、密码找回、修改邮箱、云端同步和云端头像入口当前暂时停用。
+- 账号相关原实现保留，不得删除；恢复时修改 `MainActivity.kt` 中的 `TEMP_ACCOUNT_AUTH_DISABLED`。
+- 评论发送当前停用，但已有评论仍可读取展示；恢复发送时修改 `TEMP_COMMENT_POSTING_DISABLED` 并同步开启服务端开关。
+- 弹幕发送当前停用，播放器设置和显示开关保留；恢复发送时修改 `EmbeddedVideoPlayer.kt` 中的 `TEMP_DANMAKU_POSTING_DISABLED`。
+- 暂停原因和恢复方式必须保留在代码注释中，不能通过删除原逻辑实现“关闭”。
+
+关键文件：
+
+| 文件 | 当前责任 |
+|---|---|
+| `android/app/src/main/java/com/juying/app/MainActivity.kt` | 本地历史/收藏、账号入口临时关闭、评论只读 |
+| `android/app/src/main/java/com/juying/app/ui/EmbeddedVideoPlayer.kt` | 弹幕发送入口临时关闭；播放控制和弹幕设置仍保留 |
+| `android/app/src/main/java/com/juying/app/source/AccountRepository.kt` | 账号 API 客户端实现，当前不由默认流程调用 |
+| `android/app/src/main/java/com/juying/app/source/CommentRepository.kt` | 评论读取/写入 API 客户端；当前客户端写入入口停用 |
+
+### 12.2 阿里云国内账号服务
+
+为了适配中国大陆网络环境，曾实现独立的 `aliyun-api/` 服务，默认设计为：
+
+- Node.js 20 + Express。
+- 阿里云 RDS MySQL 8.0 保存用户、会话、验证码、收藏、观看进度、评论和设备缓存索引。
+- 阿里云 DirectMail 发送注册、修改邮箱和密码重置验证码。
+- 阿里云 OSS 保存用户头像。
+- Android 默认账号 API 地址为 `https://api.lanerc.app`，可用 Gradle 参数 `LANERC_ACCOUNT_API_BASE` 覆盖。
+- OSS 配置同时支持 `ALIYUN_OSS_ENDPOINT` 或 `ALIYUN_OSS_REGION`，并支持 `ALIYUN_OSS_SECURITY_TOKEN`。
+- `aliyun-api/migrations/001_init.sql` 只负责建表，不要求业务账号拥有创建数据库权限。
+- 原 Next.js/D1 账号 API 作为兼容实现保留，但当前服务端账号接口默认关闭。
+
+当前服务端开关：
+
+```text
+ACCOUNT_AUTH_ENABLED=false
+COMMENTS_POSTING_ENABLED=false
+```
+
+将两个值改为 `true` 才允许服务端账号接口和评论写入。仅修改服务端开关不能恢复 Android UI，还必须同步恢复 Android 中对应的临时常量。
+
+### 12.3 账号数据模型与接口
+
+账号服务已实现以下接口，当前按开关停用：
+
+- `/api/auth/request-code`
+- `/api/auth/register`
+- `/api/auth/login`
+- `/api/auth/me`
+- `/api/auth/logout`
+- `/api/auth/change-email`
+- `/api/auth/reset-password`
+- `/api/auth/avatar`
+- `/api/auth/nickname`
+- `/api/sync`
+- `/api/comments`（GET 读取保留，POST 写入默认关闭）
+
+密码使用 PBKDF2-SHA-256，验证码和会话令牌只保存哈希值。任何新实现不得把明文密码、验证码、会话令牌或云密钥写入日志、APK、GitHub 或持久化业务快照。
+
+### 12.4 弹幕现状与边界
+
+- 当前来源的统一 `Episode` 模型只提供剧集和播放线路，没有统一的弹幕地址、弹幕 ID 或授权写入接口。
+- 当前播放器不得伪造“发送成功”，也不得向未知第三方接口发送弹幕。
+- 如后续接入外部弹幕，必须先确认来源授权和接口协议，再增加“弹幕读取地址/时间轴解析/显示过滤/发送授权”完整链路。
+- 在没有明确外部弹幕接口前，保持发送关闭，播放功能不能依赖弹幕服务。
+
+### 12.5 Git 与 Sites 状态
+
+- 当前代码唯一主线为 GitHub 仓库 `https://github.com/ssy20031224/juying.git` 的 `main`。
+- 已移除本地 `site/main` 跟踪分支；后续提交和交付统一推送 GitHub。
+- `.openai/hosting.json` 仍可能作为历史 Sites 元数据存在，但不作为当前代码交付主线；不要重新引入 Sites 分支或依赖。
+- 根 `.gitignore` 已忽略所有层级的 `node_modules`；依赖目录只能通过 `package-lock.json` 复现，不能提交。
+
+### 12.6 更新分发与播放器改动
+
+- Android 更新检查和 APK 下载优先使用阿里云 OSS，其次腾讯云 COS，再尝试自建站点，最后才回退 GitHub Releases。
+- 同一版本即使清单来自 GitHub，也会先按国内云地址顺序尝试 APK 下载。
+- 播放器左侧长按为连续快退回放，右侧长按为临时倍速播放；松手后恢复长按前的用户倍速。
+- 倍速菜单已包含 `3.0x`，低内存或画质增强限制仍由播放器现有规则决定。
+- 播放器控制层已补齐上一集、播放/暂停、下一集、进度和画中画相关控制，并处理后台/画中画生命周期。
+- 清晰度、画面比例、硬件画质增强、全屏和横竖屏 OSD 逻辑已经保留在播放器内；修改时不能让“设置”按钮误打开其他面板。
+- 播放源加载和换源应继续遵循“来源失败隔离、切换源后重新解析”的现有状态机，不得通过账号或评论服务阻塞播放。
+- 当前真实弹幕通道尚未接入；播放器只保留弹幕显示设置和未来接入位置，禁止把本地临时文本伪装为已发送的远端弹幕。
+
+## 13. 近期提交记录
+
+以下提交对应本轮账号、云端和临时停用改动：
+
+| 提交 | 内容 |
+|---|---|
+| `f191cb9` | 恢复跨设备云端历史基础能力 |
+| `52187f1` | 完成验证账号流程与 OSS 头像 |
+| `cb98e92` | 新增阿里云 RDS 账号服务初版 |
+| `a9e56b3` | 清理误加入 Git 索引的 `aliyun-api/node_modules`，补充环境模板与 RDS 脚本 |
+| `062bbe2` | 增加云端昵称修改、OSS Endpoint 兼容 |
+| `e053547` | 临时关闭账号和评论写入，恢复本地历史/收藏使用 |
+
+`cb98e92` 的当前仓库快照已由 `a9e56b3` 清理依赖文件；未经明确授权，不要对已推送历史执行强制重写。
+
+## 14. 近期验证记录
+
+最近一次账号与临时停用改动完成后已验证：
+
+- `aliyun-api`: `npm run check` 通过。
+- `aliyun-api`: `npm test` 通过，2/2。
+- 根项目：`npm run build` 通过。
+- 根项目：`npm test` 通过，3/3。
+- Android：`.\gradlew.bat :app:assembleDebug` 成功。
+- Git 工作区干净，`HEAD` 与 `origin/main` 一致。
+
+真实阿里云联调仍需要部署环境中的 RDS、DirectMail、OSS 和 HTTPS API 域名配置；没有这些配置时，不得把账号功能标记为已上线。
