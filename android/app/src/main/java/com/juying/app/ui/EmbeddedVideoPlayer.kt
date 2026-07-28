@@ -572,11 +572,12 @@ fun EmbeddedVideoPlayer(
             .apply {
             setMediaSource(createMediaSource(url, type))
             prepare()
-            // Wait until AndroidView has attached the TextureView surface.
-            // Starting the decoder before a surface exists can produce audio
-            // with a black frame until a fullscreen relayout rebinds it.
+            // 不在构建时自动开播：等待首帧真正渲染成功（onRenderedFirstFrame）后再 play()。
+            // 若解码器在 surface 就绪前启动，部分机型会“有声音无画面、切全屏重建 surface 才恢复”。
             playWhenReady = false
             addListener(object : Player.Listener {
+                private var autoStarted = false
+
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
                 }
@@ -584,6 +585,22 @@ fun EmbeddedVideoPlayer(
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_READY) {
                         duration = duration.coerceAtLeast(this@apply.duration.coerceAtLeast(0L))
+                        // 纯音频流没有视频首帧事件，立即开播
+                        val hasVideoTrack = this@apply.currentTracks.groups.any { group ->
+                            group.type == C.TRACK_TYPE_VIDEO && group.length > 0
+                        }
+                        if (!hasVideoTrack && !autoStarted) {
+                            autoStarted = true
+                            this@apply.play()
+                        }
+                    }
+                }
+
+                override fun onRenderedFirstFrame() {
+                    // 视频管线已就绪（surface + 首帧解码渲染成功），此时开播画面声音同步出现
+                    if (!autoStarted) {
+                        autoStarted = true
+                        this@apply.play()
                     }
                 }
 
@@ -937,15 +954,8 @@ fun EmbeddedVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        // Bind and lay out the TextureView before starting the
-                        // decoder. This avoids the first frame waiting for a
-                        // later fullscreen-induced relayout.
-                        post {
-                            player = exoPlayer
-                            requestLayout()
-                            invalidate()
-                            exoPlayer.playWhenReady = true
-                        }
+                        // 注意：不在此处开播。开播由播放器监听器的 onRenderedFirstFrame 驱动，
+                        // post{} 时 TextureView 的 surface 仍可能未就绪，提前 play 会导致有声无画面。
                     }
                 },
                 update = { view ->
