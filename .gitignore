@@ -21,6 +21,14 @@
 # misc
 .DS_Store
 *.pem
+*.log
+*.jks
+*.keystore
+keystore.properties
+
+# IDE and machine-local project state
+/.idea/
+*.iml
 
 # debug
 npm-debug.log*
@@ -36,10 +44,37 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /outputs/
 /work/
+
+# Android/Gradle generated files and local configuration
+/android/.gradle/
+/android/.kotlin/
+/android/**/build/
+/android/**/.cxx/
+/android/**/.externalNativeBuild/
+/android/captures/
+/android/local.properties
+*.apk
+*.aab
+*.aar
+*.ap_
+*.dex
+*.class
+
+# Android device/emulator inspection artifacts kept only on the local machine
+/android/*.png
+/android/*.xml
+
+# Local runtime and test artifacts
+/logs/
+/tmp/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
 
 # Local conversation records: contain deployment configuration guidance and must
 # remain local; never commit them to the repository.
