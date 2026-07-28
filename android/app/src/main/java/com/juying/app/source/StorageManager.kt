@@ -42,6 +42,19 @@ class StorageManager(context: Context) {
         prefs.edit().remove("watch_history").apply()
     }
 
+    // 评论昵称：每台设备稳定一个，用于云端评论署名
+    fun getCommentNick(): String {
+        val existing = prefs.getString("comment_nick", null)
+        if (!existing.isNullOrBlank()) return existing
+        val nick = "漫友_${(1000..9999).random()}"
+        prefs.edit().putString("comment_nick", nick).apply()
+        return nick
+    }
+
+    fun setCommentNick(nick: String) {
+        prefs.edit().putString("comment_nick", nick.trim()).apply()
+    }
+
     fun getFavorites(): List<SourceItem> {
         val json = prefs.getString("favorites", "[]") ?: "[]"
         return try {
@@ -83,5 +96,11 @@ class StorageManager(context: Context) {
 
     fun getUserAvatar(): Int = prefs.getInt("user_avatar", 0)
     fun setUserAvatar(avatarIndex: Int) { prefs.edit().putInt("user_avatar", avatarIndex).apply() }
-}
 
+    fun getAuthToken(): String = prefs.getString("auth_token", "") ?: ""
+    fun setAuthToken(token: String) { prefs.edit().putString("auth_token", token).apply() }
+    fun clearAuthToken() { prefs.edit().remove("auth_token").apply() }
+
+    fun getAccountNickname(): String = prefs.getString("account_nickname", "") ?: ""
+    fun setAccountNickname(nickname: String) { prefs.edit().putString("account_nickname", nickname).apply() }
+}

@@ -53,6 +53,7 @@
 | `app/api/detail/route.ts` | 单来源详情和剧集 |
 | `app/api/media/detail/route.ts` | 多来源详情聚合、规范剧集和换源线路 |
 | `app/api/play/route.ts` | 临时播放地址解析 |
+| `app/api/comments/route.ts` | 评论云端存储（阿里云 OSS，公开读、服务端签名写） |
 
 ### 来源和基础设施
 

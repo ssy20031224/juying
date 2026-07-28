@@ -42,14 +42,30 @@ class AppUpdateManager(private val context: Context) {
         private const val KEY_PENDING_APK = "pending_apk"
         private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
-        // Mainland-friendly self-hosted manifests first. GitHub Releases is
-        // only a fallback because access and large-file downloads can be slow.
+        // 国内云分发（公开 Bucket，只存放 APK 与 update.json；密钥仅存在于发布端 .env，
+        // 公开域名本身会随 update.json 的 apkUrls 下发给所有客户端，不属于敏感信息）。
+        private const val ALIYUN_OSS_PUBLIC_BASE = "https://ssyjuying.oss-cn-shanghai.aliyuncs.com"
+        private const val TENCENT_COS_PUBLIC_BASE = "" // 腾讯云 COS 配置完成后填入其公开域名
+        private const val UPDATE_MANIFEST_KEY = "api/android/update.json"
+        private const val APK_OBJECT_PREFIX = "android"
+
+        private fun cloudManifestUrl(publicBase: String): String? =
+            publicBase.trim().trimEnd('/')
+                .takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?.let { "$it/$UPDATE_MANIFEST_KEY" }
+
+        // 国内优先：阿里云 → 腾讯云 → 自建站点；GitHub Releases 只作最后回退，
+        // 因为国内访问与大文件下载都慢。
         private val MANIFEST_URLS by lazy {
             (
                 BuildConfig.UPDATE_MANIFEST_URLS
                     .split(',', ';', '\n')
                     .map(String::trim)
                     .filter(String::isNotBlank) +
+                    listOfNotNull(
+                        cloudManifestUrl(ALIYUN_OSS_PUBLIC_BASE),
+                        cloudManifestUrl(TENCENT_COS_PUBLIC_BASE)
+                    ) +
                     listOf(
                         "https://www.lanerc.app/api/android/update.json",
                         "https://lanerc.app/api/android/update.json"
@@ -107,6 +123,28 @@ class AppUpdateManager(private val context: Context) {
         UpdateCheckResult.Failed(error.message ?: "update check failed")
     }
 
+    // 下载地址国内优先：同一版本的阿里云/腾讯云地址排在最前，GitHub 仅作最后回退。
+    // 即使更新信息来自 GitHub Releases（其只含 GitHub 地址），也先尝试云分发地址，
+    // 对象不存在时按序回退，不影响可用性。
+    private fun prioritizeApkUrls(info: AppUpdateInfo): List<String> {
+        val versionName = info.versionName.trim().removePrefix("v")
+        val cloudUrls = mutableListOf<String>()
+        if (versionName.isNotBlank()) {
+            val apkName = "juying-$versionName.apk"
+            listOf(ALIYUN_OSS_PUBLIC_BASE, TENCENT_COS_PUBLIC_BASE).forEach { base ->
+                base.trim().trimEnd('/')
+                    .takeIf { it.startsWith("https://", ignoreCase = true) }
+                    ?.let { cloudUrls += "$it/$APK_OBJECT_PREFIX/$apkName" }
+            }
+        }
+        val mainland = info.apkUrls.filter {
+            !it.contains("github.com", ignoreCase = true) &&
+                !it.contains("githubusercontent.com", ignoreCase = true)
+        }
+        val github = info.apkUrls.filter { it !in mainland }
+        return (cloudUrls + mainland + github).distinct()
+    }
+
     suspend fun download(
         info: AppUpdateInfo,
         onProgress: (Int) -> Unit
@@ -120,7 +158,7 @@ class AppUpdateManager(private val context: Context) {
         val temporary = File(outputDir, "${output.name}.part")
 
         var lastError = "没有可用的下载地址"
-        info.apkUrls.filter { it.startsWith("https://", ignoreCase = true) }.forEach { url ->
+        prioritizeApkUrls(info).filter { it.startsWith("https://", ignoreCase = true) }.forEach { url ->
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "juying/${BuildConfig.VERSION_NAME} Android")

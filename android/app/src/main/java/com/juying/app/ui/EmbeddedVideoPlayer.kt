@@ -25,11 +25,17 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -49,8 +55,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,7 +83,10 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.juying.app.AppColors
+import com.juying.app.R
 import com.juying.app.source.Episode
 import com.juying.app.source.SourceLogManager
 import kotlinx.coroutines.delay
@@ -186,6 +197,19 @@ private fun SkipNextIcon(modifier: Modifier = Modifier, tint: Color = Color.Whit
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Default.PlayArrow, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
         Box(modifier = Modifier.size(2.dp, 12.dp).background(tint))
+    }
+}
+
+@Composable
+private fun SkipPreviousIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(2.dp, 12.dp).background(tint))
+        Icon(
+            Icons.Default.PlayArrow,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = 180f }
+        )
     }
 }
 
@@ -302,6 +326,7 @@ private fun HudIcon(type: String, value: Int) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun EmbeddedVideoPlayer(
     url: String,
@@ -359,6 +384,11 @@ fun EmbeddedVideoPlayer(
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showRatioMenu by remember { mutableStateOf(false) }
     var showEpisodeDrawer by remember { mutableStateOf(false) }
+    var showDanmakuInput by remember { mutableStateOf(false) }
+
+    // 长按手势状态：记录长按前的倍速（松手恢复），以及左侧快退回放的协程
+    var speedBeforeHold by remember { mutableStateOf(1.0f) }
+    var rewindJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     val playerScope = rememberCoroutineScope()
     var gestureHudType by remember { mutableStateOf("") }
@@ -674,6 +704,21 @@ fun EmbeddedVideoPlayer(
         }
     }
 
+    // 退到后台/锁屏（ON_STOP）时自动暂停，避免后台继续播放导致解锁后
+    // 进度不同步、播放/暂停按钮状态颠倒；画中画模式下不入栈 ON_STOP，保持播放。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exoPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && !PipController.inPipMode && exoPlayer.isPlaying) {
+                exoPlayer.pause()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     // Enter Picture-in-Picture helper
     val enterPip = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
@@ -759,29 +804,53 @@ fun EmbeddedVideoPlayer(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = {
-                        if (currentSpeed != 1.0f) {
-                            currentSpeed = 1.0f
-                            gestureHudText = ""
-                        } else {
-                            controlsVisible = !controlsVisible
-                        }
-                    },
-                    onLongPress = { offset ->
-                        if (!isLocked) {
-                            val width = size.width.coerceAtLeast(1)
-                            if (offset.x < width * 0.5f) {
-                                currentSpeed = 0.5f
-                                triggerHud("speed", 0, "0.5X 慢速播放中", 0L)
-                            } else {
-                                currentSpeed = maxSpeed
-                                triggerHud("speed", 1, "${maxSpeed}X 极速播放中", 0L)
-                            }
-                        }
+                        controlsVisible = !controlsVisible
                     },
                     onDoubleTap = {
                         if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                     }
                 )
+            }
+            // 长按手势（独立检测，支持松手回调）：
+            // 左侧长按 = 连续快退回放；右侧长按 = 倍速播放；松手后都恢复长按前的倍速设置。
+            .pointerInput(isLocked) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val longPress = awaitLongPressOrCancellation(down.id)
+                    if (longPress == null || isLocked) return@awaitEachGesture
+
+                    val width = size.width.coerceAtLeast(1)
+                    val holdLeft = longPress.position.x < width * 0.5f
+                    speedBeforeHold = currentSpeed
+                    if (holdLeft) {
+                        // 左侧长按：往回放视频（连续快退，约 7x 回退速度）
+                        triggerHud("seek", -1, "快退回放中...", 0L)
+                        rewindJob?.cancel()
+                        rewindJob = playerScope.launch {
+                            while (true) {
+                                val target = (exoPlayer.currentPosition - 2_000L).coerceAtLeast(0L)
+                                exoPlayer.seekTo(target)
+                                gestureHudText = "快退中 ${formatTime(target)} / ${formatTime(duration)}"
+                                delay(280L)
+                            }
+                        }
+                    } else {
+                        // 右侧长按：倍速播放
+                        currentSpeed = maxSpeed
+                        triggerHud("speed", 1, "${maxSpeed}X 极速播放中", 0L)
+                    }
+
+                    // 等待松手（或手势被取消）
+                    waitForUpOrCancellation()
+
+                    // 松手恢复：停止快退、恢复长按前的倍速设置
+                    rewindJob?.cancel()
+                    rewindJob = null
+                    if (!holdLeft && currentSpeed != speedBeforeHold) {
+                        currentSpeed = speedBeforeHold
+                    }
+                    triggerHud("speed", 0, "", 1L)
+                }
             }
     ) {
         if (playError) {
@@ -797,7 +866,10 @@ fun EmbeddedVideoPlayer(
         } else {
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    // 从 XML 膨胀以启用 texture_view（见 juying_player_view.xml），
+                    // 修复部分机型“开始没画面、切全屏才有画面”的 SurfaceView 绑定问题
+                    (android.view.LayoutInflater.from(ctx)
+                        .inflate(R.layout.juying_player_view, FrameLayout(ctx), false) as PlayerView).apply {
                         player = exoPlayer
                         useController = false
                         isClickable = false
@@ -1002,6 +1074,53 @@ fun EmbeddedVideoPlayer(
                         UnlockIcon(tint = Color.White)
                     }
 
+                    // ── CENTER TRANSPORT BUTTONS (上一集 / 播放暂停 / 下一集) ──
+                    Row(
+                        modifier = Modifier.align(Alignment.Center),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(30.dp)
+                    ) {
+                        IconButton(
+                            onClick = { onPrevEpisode?.invoke() },
+                            enabled = onPrevEpisode != null,
+                            modifier = Modifier
+                                .size(46.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        ) {
+                            SkipPreviousIcon(
+                                tint = if (onPrevEpisode != null) Color.White else Color.White.copy(alpha = 0.35f)
+                            )
+                        }
+                        IconButton(
+                            onClick = { if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play() },
+                            modifier = Modifier
+                                .size(62.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        ) {
+                            if (isPlaying) {
+                                PauseIcon(tint = Color.White)
+                            } else {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "播放",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { onNextEpisode?.invoke() },
+                            enabled = onNextEpisode != null,
+                            modifier = Modifier
+                                .size(46.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        ) {
+                            SkipNextIcon(
+                                tint = if (onNextEpisode != null) Color.White else Color.White.copy(alpha = 0.35f)
+                            )
+                        }
+                    }
+
                     // ── BOTTOM OVERLAY CONTAINER ──
                     Column(
                         modifier = Modifier
@@ -1134,14 +1253,14 @@ fun EmbeddedVideoPlayer(
                                 }
                             }
 
-                            // Danmaku Input Placeholder
+                            // Danmaku Input (点击打开输入框打字发弹幕，不再跳转弹幕设置)
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
                                     .padding(horizontal = 6.dp)
                                     .height(28.dp)
                                     .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                                    .clickable { showDanmakuSettings = true }
+                                    .clickable { showDanmakuInput = true }
                                     .padding(horizontal = 12.dp),
                                 contentAlignment = Alignment.CenterStart
                             ) {
@@ -1230,23 +1349,28 @@ fun EmbeddedVideoPlayer(
                 onDismissRequest = { showSpeedMenu = false },
                 title = { Text("选择播放倍速", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                 text = {
-                    Column {
-                        listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        currentSpeed = speed
-                                        showSpeedMenu = false
-                                    }
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f).forEach { speed ->
+                            val active = currentSpeed == speed
+                            Surface(
+                                onClick = {
+                                    currentSpeed = speed
+                                    showSpeedMenu = false
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (active) AppColors.cyan else AppColors.panel2
                             ) {
-                                Text("${speed}x", color = if (currentSpeed == speed) AppColors.cyan else AppColors.text, fontSize = 14.sp)
-                                if (currentSpeed == speed) {
-                                    Icon(Icons.Default.Check, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(18.dp))
-                                }
+                                Text(
+                                    "${speed}x",
+                                    color = if (active) Color.Black else AppColors.text,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                                )
                             }
                         }
                     }
@@ -1256,7 +1380,8 @@ fun EmbeddedVideoPlayer(
                         Text("关闭", color = AppColors.cyan)
                     }
                 },
-                containerColor = AppColors.panel
+                containerColor = AppColors.panel,
+                shape = RoundedCornerShape(16.dp)
             )
         }
 
@@ -1266,33 +1391,40 @@ fun EmbeddedVideoPlayer(
                 title = { Text("清晰度与画质增强", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                 text = {
                     Column {
-                        listOf("Auto", "4K", "1080p", "720p", "480p").forEach { quality ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("Auto", "4K", "1080p", "720p", "480p").forEach { quality ->
+                                val active = selectedQuality == quality
+                                Surface(
+                                    onClick = {
                                         selectedQuality = quality
                                         showQualityMenu = false
-                                    }
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(quality, color = if (selectedQuality == quality) AppColors.cyan else AppColors.text)
-                                if (selectedQuality == quality) {
-                                    Icon(Icons.Default.Check, contentDescription = null, tint = AppColors.cyan)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (active) AppColors.cyan else AppColors.panel2
+                                ) {
+                                    Text(
+                                        quality,
+                                        color = if (active) Color.Black else AppColors.text,
+                                        fontSize = 14.sp,
+                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                                    )
                                 }
                             }
                         }
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text("硬件画质增强", color = AppColors.text)
                                 Text(
-                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后使用 GPU 纹理色彩增强对比",
+                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后 GPU 提升对比度与亮度",
                                     color = AppColors.muted,
                                     fontSize = 11.sp
                                 )
@@ -1309,7 +1441,8 @@ fun EmbeddedVideoPlayer(
                         Text("关闭", color = AppColors.cyan)
                     }
                 },
-                containerColor = AppColors.panel
+                containerColor = AppColors.panel,
+                shape = RoundedCornerShape(16.dp)
             )
         }
 
@@ -1473,6 +1606,52 @@ fun EmbeddedVideoPlayer(
                 confirmButton = {
                     TextButton(onClick = { showDanmakuSettings = false }) {
                         Text("完成", color = AppColors.rose)
+                    }
+                },
+                containerColor = Color(0xFF1E1E24),
+                shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // ── Send Danmaku Input Dialog ──
+        if (showDanmakuInput) {
+            AlertDialog(
+                onDismissRequest = { showDanmakuInput = false },
+                title = { Text("发送弹幕", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+                text = {
+                    OutlinedTextField(
+                        value = danmakuDraft,
+                        onValueChange = { danmakuDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("发送一条友善的弹幕吧~", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = AppColors.cyan,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
+                        )
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val text = danmakuDraft.trim()
+                            if (text.isNotEmpty()) {
+                                sentDanmaku.add(text)
+                                danmakuDraft = ""
+                                showDanmakuInput = false
+                                if (!danmakuEnabled) danmakuEnabled = true
+                            }
+                        },
+                        enabled = danmakuDraft.isNotBlank()
+                    ) {
+                        Text("发送", color = AppColors.cyan)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDanmakuInput = false }) {
+                        Text("取消", color = Color.White.copy(alpha = 0.7f))
                     }
                 },
                 containerColor = Color(0xFF1E1E24),

@@ -168,6 +168,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sourceManager = SourceManager(application)
     private val storageManager = StorageManager(application)
     private val appUpdateManager = AppUpdateManager(application)
+    private val commentRepository = CommentRepository(application)
+    private val accountRepository = AccountRepository(application)
+    private var commentsLoadedFor: String? = null
     private var isAppInitialized = false
     private var playerReturnView = "home"
     private var pendingEpisodeName: String? = null
@@ -205,8 +208,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // History and Favorites
     var historyList by mutableStateOf<List<HistoryItem>>(emptyList())
     var favoritesList by mutableStateOf<List<SourceItem>>(emptyList())
+    var commentNick by mutableStateOf(storageManager.getCommentNick())
     var commentDraft by mutableStateOf("")
-    var comments by mutableStateOf<List<String>>(emptyList())
+    var comments by mutableStateOf<List<CloudComment>>(emptyList())
+
+    // Cloud account state. Anonymous local storage remains the default.
+    var accountUser by mutableStateOf<AccountUser?>(null)
+    var accountBusy by mutableStateOf(false)
+    var accountMessage by mutableStateOf("")
 
     // Theme & Account Settings State
     var themeMode by mutableStateOf(storageManager.getThemeMode())
@@ -287,15 +296,134 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         storageManager.setUserAvatar(index)
     }
 
+    fun updateCommentNick(nick: String) {
+        val normalized = nick.trim().take(24)
+        commentNick = normalized
+        if (normalized.isNotEmpty()) {
+            storageManager.setCommentNick(normalized)
+        }
+    }
+
+    fun loginAccount(email: String, password: String) {
+        if (accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                val result = accountRepository.login(email, password)
+                if (result.user == null || result.token.isNullOrBlank()) {
+                    accountMessage = result.error ?: "登录失败"
+                } else {
+                    storageManager.setAuthToken(result.token)
+                    storageManager.setAccountNickname(result.user.nickname)
+                    updateUserEmail(result.user.email)
+                    accountUser = result.user
+                    accountMessage = "登录成功，正在同步本机数据"
+                    accountRepository.sync(result.token, favoritesList, historyList)
+                }
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "登录失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun registerAccount(email: String, password: String, nickname: String) {
+        if (accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                val result = accountRepository.register(email, password, nickname)
+                if (result.user == null || result.token.isNullOrBlank()) {
+                    accountMessage = result.error ?: "注册失败"
+                } else {
+                    storageManager.setAuthToken(result.token)
+                    storageManager.setAccountNickname(result.user.nickname)
+                    updateUserEmail(result.user.email)
+                    accountUser = result.user
+                    accountMessage = "注册成功，已同步本机数据"
+                    accountRepository.sync(result.token, favoritesList, historyList)
+                }
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "注册失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun logoutAccount() {
+        val token = storageManager.getAuthToken()
+        viewModelScope.launch {
+            if (token.isNotBlank()) runCatching { accountRepository.logout(token) }
+            storageManager.clearAuthToken()
+            accountUser = null
+            accountMessage = "已退出云端账号，本机数据仍保留"
+        }
+    }
+
+    private fun restoreAccount() {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            runCatching { accountRepository.me(token) }
+                .onSuccess { result ->
+                    if (result.user != null) {
+                        accountUser = result.user
+                        updateUserEmail(result.user.email)
+                    } else {
+                        storageManager.clearAuthToken()
+                    }
+                }
+                .onFailure { storageManager.clearAuthToken() }
+        }
+    }
+
     fun allPoolItems(): List<SourceItem> {
         return (cachedHomePool + homeSections.flatMap { it.items }).distinctBy { it.id }
     }
 
+    private fun commentMediaKey(item: SourceItem): String =
+        "${item.sourceKey.substringBefore(',').trim()}:${item.id}"
+
+    // 打开详情/播放页时按作品加载云端评论；接口失败保持空列表，不影响播放链路
+    fun loadCommentsForActiveDetail() {
+        val detail = displayedDetail ?: activeDetail ?: return
+        val key = commentMediaKey(detail.item)
+        if (key == commentsLoadedFor) return
+        commentsLoadedFor = key
+        comments = emptyList()
+        viewModelScope.launch {
+            val remote = commentRepository.load(key)
+            if (remote != null && commentsLoadedFor == key) {
+                comments = remote
+            }
+        }
+    }
+
     fun addComment() {
         val text = commentDraft.trim()
-        if (text.isNotEmpty()) {
-            comments = comments + text
-            commentDraft = ""
+        if (text.isEmpty()) return
+        commentDraft = ""
+        val detail = displayedDetail ?: activeDetail ?: return
+        val key = commentMediaKey(detail.item)
+        val nick = commentNick.ifBlank { storageManager.getCommentNick() }
+        // 乐观上屏，再以云端返回的权威列表覆盖
+        comments = comments + CloudComment(nick, text)
+        viewModelScope.launch {
+            val remote = commentRepository.post(key, nick, text)
+            if (remote != null) {
+                commentsLoadedFor = key
+                comments = remote
+            } else {
+                android.widget.Toast.makeText(
+                    getApplication(),
+                    "云端评论暂不可用，评论仅保留在本机当前会话",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
         }
     }
 
@@ -331,6 +459,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isAppInitialized = true
         reloadStorageData()
         reloadSourcesState()
+        restoreAccount()
         viewModelScope.launch {
             withContext(Dispatchers.Main) { notice = "正在加载视频源..." }
             withContext(Dispatchers.IO) { sourceManager.init() }
@@ -2361,6 +2490,11 @@ fun PlayerViewScreen(vm: MainViewModel) {
         AllEpisodesModal(vm) { showAllEpisodesModal = false }
     }
 
+    // 进入详情/播放页时按作品加载云端评论
+    LaunchedEffect(detail.item.sourceKey, detail.item.id) {
+        vm.loadCommentsForActiveDetail()
+    }
+
     // 横屏（全屏播放）时播放器必须精确占满可见区域：
     // 若按宽度推导 16:9 高度（宽×9/16），在不同尺寸/比例的机型上会超出屏幕高度，
     // 导致顶部栏和进度条下方控制行被裁切（见用户反馈的横屏截屏）。
@@ -2745,6 +2879,18 @@ fun PlayerViewScreen(vm: MainViewModel) {
             // Standalone Comments Tab Screen
             Column(Modifier.fillMaxSize().padding(16.dp)) {
                 OutlinedTextField(
+                    value = vm.commentNick,
+                    onValueChange = { vm.updateCommentNick(it) },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    singleLine = true,
+                    label = { Text("评论昵称", color = AppColors.muted, fontSize = 12.sp) },
+                    placeholder = { Text("请输入昵称", color = AppColors.muted) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.cyan,
+                        unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
+                    )
+                )
+                OutlinedTextField(
                     value = vm.commentDraft,
                     onValueChange = { vm.commentDraft = it },
                     modifier = Modifier.fillMaxWidth(),
@@ -2772,8 +2918,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     }
                 } else {
                     LazyColumn(Modifier.fillMaxSize()) {
-                        items(vm.comments.size) { idx ->
-                            val comment = vm.comments[idx]
+                        items(vm.comments.size) { index ->
+                            val comment = vm.comments[index]
                             Card(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                 colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
@@ -2797,11 +2943,17 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Text("漫友_${1000 + idx}", color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                            Text("刚刚", color = AppColors.muted, fontSize = 11.sp)
+                                            Text(comment.nick, color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text(
+                                                if (comment.ts > 0L) {
+                                                    android.text.format.DateUtils.getRelativeTimeSpanString(comment.ts).toString()
+                                                } else "刚刚",
+                                                color = AppColors.muted,
+                                                fontSize = 11.sp
+                                            )
                                         }
                                         Spacer(Modifier.height(4.dp))
-                                        Text(comment, color = AppColors.text, fontSize = 14.sp)
+                                        Text(comment.text, color = AppColors.text, fontSize = 14.sp)
                                     }
                                 }
                             }
@@ -2971,6 +3123,86 @@ fun ProfileView(vm: MainViewModel) {
                     }
                     IconButton(onClick = { vm.view = "settings" }) {
                         Icon(Icons.Default.Settings, contentDescription = "设置", tint = AppColors.cyan)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        item {
+            var accountEmail by remember { mutableStateOf(vm.userEmail) }
+            var accountPassword by remember { mutableStateOf("") }
+            var accountNickname by remember { mutableStateOf(vm.commentNick) }
+            var registering by remember { mutableStateOf(false) }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
+                        color = AppColors.text,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        if (vm.accountUser == null) "未登录时继续使用本机数据；登录后自动合并到账号。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
+                        color = AppColors.muted,
+                        fontSize = 12.sp
+                    )
+                    if (vm.accountUser == null) {
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = accountEmail,
+                            onValueChange = { accountEmail = it },
+                            label = { Text("邮箱") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        if (registering) {
+                            OutlinedTextField(
+                                value = accountNickname,
+                                onValueChange = { accountNickname = it.take(24) },
+                                label = { Text("昵称") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        OutlinedTextField(
+                            value = accountPassword,
+                            onValueChange = { accountPassword = it },
+                            label = { Text("密码") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    if (registering) vm.registerAccount(accountEmail, accountPassword, accountNickname)
+                                    else vm.loginAccount(accountEmail, accountPassword)
+                                },
+                                enabled = !vm.accountBusy && isValidEmail(accountEmail) && isPasswordStrong(accountPassword),
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                            ) {
+                                Text(if (registering) "注册并同步" else "登录并同步")
+                            }
+                            TextButton(onClick = { registering = !registering }) {
+                                Text(if (registering) "已有账号？登录" else "没有账号？注册")
+                            }
+                        }
+                    } else {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = { vm.logoutAccount() }) { Text("退出云端账号") }
+                    }
+                    if (vm.accountMessage.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
                     }
                 }
             }
