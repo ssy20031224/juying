@@ -382,6 +382,8 @@ fun EmbeddedVideoPlayer(
     var duration by remember { mutableStateOf(0L) }
     var isSeeking by remember { mutableStateOf(false) }
     var sliderPosition by remember { mutableStateOf(0f) }
+    var lastDragTime by remember { mutableStateOf(0L) }
+    var resumeAfterSliderSeek by remember { mutableStateOf(true) }
 
     var isFullscreen by remember { mutableStateOf(false) }
     var isLocked by remember { mutableStateOf(false) }
@@ -588,7 +590,7 @@ fun EmbeddedVideoPlayer(
             prepare()
             // AndroidView below starts playback only after its actual output
             // surface is attached, available and has non-zero dimensions.
-            playWhenReady = false
+            playWhenReady = true
             addListener(object : Player.Listener {
                 private var renderedBeforeVideoSize = false
 
@@ -928,23 +930,29 @@ fun EmbeddedVideoPlayer(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .pointerInput(duration, isLocked) {
+            .pointerInput(duration, isLocked, controlsVisible) {
                 var startX = 0f
+                var startY = 0f
                 var totalX = 0f
                 var totalY = 0f
                 var volumeAcc = 0f
+                var startedOnControls = false
+                var resumeAfterGestureSeek = false
 
                 detectDragGestures(
                     onDragStart = { offset ->
                         startX = offset.x
+                        startY = offset.y
                         totalX = 0f
                         totalY = 0f
                         volumeAcc = 0f
+                        startedOnControls = controlsVisible && startY > size.height * 0.70f
+                        resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
                     onDrag = { _, amount ->
                         totalX += amount.x
                         totalY += amount.y
-                        if (isLocked) return@detectDragGestures
+                        if (isLocked || startedOnControls) return@detectDragGestures
 
                         val width = size.width.coerceAtLeast(1)
 
@@ -979,27 +987,26 @@ fun EmbeddedVideoPlayer(
                         }
                     },
                     onDragEnd = {
-                        if (isLocked || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
+                        lastDragTime = System.currentTimeMillis()
+                        if (isLocked || startedOnControls || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
-                        val deltaMs = if (kotlin.math.abs(totalX) < width * 0.35f) {
-                            if (totalX > 0) 15_000L else -15_000L
-                        } else {
-                            (duration.coerceAtLeast(60_000L) * proportion).toLong()
-                        }
-                        exoPlayer.seekTo(
-                            (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
-                        )
+                        val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
+                        val targetPosition = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                        exoPlayer.seekTo(targetPosition)
+                        exoPlayer.playWhenReady = resumeAfterGestureSeek
                     }
                 )
             }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = {
+                        if (System.currentTimeMillis() - lastDragTime < 300L) return@detectTapGestures
                         controlsVisible = !controlsVisible
                     },
                     onDoubleTap = {
-                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                        if (System.currentTimeMillis() - lastDragTime < 300L) return@detectTapGestures
+                        if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
                     }
                 )
             }
@@ -1291,12 +1298,12 @@ fun EmbeddedVideoPlayer(
                             )
                         }
                         IconButton(
-                            onClick = { if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play() },
+                            onClick = { if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play() },
                             modifier = Modifier
                                 .size(62.dp)
                                 .background(Color.Black.copy(alpha = 0.55f), CircleShape)
                         ) {
-                            if (isPlaying) {
+                            if (exoPlayer.playWhenReady || isPlaying) {
                                 PauseIcon(tint = Color.White)
                             } else {
                                 Icon(
@@ -1351,11 +1358,15 @@ fun EmbeddedVideoPlayer(
                             Slider(
                                 value = if (isSeeking) sliderPosition else currentPosition.toFloat(),
                                 onValueChange = {
+                                    if (!isSeeking) {
+                                        resumeAfterSliderSeek = exoPlayer.playWhenReady
+                                    }
                                     isSeeking = true
                                     sliderPosition = it
                                 },
                                 onValueChangeFinished = {
                                     exoPlayer.seekTo(sliderPosition.toLong())
+                                    exoPlayer.playWhenReady = resumeAfterSliderSeek
                                     isSeeking = false
                                 },
                                 valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
@@ -1397,11 +1408,11 @@ fun EmbeddedVideoPlayer(
                                 // Play / Pause
                                 IconButton(
                                     onClick = {
-                                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                                        if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
-                                if (isPlaying) {
+                                if (exoPlayer.playWhenReady || isPlaying) {
                                     PauseIcon(tint = Color.White)
                                 } else {
                                     Icon(
