@@ -20,11 +20,14 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -37,8 +40,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -137,24 +146,34 @@ private fun TvCastIcon(modifier: Modifier = Modifier, tint: Color = Color.White)
 }
 
 @Composable
-private fun FullscreenIcon(modifier: Modifier = Modifier, isFull: Boolean) {
-    if (isFull) {
-        Box(
-            modifier = modifier
-                .size(20.dp)
-                .background(AppColors.cyan, RoundedCornerShape(3.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(modifier = Modifier.size(8.dp).background(Color.Black))
-        }
-    } else {
-        Box(
-            modifier = modifier
-                .size(20.dp)
-                .border(1.5.dp, AppColors.cyan, RoundedCornerShape(3.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(modifier = Modifier.size(7.dp).background(AppColors.cyan))
+private fun FullscreenIcon(modifier: Modifier = Modifier, isFull: Boolean, tint: Color = Color.White) {
+    Canvas(modifier = modifier.size(18.dp)) {
+        val w = size.width
+        val h = size.height
+        val stroke = 2.dp.toPx()
+        val c = 5.dp.toPx()
+        val cap = StrokeCap.Round
+        
+        if (isFull) {
+            // Exit fullscreen (arrows in)
+            drawLine(tint, Offset(0f, c), Offset(c, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(c, 0f), Offset(c, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, c), Offset(w - c, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w - c, 0f), Offset(w - c, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(0f, h - c), Offset(c, h - c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(c, h), Offset(c, h - c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, h - c), Offset(w - c, h - c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w - c, h), Offset(w - c, h - c), strokeWidth = stroke, cap = cap)
+        } else {
+            // Enter fullscreen (arrows out)
+            drawLine(tint, Offset(0f, 0f), Offset(c, 0f), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(0f, 0f), Offset(0f, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, 0f), Offset(w - c, 0f), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, 0f), Offset(w, c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(0f, h), Offset(c, h), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(0f, h), Offset(0f, h - c), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, h), Offset(w - c, h), strokeWidth = stroke, cap = cap)
+            drawLine(tint, Offset(w, h), Offset(w, h - c), strokeWidth = stroke, cap = cap)
         }
     }
 }
@@ -176,34 +195,106 @@ private fun PauseIcon(modifier: Modifier = Modifier, tint: Color = Color.White) 
 }
 
 @Composable
+private fun SunIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Canvas(modifier = modifier.size(22.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = size.width * 0.22f
+        drawCircle(
+            color = tint,
+            radius = radius,
+            center = center,
+            style = Stroke(width = 1.8.dp.toPx())
+        )
+        val rayInner = radius + 2.5.dp.toPx()
+        val rayOuter = rayInner + 3.5.dp.toPx()
+        for (i in 0 until 8) {
+            val angle = Math.toRadians((i * 45).toDouble())
+            val start = Offset(
+                center.x + (rayInner * Math.cos(angle)).toFloat(),
+                center.y + (rayInner * Math.sin(angle)).toFloat()
+            )
+            val end = Offset(
+                center.x + (rayOuter * Math.cos(angle)).toFloat(),
+                center.y + (rayOuter * Math.sin(angle)).toFloat()
+            )
+            drawLine(
+                color = tint,
+                start = start,
+                end = end,
+                strokeWidth = 1.8.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+@Composable
+private fun SpeakerVolumeIcon(modifier: Modifier = Modifier, value: Int, tint: Color = Color.White) {
+    Canvas(modifier = modifier.size(22.dp)) {
+        val stroke = 1.8.dp.toPx()
+        val speakerPath = Path().apply {
+            moveTo(size.width * 0.15f, size.height * 0.38f)
+            lineTo(size.width * 0.35f, size.height * 0.38f)
+            lineTo(size.width * 0.55f, size.height * 0.2f)
+            lineTo(size.width * 0.55f, size.height * 0.8f)
+            lineTo(size.width * 0.35f, size.height * 0.62f)
+            lineTo(size.width * 0.15f, size.height * 0.62f)
+            close()
+        }
+        drawPath(path = speakerPath, color = tint, style = Stroke(width = stroke, join = StrokeJoin.Round))
+
+        if (value > 0) {
+            drawArc(
+                color = tint,
+                startAngle = -45f,
+                sweepAngle = 90f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.42f, size.height * 0.28f),
+                size = Size(size.width * 0.38f, size.height * 0.44f),
+                style = Stroke(width = stroke, cap = StrokeCap.Round)
+            )
+            drawArc(
+                color = tint,
+                startAngle = -50f,
+                sweepAngle = 100f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.3f, size.height * 0.18f),
+                size = Size(size.width * 0.58f, size.height * 0.64f),
+                style = Stroke(width = stroke, cap = StrokeCap.Round)
+            )
+        } else {
+            drawLine(
+                color = tint,
+                start = Offset(size.width * 0.65f, size.height * 0.35f),
+                end = Offset(size.width * 0.85f, size.height * 0.65f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = tint,
+                start = Offset(size.width * 0.85f, size.height * 0.35f),
+                end = Offset(size.width * 0.65f, size.height * 0.65f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+@Composable
 private fun HudIcon(type: String, value: Int) {
     when (type) {
-        "brightness" -> Box(
-            modifier = Modifier.size(18.dp).border(1.5.dp, Color.White, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(modifier = Modifier.size(6.dp).background(Color.White, CircleShape))
-        }
-        "volume" -> Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            Box(modifier = Modifier.size(5.dp, 10.dp).background(Color.White, RoundedCornerShape(1.dp)))
-            if (value > 0) {
-                Box(modifier = Modifier.size(3.dp, 6.dp).background(Color.White, RoundedCornerShape(1.dp)))
-            } else {
-                Box(modifier = Modifier.size(6.dp, 1.5.dp).background(Color.White))
-            }
-        }
+        "brightness" -> SunIcon(tint = Color.White)
+        "volume" -> SpeakerVolumeIcon(value = value, tint = Color.White)
         "seek" -> Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
         }
         "speed" -> Box(
-            modifier = Modifier.size(18.dp).border(1.5.dp, Color.White, RoundedCornerShape(3.dp)),
+            modifier = Modifier.size(20.dp).border(1.5.dp, Color.White, RoundedCornerShape(3.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("X", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text("X", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -254,6 +345,12 @@ fun EmbeddedVideoPlayer(
     var isLocked by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     var danmakuEnabled by remember { mutableStateOf(true) }
+    var blockBottom by remember { mutableStateOf(false) }
+    var blockTop by remember { mutableStateOf(false) }
+    var blockScroll by remember { mutableStateOf(false) }
+    var blockColor by remember { mutableStateOf(false) }
+    var danmakuAreaRatio by remember { mutableStateOf(1.0f) }
+    var danmakuFontSizeScale by remember { mutableStateOf(1.0f) }
 
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showRatioMenu by remember { mutableStateOf(false) }
@@ -476,11 +573,7 @@ fun EmbeddedVideoPlayer(
     }
 
     LaunchedEffect(qualityEnhancement) {
-        exoPlayer.videoScalingMode = if (qualityEnhancement) {
-            C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-        } else {
-            C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-        }
+        exoPlayer.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
         if (qualityEnhancement) {
             isScanlineActive = true
             val anim = androidx.compose.animation.core.Animatable(0f)
@@ -644,7 +737,11 @@ fun EmbeddedVideoPlayer(
                     if (view.player != exoPlayer) {
                         view.player = exoPlayer
                     }
-                    view.resizeMode = resizeMode
+                    if (view.resizeMode != resizeMode) {
+                        view.resizeMode = resizeMode
+                        view.requestLayout()
+                        view.invalidate()
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -760,10 +857,10 @@ fun EmbeddedVideoPlayer(
                                 )
                             )
                             .padding(
-                                start = if (isFullscreen) 24.dp else 12.dp,
-                                end = if (isFullscreen) 24.dp else 12.dp,
-                                top = if (isFullscreen) 12.dp else 8.dp,
-                                bottom = 8.dp
+                                start = if (isFullscreen) 32.dp else 12.dp,
+                                end = if (isFullscreen) 32.dp else 12.dp,
+                                top = if (isFullscreen) 16.dp else 6.dp,
+                                bottom = 6.dp
                             ),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -819,7 +916,7 @@ fun EmbeddedVideoPlayer(
                         onClick = { isLocked = true },
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
-                            .padding(end = if (isFullscreen) 24.dp else 16.dp)
+                            .padding(end = if (isFullscreen) 32.dp else 16.dp)
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
@@ -833,14 +930,14 @@ fun EmbeddedVideoPlayer(
                             .align(Alignment.BottomCenter)
                             .background(
                                 Brush.verticalGradient(
-                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.95f))
                                 )
                             )
                             .padding(
-                                start = if (isFullscreen) 24.dp else 12.dp,
-                                end = if (isFullscreen) 24.dp else 12.dp,
-                                bottom = if (isFullscreen) 18.dp else 6.dp,
-                                top = 6.dp
+                                start = if (isFullscreen) 32.dp else 12.dp,
+                                end = if (isFullscreen) 32.dp else 12.dp,
+                                bottom = if (isFullscreen) 4.dp else 2.dp,
+                                top = 2.dp
                             )
                     ) {
                         // ── ROW 1: Time, Slider, Duration, PiP, Fullscreen ──
@@ -882,16 +979,6 @@ fun EmbeddedVideoPlayer(
                             )
 
                             Spacer(Modifier.width(6.dp))
-
-                            // PiP Small Window Button (全屏左侧的画中画小窗按钮)
-                            IconButton(
-                                onClick = { enterPip() },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                PipIcon(tint = Color.White)
-                            }
-
-                            Spacer(Modifier.width(4.dp))
 
                             // Fullscreen Button (进度条最右侧的全屏按钮)
                             IconButton(
@@ -1147,48 +1234,167 @@ fun EmbeddedVideoPlayer(
         if (showDanmakuSettings) {
             AlertDialog(
                 onDismissRequest = { showDanmakuSettings = false },
-                title = { Text("弹幕设置", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+                title = {
+                    Text("弹幕设置", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("显示弹幕", color = AppColors.text)
-                            Switch(checked = danmakuEnabled, onCheckedChange = { danmakuEnabled = it })
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        // 1. 不透明度
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("不透明度", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                                Text("${(danmakuOpacity * 100).toInt()}%", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                            }
+                            Slider(
+                                value = danmakuOpacity,
+                                onValueChange = { danmakuOpacity = it },
+                                valueRange = 0.1f..1.0f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = AppColors.rose,
+                                    activeTrackColor = AppColors.rose,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                                )
+                            )
                         }
-                        Text("透明度 ${(danmakuOpacity * 100).toInt()}%", color = AppColors.muted, fontSize = 12.sp)
-                        Slider(
-                            value = danmakuOpacity,
-                            onValueChange = { danmakuOpacity = it },
-                            valueRange = 0.25f..1f
-                        )
-                        OutlinedTextField(
-                            value = danmakuDraft,
-                            onValueChange = { danmakuDraft = it },
-                            label = { Text("发送弹幕") },
-                            singleLine = true
-                        )
+
+                        // 2. 屏蔽弹幕类型
+                        Column {
+                            Text("屏蔽弹幕类型", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    Triple("屏蔽底部", blockBottom) { blockBottom = !blockBottom },
+                                    Triple("屏蔽顶部", blockTop) { blockTop = !blockTop },
+                                    Triple("屏蔽滚动", blockScroll) { blockScroll = !blockScroll },
+                                    Triple("屏蔽彩色", blockColor) { blockColor = !blockColor }
+                                ).forEach { (label, isBlocked, toggle) ->
+                                    Surface(
+                                        onClick = toggle,
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isBlocked) AppColors.rose.copy(alpha = 0.35f) else Color.White.copy(alpha = 0.08f),
+                                        border = if (isBlocked) androidx.compose.foundation.BorderStroke(1.dp, AppColors.rose) else null,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(64.dp)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.fillMaxSize().padding(4.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            val iconChar = when (label) {
+                                                "屏蔽底部" -> "⎽"
+                                                "屏蔽顶部" -> "⎾"
+                                                "屏蔽滚动" -> "≡"
+                                                else -> "💧"
+                                            }
+                                            Text(iconChar, color = if (isBlocked) AppColors.rose else Color.White, fontSize = 16.sp)
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(label, color = if (isBlocked) AppColors.rose else Color.White.copy(alpha = 0.8f), fontSize = 10.sp, maxLines = 1)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. 显示区域
+                        Column {
+                            Text("显示区域", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    "全屏" to 1.0f,
+                                    "3/4" to 0.75f,
+                                    "半屏" to 0.5f,
+                                    "1/4" to 0.25f
+                                ).forEach { (label, ratio) ->
+                                    val isSelected = danmakuAreaRatio == ratio
+                                    Surface(
+                                        onClick = { danmakuAreaRatio = ratio },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isSelected) AppColors.rose else Color.White.copy(alpha = 0.08f),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(44.dp)
+                                    ) {
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            Text(
+                                                label,
+                                                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.8f),
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4. 字号大小
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("字号大小", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                                Text("${(danmakuFontSizeScale * 100).toInt()}%", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                            }
+                            Slider(
+                                value = danmakuFontSizeScale,
+                                onValueChange = { danmakuFontSizeScale = it },
+                                valueRange = 0.5f..1.5f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = AppColors.rose,
+                                    activeTrackColor = AppColors.rose,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                                )
+                            )
+                        }
+
+                        // 5. 恢复默认设置
+                        Surface(
+                            onClick = {
+                                danmakuOpacity = 1.0f
+                                blockBottom = false
+                                blockTop = false
+                                blockScroll = false
+                                blockColor = false
+                                danmakuAreaRatio = 1.0f
+                                danmakuFontSizeScale = 1.0f
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color.White.copy(alpha = 0.1f),
+                            modifier = Modifier.fillMaxWidth().height(42.dp)
+                        ) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("恢复默认设置", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        if (danmakuDraft.isNotBlank()) {
-                            sentDanmaku.add(danmakuDraft.trim())
-                            danmakuDraft = ""
-                        }
-                        showDanmakuSettings = false
-                    }) {
-                        Text("发送并关闭", color = AppColors.cyan)
-                    }
-                },
-                dismissButton = {
                     TextButton(onClick = { showDanmakuSettings = false }) {
-                        Text("取消", color = AppColors.muted)
+                        Text("完成", color = AppColors.rose)
                     }
                 },
-                containerColor = AppColors.panel
+                containerColor = Color(0xFF1E1E24),
+                shape = RoundedCornerShape(16.dp)
             )
         }
 

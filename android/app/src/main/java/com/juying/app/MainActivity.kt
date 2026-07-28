@@ -25,6 +25,10 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed as lazyItemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import java.util.concurrent.atomic.AtomicInteger
 
 import androidx.compose.foundation.shape.CircleShape
@@ -280,24 +284,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         storageManager.setUserAvatar(index)
     }
 
-    fun getDownloadedFilesList(): List<Pair<String, String>> {
-        val root = getApplication<Application>().getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: getApplication<Application>().filesDir
-        val folder = File(root, "lanerc")
-        if (!folder.exists() || !folder.isDirectory) return emptyList()
-        val result = mutableListOf<Pair<String, String>>()
-        folder.listFiles()?.forEach { animeDir ->
-            if (animeDir.isDirectory) {
-                animeDir.listFiles()?.forEach { epFile ->
-                    if (epFile.extension in listOf("mp4", "m3u8")) {
-                        val sizeMb = String.format("%.1f MB", epFile.length() / (1024.0 * 1024.0))
-                        result.add(Pair("${animeDir.name} - ${epFile.nameWithoutExtension}", sizeMb))
-                    }
-                }
-            }
-        }
-        return result
-    }
-
     fun allPoolItems(): List<SourceItem> {
         return (cachedHomePool + homeSections.flatMap { it.items }).distinctBy { it.id }
     }
@@ -321,6 +307,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     var totalLibrary by mutableStateOf(0)
     var page by mutableStateOf(1)
+    var showDownloadEpisodeModal by mutableStateOf(false)
+    val activeDownloadKeys = mutableStateListOf<String>()
 
     val kinds = listOf("全部", "日漫", "国漫", "剧场版", "欧美")
     val genres = listOf(
@@ -1401,44 +1389,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadCurrentEpisodes() {
-        val detail = currentActiveDetail() ?: return
+    fun startDownloadEpisode(detail: DetailResult, episode: Episode) {
+        val downloadKey = "${detail.item.title}_${episode.name}"
+        if (activeDownloadKeys.contains(downloadKey)) {
+            notice = "「${episode.name}」正在下载中，请勿重复点击"
+            return
+        }
         val adapter = sourceManager.getAdapter(detail.item.sourceKey) ?: return
-        if (downloadProgress != null) return
-        val episodes = detail.episodes
+        activeDownloadKeys.add(downloadKey)
+        notice = "已开始后台下载：${detail.item.title} ${episode.name}"
+
         viewModelScope.launch(Dispatchers.IO) {
             val downloader = VideoDownloadManager(getApplication())
-            var downloaded = 0
-            episodes.forEachIndexed { index, episode ->
-                withContext(Dispatchers.Main) {
-                    downloadProgress = "${index + 1}/${episodes.size}"
-                }
-                try {
-                    val play = withTimeout(20_000L) { adapter.play(episode.flagStr) }
-                    if (play.url.isNotBlank()) {
-                        val file = downloader.download(
-                            play.url,
-                            play.headers,
-                            play.referer,
-                            detail.item.title,
-                            episode.name
-                        )
-                        if (file != null) downloaded++
-                    }
-                } catch (_: Exception) {
-                    SourceLogManager.error(
-                        adapter.key,
-                        "download",
-                        "download failed",
-                        "episode=${episode.name}"
+            try {
+                downloader.downloadCover(detail.item.cover, detail.item.title)
+                val play = withTimeout(20_000L) { adapter.play(episode.flagStr) }
+                if (play.url.isNotBlank()) {
+                    val fileInfo = downloader.download(
+                        play.url,
+                        play.headers,
+                        play.referer,
+                        detail.item.title,
+                        episode.name
                     )
+                    if (fileInfo != null && fileInfo.playableOffline) {
+                        downloader.saveMetadata(detail.item.title, episode.name, detail.item.cover, fileInfo.file)
+                        withContext(Dispatchers.Main) {
+                            notice = "【下载完成】${detail.item.title} ${episode.name}"
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            notice = "【下载失败】${episode.name} 无法离线播放"
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        notice = "【下载失败】无法解析 ${episode.name} 播放资源"
+                    }
                 }
-            }
-            withContext(Dispatchers.Main) {
-                downloadProgress = null
-                notice = "已下载 $downloaded/${episodes.size} 集到本地视频目录"
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    notice = "【下载异常】${episode.name}：${e.message}"
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    activeDownloadKeys.remove(downloadKey)
+                }
             }
         }
+    }
+
+    fun getDownloadedFilesList(): List<com.juying.app.source.DownloadedItemInfo> {
+        val downloader = VideoDownloadManager(getApplication())
+        return downloader.getDownloadedItems()
+    }
+
+    fun deleteDownloadedFile(item: com.juying.app.source.DownloadedItemInfo) {
+        val downloader = VideoDownloadManager(getApplication())
+        val ok = downloader.deleteDownload(item)
+        if (ok) {
+            notice = "已成功删除缓存：${item.title} ${item.episodeName}"
+            reloadStorageData()
+        } else {
+            notice = "删除缓存失败"
+        }
+    }
+
+    fun playOfflineVideo(item: com.juying.app.source.DownloadedItemInfo) {
+        val localPath = item.videoFile.absolutePath
+        currentPlayResult = PlayResult(
+            url = localPath,
+            headers = emptyMap(),
+            referer = ""
+        )
+        val dummyDetail = DetailResult(
+            item = SourceItem(
+                id = "local_${item.title}",
+                title = item.title,
+                cover = item.coverPath.orEmpty(),
+                year = "离线缓存",
+                kind = "本地文件",
+                sourceKey = "local",
+                sourceTitle = "本地视频"
+            ),
+            episodes = listOf(Episode(id = "1", name = item.episodeName, flagStr = localPath))
+        )
+        activeDetail = dummyDetail
+        currentEpisodeIndex = 0
+        playerReturnView = view
+        view = "player"
+        notice = "正在播放离线缓存：${item.title} ${item.episodeName}"
     }
 
     fun toggleFavorite(item: SourceItem) {
@@ -1487,6 +1527,18 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::updateManager.isInitialized) {
             updateManager.resumePendingInstall(this)
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            try {
+                val params = android.app.PictureInPictureParams.Builder()
+                    .setAspectRatio(android.util.Rational(16, 9))
+                    .build()
+                enterPictureInPictureMode(params)
+            } catch (_: Exception) {}
         }
     }
 }
@@ -1798,7 +1850,6 @@ fun JuyingApp(vm: MainViewModel) {
         }
     }
 }
-
 
 @Composable
 fun HomeView(vm: MainViewModel) {
@@ -2376,18 +2427,71 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
                         ) { vm.switchSource() }
                         ActionButton(
-                            Icons.Default.Star,
-                            vm.downloadProgress?.let { "下载 $it" }
-                                ?: vm.episodeCacheProgress?.let { "预解析 $it" }
-                                ?: "下载番剧",
-                            enabled = vm.downloadProgress == null && vm.episodeCacheProgress == null
-                        ) { vm.downloadCurrentEpisodes() }
+                            Icons.Default.KeyboardArrowDown,
+                            if (vm.activeDownloadKeys.isNotEmpty()) "下载中(${vm.activeDownloadKeys.size})" else "下载番剧",
+                            enabled = true
+                        ) { vm.showDownloadEpisodeModal = true }
                         ActionButton(
                             if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             if (isFav) "已追番" else "追番",
                             tint = if (isFav) AppColors.rose else AppColors.text
                         ) { vm.toggleFavorite(detail.item) }
                         ActionButton(Icons.Default.Share, "分享", enabled = false) {}
+                    }
+
+                    if (vm.showDownloadEpisodeModal) {
+                        AlertDialog(
+                            onDismissRequest = { vm.showDownloadEpisodeModal = false },
+                            title = {
+                                Text("选择要下载的剧集", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            },
+                            text = {
+                                Column(Modifier.fillMaxWidth().heightIn(max = 350.dp)) {
+                                    Text(
+                                        "当前播放源：${detail.item.sourceTitle} · 共 ${detail.episodes.size} 集",
+                                        color = AppColors.cyan,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(bottom = 8.dp)
+                                    )
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(3),
+                                        modifier = Modifier.fillMaxWidth().weight(1f)
+                                    ) {
+                                        gridItemsIndexed(detail.episodes) { index, ep ->
+                                            val key = "${detail.item.title}_${ep.name}"
+                                            val isDownloading = vm.activeDownloadKeys.contains(key)
+                                            Surface(
+                                                onClick = {
+                                                    vm.startDownloadEpisode(detail, ep)
+                                                },
+                                                modifier = Modifier.padding(4.dp),
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isDownloading) AppColors.cyan.copy(alpha = 0.25f) else AppColors.panel2
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        if (isDownloading) "${ep.name}\n(下载中)" else ep.name,
+                                                        color = if (isDownloading) AppColors.cyan else AppColors.text,
+                                                        fontSize = 12.sp,
+                                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                                        maxLines = 2
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { vm.showDownloadEpisodeModal = false }) {
+                                    Text("完成", color = AppColors.cyan)
+                                }
+                            },
+                            containerColor = AppColors.panel
+                        )
                     }
                     if (totalSources > 1) {
                         Spacer(Modifier.height(8.dp))
@@ -2953,7 +3057,9 @@ fun FavoritesScreen(vm: MainViewModel) {
 
 @Composable
 fun OfflineCacheScreen(vm: MainViewModel) {
-    val downloads = vm.getDownloadedFilesList()
+    var refreshKey by remember { mutableStateOf(0) }
+    val downloads = remember(refreshKey, vm.notice) { vm.getDownloadedFilesList() }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2962,7 +3068,7 @@ fun OfflineCacheScreen(vm: MainViewModel) {
             IconButton(onClick = { vm.view = "profile" }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
             }
-            Text("离线缓存", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("离线缓存 (${downloads.size})", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(12.dp))
 
@@ -2972,36 +3078,60 @@ fun OfflineCacheScreen(vm: MainViewModel) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted, modifier = Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
                     Text("暂无离线缓存视频", color = AppColors.muted, fontSize = 14.sp)
-                    Text("在播放页面点击下载按键可离线缓存剧集", color = AppColors.muted.copy(alpha = 0.7f), fontSize = 12.sp)
+                    Text("在详情页点击「下载番剧」可选择剧集离线下载", color = AppColors.muted.copy(alpha = 0.7f), fontSize = 12.sp)
                 }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(downloads) { (fileName, fileSize) ->
+                items(downloads.size) { index ->
+                    val downloadItem = downloads[index]
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+                            .padding(vertical = 4.dp)
+                            .clickable { vm.playOfflineVideo(downloadItem) },
+                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
                     ) {
                         Row(
-                            modifier = Modifier.padding(14.dp),
+                            modifier = Modifier.padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = AppColors.cyan.copy(alpha = 0.2f),
-                                modifier = Modifier.size(42.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.cyan)
-                                }
-                            }
+                            val context = LocalContext.current
+                            val coverPath: String = downloadItem.coverPath.orEmpty()
+                            AsyncImage(
+                                model = coverRequest(context, coverPath),
+                                contentDescription = null,
+                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
+                                contentScale = ContentScale.Crop
+                            )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(fileName, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    downloadItem.title,
+                                    color = AppColors.text,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                                 Spacer(Modifier.height(2.dp))
-                                Text("文件大小：$fileSize · 可离线播放", color = AppColors.muted, fontSize = 12.sp)
+                                Text(
+                                    downloadItem.episodeName,
+                                    color = AppColors.cyan,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    "文件大小：${downloadItem.fileSizeFormatted} · 点击播放",
+                                    color = AppColors.muted,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            IconButton(onClick = {
+                                vm.deleteDownloadedFile(downloadItem)
+                                refreshKey++
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = "删除视频", tint = AppColors.rose)
                             }
                         }
                     }
@@ -3638,136 +3768,150 @@ fun AvatarImage(avatarIndex: Int, modifier: Modifier = Modifier) {
     )
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) {
     if (items.isEmpty()) return
-    var currentIndex by remember { mutableStateOf(0) }
+    val pagerState = rememberPagerState(pageCount = { items.size })
 
-    LaunchedEffect(items) {
-        while (true) {
-            kotlinx.coroutines.delay(3500)
-            currentIndex = (currentIndex + 1) % items.size
+    LaunchedEffect(items.size) {
+        while (items.size > 1) {
+            delay(4000)
+            val nextPage = (pagerState.currentPage + 1) % items.size
+            pagerState.animateScrollToPage(nextPage)
         }
     }
 
-    val currentItem = items[currentIndex]
-
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(180.dp)
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clickable { onSelect(currentItem) },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
     ) {
-        Box(Modifier.fillMaxSize()) {
-            // Ambient Blurred Cover Background
-            AsyncImage(
-                model = coverRequest(LocalContext.current, currentItem.cover),
-                contentDescription = null,
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .clip(RoundedCornerShape(14.dp))
+        ) { page ->
+            val item = items[page]
+            Card(
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer { alpha = 0.28f },
-                contentScale = ContentScale.Crop
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        androidx.compose.ui.graphics.Brush.horizontalGradient(
-                            colors = listOf(AppColors.bg, Color.Transparent),
-                            startX = 0f,
-                            endX = 550f
-                        )
-                    )
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        androidx.compose.ui.graphics.Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
-                        )
-                    )
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .clickable { onSelect(item) },
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel)
             ) {
-                // Left Metadata Info Column
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 12.dp),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = AppColors.cyan.copy(alpha = 0.25f)
-                    ) {
-                        Text(
-                            "🔥 热门推荐",
-                            color = AppColors.cyan,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        currentItem.title,
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "${currentItem.status.ifEmpty { "热播中" }} · ${currentItem.kind.ifEmpty { "动漫" }}",
-                        color = AppColors.muted,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                // Right Poster Box (Complete, intact poster display)
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = Color.Black.copy(alpha = 0.4f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
-                    modifier = Modifier
-                        .width(105.dp)
-                        .fillMaxHeight()
-                ) {
+                Box(Modifier.fillMaxSize()) {
                     AsyncImage(
-                        model = coverRequest(LocalContext.current, currentItem.cover),
-                        contentDescription = currentItem.title,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
-                        alignment = Alignment.TopCenter
+                        model = coverRequest(LocalContext.current, item.cover),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = 0.28f },
+                        contentScale = ContentScale.Crop
                     )
-                }
-            }
-
-            // Carousel dots indicator on bottom left
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 14.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items.indices.forEach { idx ->
                     Box(
                         modifier = Modifier
-                            .size(if (idx == currentIndex) 14.dp else 5.dp, 5.dp)
+                            .fillMaxSize()
+                            .background(
+                                androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                    colors = listOf(AppColors.bg, Color.Transparent),
+                                    startX = 0f,
+                                    endX = 550f
+                                )
+                            )
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
+                                )
+                            )
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 12.dp),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = AppColors.cyan.copy(alpha = 0.25f)
+                            ) {
+                                Text(
+                                    "🔥 热门推荐",
+                                    color = AppColors.cyan,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                item.title,
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "${item.status.ifEmpty { "热播中" }} · ${item.kind.ifEmpty { "动漫" }}",
+                                color = AppColors.muted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color.Black.copy(alpha = 0.4f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+                            modifier = Modifier
+                                .width(105.dp)
+                                .fillMaxHeight()
+                        ) {
+                            AsyncImage(
+                                model = coverRequest(LocalContext.current, item.cover),
+                                contentDescription = item.title,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                                alignment = Alignment.TopCenter
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (items.size > 1) {
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(items.size) { index ->
+                    val isSelected = pagerState.currentPage == index
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 3.dp)
+                            .height(4.dp)
+                            .width(if (isSelected) 16.dp else 6.dp)
                             .clip(CircleShape)
-                            .background(if (idx == currentIndex) AppColors.cyan else Color.White.copy(alpha = 0.4f))
+                            .background(if (isSelected) AppColors.cyan else Color.White.copy(alpha = 0.3f))
                     )
                 }
             }

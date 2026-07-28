@@ -103,6 +103,121 @@ class VideoDownloadManager(private val context: Context) {
         }
     }
 
+    suspend fun downloadCover(coverUrl: String, title: String): File? = withContext(Dispatchers.IO) {
+        if (coverUrl.isBlank()) return@withContext null
+        val root = File(
+            context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir,
+            "lanerc/${safe(title)}"
+        )
+        root.mkdirs()
+        val coverFile = File(root, "cover.jpg")
+        if (coverFile.exists() && coverFile.length() > 0L) return@withContext coverFile
+
+        try {
+            val req = Request.Builder().url(coverUrl).get().build()
+            client.newCall(req).execute().use { res ->
+                if (res.isSuccessful && res.body != null) {
+                    coverFile.outputStream().use { out ->
+                        res.body!!.byteStream().use { input -> input.copyTo(out) }
+                    }
+                    return@withContext coverFile
+                }
+            }
+        } catch (_: Exception) {}
+        return@withContext null
+    }
+
+    suspend fun saveMetadata(title: String, episodeName: String, coverUrl: String, videoFile: File) = withContext(Dispatchers.IO) {
+        val root = videoFile.parentFile ?: return@withContext
+        val coverFile = downloadCover(coverUrl, title)
+        val infoFile = File(root, "${safe(episodeName)}.info")
+        val content = """
+            title=$title
+            episodeName=$episodeName
+            coverPath=${coverFile?.absolutePath.orEmpty()}
+            videoPath=${videoFile.absolutePath}
+        """.trimIndent()
+        try { infoFile.writeText(content) } catch (_: Exception) {}
+    }
+
+    fun getDownloadedItems(): List<DownloadedItemInfo> {
+        val rootDir = File(
+            context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir,
+            "lanerc"
+        )
+        if (!rootDir.exists() || !rootDir.isDirectory) return emptyList()
+
+        val results = mutableListOf<DownloadedItemInfo>()
+        rootDir.listFiles()?.filter { it.isDirectory }?.forEach { folder ->
+            folder.listFiles()?.filter { it.name.endsWith(".info") }?.forEach { infoFile ->
+                try {
+                    val lines = infoFile.readLines().associate { line ->
+                        val parts = line.split("=", limit = 2)
+                        if (parts.size == 2) parts[0].trim() to parts[1].trim() else "" to ""
+                    }
+                    val title = lines["title"].orEmpty().ifBlank { folder.name }
+                    val episodeName = lines["episodeName"].orEmpty().ifBlank { infoFile.nameWithoutExtension }
+                    val videoPath = lines["videoPath"].orEmpty()
+                    val videoFile = File(videoPath).takeIf { it.exists() && it.length() > 0L }
+                        ?: folder.listFiles()?.firstOrNull { (it.name.endsWith(".mp4") || it.name.endsWith(".m3u8")) && it.name.startsWith(safe(episodeName)) }
+
+                    if (videoFile != null && videoFile.exists()) {
+                        val coverPath = lines["coverPath"].orEmpty().ifBlank {
+                            File(folder, "cover.jpg").takeIf { it.exists() }?.absolutePath
+                        }
+                        val sizeBytes = calculateFolderSize(videoFile)
+                        val sizeFormatted = formatFileSize(sizeBytes)
+
+                        results.add(
+                            DownloadedItemInfo(
+                                title = title,
+                                episodeName = episodeName,
+                                videoFile = videoFile,
+                                coverPath = coverPath,
+                                fileSizeFormatted = sizeFormatted
+                            )
+                        )
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        return results.sortedByDescending { it.videoFile.lastModified() }
+    }
+
+    fun deleteDownload(item: DownloadedItemInfo): Boolean {
+        try {
+            val videoFile = item.videoFile
+            val parent = videoFile.parentFile
+            if (videoFile.exists()) videoFile.delete()
+            val infoFile = File(parent, "${safe(item.episodeName)}.info")
+            if (infoFile.exists()) infoFile.delete()
+            parent?.listFiles()?.filter { it.name.startsWith("segment_") }?.forEach { it.delete() }
+            if (parent != null && parent.listFiles().isNullOrEmpty()) {
+                parent.delete()
+            }
+            return true
+        } catch (_: Exception) { return false }
+    }
+
+    private fun calculateFolderSize(file: File): Long {
+        if (!file.exists()) return 0L
+        if (file.isFile) {
+            if (file.name.endsWith(".m3u8")) {
+                var total = file.length()
+                file.parentFile?.listFiles()?.filter { it.name.startsWith("segment_") }?.forEach { total += it.length() }
+                return total
+            }
+            return file.length()
+        }
+        return 0L
+    }
+
+    private fun formatFileSize(sizeBytes: Long): String {
+        if (sizeBytes <= 0L) return "未知大小"
+        val mb = sizeBytes / (1024.0 * 1024.0)
+        return if (mb >= 1024) String.format("%.2f GB", mb / 1024.0) else String.format("%.1f MB", mb)
+    }
+
     private fun request(url: String, headers: Map<String, String>?, referer: String?): Request {
         val builder = Request.Builder().url(url).get()
         referer?.takeIf { it.isNotBlank() && !it.equals("never", true) }?.let {
@@ -126,3 +241,11 @@ class VideoDownloadManager(private val context: Context) {
     private fun safe(value: String): String =
         value.replace(Regex("[\\\\/:*?\"<>|\\s]+"), "_").take(80).ifBlank { "video" }
 }
+
+data class DownloadedItemInfo(
+    val title: String,
+    val episodeName: String,
+    val videoFile: File,
+    val coverPath: String?,
+    val fileSizeFormatted: String
+)
