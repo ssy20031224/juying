@@ -12,6 +12,7 @@ import android.os.Build
 import android.provider.Settings
 import android.view.OrientationEventListener
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -65,6 +66,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.effect.Contrast
+import androidx.media3.effect.RgbAdjustment
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -311,6 +314,7 @@ fun EmbeddedVideoPlayer(
     currentEpisodeIndex: Int = 0,
     onSelectEpisode: ((Int) -> Unit)? = null,
     onNextEpisode: (() -> Unit)? = null,
+    onPrevEpisode: (() -> Unit)? = null,
     onBack: () -> Unit,
     onError: () -> Unit = {}
 ) {
@@ -377,9 +381,10 @@ fun EmbeddedVideoPlayer(
         }
     }
 
-    // Toggle fullscreen helper
-    val toggleFullscreen = {
-        val targetFullscreen = !isFullscreen
+    // Unified fullscreen window handling: orientation + system bars + display cutout.
+    // SHORT_EDGES lets the window extend into the cutout area on punch-hole devices,
+    // otherwise the system letterboxes the player and control bars can be pushed off-screen.
+    val applyFullscreen = { targetFullscreen: Boolean ->
         isFullscreen = targetFullscreen
         activity?.let { act ->
             val window = act.window
@@ -388,10 +393,29 @@ fun EmbeddedVideoPlayer(
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 controller.hide(WindowInsetsCompat.Type.systemBars())
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val lp = window.attributes
+                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    window.attributes = lp
+                }
             } else {
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                 controller.show(WindowInsetsCompat.Type.systemBars())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val lp = window.attributes
+                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                    window.attributes = lp
+                }
             }
+        }
+    }
+    val toggleFullscreen = { applyFullscreen(!isFullscreen) }
+
+    // Safety net: if the player leaves composition while still fullscreen
+    // (e.g. external navigation), always restore portrait/system bars/cutout mode.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (isFullscreen) applyFullscreen(false)
         }
     }
 
@@ -416,20 +440,9 @@ fun EmbeddedVideoPlayer(
                 val isPortrait = (orientation in 0..30) || (orientation in 330..359) || (orientation in 150..210)
 
                 if (isLandscape && !isFullscreen) {
-                    isFullscreen = true
-                    activity?.let { act ->
-                        act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
-                            hide(WindowInsetsCompat.Type.systemBars())
-                            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                        }
-                    }
+                    applyFullscreen(true)
                 } else if (isPortrait && isFullscreen) {
-                    isFullscreen = false
-                    activity?.let { act ->
-                        act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                        WindowCompat.getInsetsController(act.window, act.window.decorView).show(WindowInsetsCompat.Type.systemBars())
-                    }
+                    applyFullscreen(false)
                 }
             }
         }
@@ -572,18 +585,57 @@ fun EmbeddedVideoPlayer(
         exoPlayer.trackSelectionParameters = builder.build()
     }
 
+    // 扫描线动画进度持久化：remember 一个 Animatable，保证中途取消后能接着当前位置回退
+    val scanlineAnim = remember { androidx.compose.animation.core.Animatable(0f) }
+
     LaunchedEffect(qualityEnhancement) {
         exoPlayer.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+
+        // 真实的硬件画质增强：通过 Media3 视频效果管线提升对比度并轻微提亮（GPU 处理）
+        try {
+            if (qualityEnhancement) {
+                exoPlayer.setVideoEffects(
+                    listOf(
+                        Contrast(0.18f),
+                        RgbAdjustment.Builder()
+                            .setRedScale(1.03f)
+                            .setGreenScale(1.03f)
+                            .setBlueScale(1.03f)
+                            .build()
+                    )
+                )
+            } else {
+                exoPlayer.setVideoEffects(emptyList())
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "当前设备不支持硬件画质增强", Toast.LENGTH_SHORT).show()
+            qualityEnhancement = false
+            return@LaunchedEffect
+        }
+
         if (qualityEnhancement) {
+            // 开启：扫描线从左到右扫过表示增强生效
             isScanlineActive = true
-            val anim = androidx.compose.animation.core.Animatable(0f)
-            anim.animateTo(
+            scanlineAnim.animateTo(
                 targetValue = 1f,
                 animationSpec = tween(durationMillis = 1500, easing = LinearEasing)
             ) {
                 scanlineProgress = value
             }
             isScanlineActive = false
+            scanlineProgress = 0f
+            scanlineAnim.snapTo(0f)
+        } else if (isScanlineActive || scanlineAnim.value > 0f) {
+            // 中途关闭：扫描线从当前位置向左回退滑出，而不是冻结在屏幕中间
+            isScanlineActive = true
+            scanlineAnim.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(durationMillis = 450, easing = LinearEasing)
+            ) {
+                scanlineProgress = value
+            }
+            isScanlineActive = false
+            scanlineProgress = 0f
         }
     }
 
@@ -594,6 +646,31 @@ fun EmbeddedVideoPlayer(
                 exoPlayer.clearMediaItems()
             } catch (_: Exception) {}
             exoPlayer.release()
+        }
+    }
+
+    // 上报画中画状态：仅当播放器在屏且可播放时，退到后台才允许进入小窗；
+    // 离开播放器（首页/片库等）立即清除，避免任意页面退出都触发画中画。
+    SideEffect {
+        PipController.playerActive = !playError
+        PipController.isPlaying = isPlaying
+        PipController.hasNext = onNextEpisode != null
+        PipController.hasPrev = onPrevEpisode != null
+    }
+    DisposableEffect(exoPlayer) {
+        PipController.onTogglePlayPause = {
+            if (exoPlayer.isPlaying) {
+                exoPlayer.pause()
+                PipController.isPlaying = false
+            } else {
+                exoPlayer.play()
+                PipController.isPlaying = true
+            }
+        }
+        PipController.onNextEpisode = onNextEpisode
+        PipController.onPrevEpisode = onPrevEpisode
+        onDispose {
+            PipController.clear()
         }
     }
 
@@ -827,12 +904,14 @@ fun EmbeddedVideoPlayer(
         }
 
         // ── Controls Overlay ──
+        // 画中画小窗内不展示顶部栏/进度条等控制层（小窗由系统提供关闭/放大按钮及自定义遥控按钮）
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = controlsVisible && !PipController.inPipMode,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            Box(Modifier.fillMaxSize()) {
+            // 全屏横屏时避让刘海/挖孔区域，保证不同机型上顶部栏与底部控制栏完整可见
+            Box(Modifier.fillMaxSize().then(if (isFullscreen) Modifier.displayCutoutPadding() else Modifier)) {
                 if (isLocked) {
                     // Lock Screen Only Button (Monochrome white)
                     IconButton(
@@ -857,10 +936,10 @@ fun EmbeddedVideoPlayer(
                                 )
                             )
                             .padding(
-                                start = if (isFullscreen) 32.dp else 12.dp,
-                                end = if (isFullscreen) 32.dp else 12.dp,
-                                top = if (isFullscreen) 16.dp else 6.dp,
-                                bottom = 6.dp
+                                start = if (isFullscreen) 24.dp else 12.dp,
+                                end = if (isFullscreen) 24.dp else 12.dp,
+                                top = if (isFullscreen) 4.dp else 4.dp,
+                                bottom = 4.dp
                             ),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -916,7 +995,7 @@ fun EmbeddedVideoPlayer(
                         onClick = { isLocked = true },
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
-                            .padding(end = if (isFullscreen) 32.dp else 16.dp)
+                            .padding(end = if (isFullscreen) 28.dp else 16.dp)
                             .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                             .size(44.dp)
                     ) {
@@ -934,15 +1013,15 @@ fun EmbeddedVideoPlayer(
                                 )
                             )
                             .padding(
-                                start = if (isFullscreen) 32.dp else 12.dp,
-                                end = if (isFullscreen) 32.dp else 12.dp,
-                                bottom = if (isFullscreen) 4.dp else 2.dp,
-                                top = 2.dp
+                                start = if (isFullscreen) 24.dp else 12.dp,
+                                end = if (isFullscreen) 24.dp else 12.dp,
+                                bottom = if (isFullscreen) 6.dp else 2.dp,
+                                top = 0.dp
                             )
                     ) {
-                        // ── ROW 1: Time, Slider, Duration, PiP, Fullscreen ──
+                        // ── ROW 1: Time, Slider, Duration, Fullscreen ──
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
@@ -964,7 +1043,8 @@ fun EmbeddedVideoPlayer(
                                 valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
                                 modifier = Modifier
                                     .weight(1f)
-                                    .padding(horizontal = 8.dp),
+                                    .height(24.dp)
+                                    .padding(horizontal = 6.dp),
                                 colors = SliderDefaults.colors(
                                     thumbColor = AppColors.cyan,
                                     activeTrackColor = AppColors.cyan,
@@ -1087,11 +1167,13 @@ fun EmbeddedVideoPlayer(
                                 Spacer(Modifier.width(6.dp))
 
                                 // Screen Scale Mode (默认 / 铺满 / 裁剪 / 拉伸)
+                                // 标注与「画面比例」弹窗保持一致：
+                                // FIT=默认(按原比例居中) ZOOM=铺满(无黑边满屏) FIXED_WIDTH=裁剪(等比例裁剪) FILL=拉伸(强行填充)
                                 Text(
                                     when (resizeMode) {
-                                        AspectRatioFrameLayout.RESIZE_MODE_FILL -> "铺满"
-                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "裁剪"
-                                        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> "拉伸"
+                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "铺满"
+                                        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> "裁剪"
+                                        AspectRatioFrameLayout.RESIZE_MODE_FILL -> "拉伸"
                                         else -> "默认"
                                     },
                                     color = Color.White,
@@ -1099,9 +1181,9 @@ fun EmbeddedVideoPlayer(
                                     modifier = Modifier
                                         .clickable {
                                             resizeMode = when (resizeMode) {
-                                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                                AspectRatioFrameLayout.RESIZE_MODE_FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                                AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                                 AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
+                                                AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                                                 else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                             }
                                         }

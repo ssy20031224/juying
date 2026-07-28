@@ -42,16 +42,18 @@ jobs:
       ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
       ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
       ALIYUN_OSS_SECURITY_TOKEN: ${{ secrets.ALIYUN_OSS_SECURITY_TOKEN }}
-      ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
-      ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
-      ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
+      # Public OSS settings may be stored as repository Variables (preferred)
+      # or Secrets for compatibility with existing repository configuration.
+      ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT || secrets.ALIYUN_OSS_ENDPOINT }}
+      ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET || secrets.ALIYUN_OSS_BUCKET }}
+      ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || secrets.ALIYUN_OSS_PUBLIC_BASE_URL }}
 
       TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
       TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
       TENCENT_COS_TOKEN: ${{ secrets.TENCENT_COS_TOKEN }}
-      TENCENT_COS_REGION: ${{ vars.TENCENT_COS_REGION }}
-      TENCENT_COS_BUCKET: ${{ vars.TENCENT_COS_BUCKET }}
-      TENCENT_COS_PUBLIC_BASE_URL: ${{ vars.TENCENT_COS_PUBLIC_BASE_URL }}
+      TENCENT_COS_REGION: ${{ vars.TENCENT_COS_REGION || secrets.TENCENT_COS_REGION }}
+      TENCENT_COS_BUCKET: ${{ vars.TENCENT_COS_BUCKET || secrets.TENCENT_COS_BUCKET }}
+      TENCENT_COS_PUBLIC_BASE_URL: ${{ vars.TENCENT_COS_PUBLIC_BASE_URL || secrets.TENCENT_COS_PUBLIC_BASE_URL }}
 
     steps:
       - name: Checkout source
@@ -119,7 +121,16 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          MANIFEST_URLS="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ANDROID_UPDATE_MANIFEST_KEY},${TENCENT_COS_PUBLIC_BASE_URL%/}/${ANDROID_UPDATE_MANIFEST_KEY}"
+          MANIFEST_URLS=""
+          if [[ -n "${ALIYUN_OSS_PUBLIC_BASE_URL:-}" ]]; then
+            MANIFEST_URLS="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ANDROID_UPDATE_MANIFEST_KEY}"
+          fi
+          if [[ -n "${TENCENT_COS_PUBLIC_BASE_URL:-}" ]]; then
+            if [[ -n "$MANIFEST_URLS" ]]; then
+              MANIFEST_URLS+=","
+            fi
+            MANIFEST_URLS+="${TENCENT_COS_PUBLIC_BASE_URL%/}/${ANDROID_UPDATE_MANIFEST_KEY}"
+          fi
           cd android
           chmod +x gradlew
           ./gradlew :app:clean :app:assembleRelease \

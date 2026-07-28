@@ -5,6 +5,7 @@ package com.juying.app
 import android.app.Application
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -49,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -63,6 +65,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.juying.app.source.*
 import com.juying.app.ui.EmbeddedVideoPlayer
+import com.juying.app.ui.PipController
 import com.juying.app.update.AppUpdateInfo
 import com.juying.app.update.AppUpdateManager
 import com.juying.app.update.UpdateCheckResult
@@ -309,6 +312,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var page by mutableStateOf(1)
     var showDownloadEpisodeModal by mutableStateOf(false)
     val activeDownloadKeys = mutableStateListOf<String>()
+    val activeDownloadProgress = mutableStateMapOf<String, String>()
+    val activeDownloadInfo = mutableStateMapOf<String, Pair<String, String>>()
 
     val kinds = listOf("全部", "日漫", "国漫", "剧场版", "欧美")
     val genres = listOf(
@@ -1397,6 +1402,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val adapter = sourceManager.getAdapter(detail.item.sourceKey) ?: return
         activeDownloadKeys.add(downloadKey)
+        activeDownloadInfo[downloadKey] = detail.item.title to episode.name
+        activeDownloadProgress[downloadKey] = "0%"
         notice = "已开始后台下载：${detail.item.title} ${episode.name}"
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -1410,7 +1417,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         play.headers,
                         play.referer,
                         detail.item.title,
-                        episode.name
+                        episode.name,
+                        onProgress = { done, total ->
+                            val text = if (total > 0L) {
+                                val pct = (done * 100 / total).toInt().coerceIn(0, 100)
+                                "$pct%"
+                            } else {
+                                val mb = done / (1024.0 * 1024.0)
+                                String.format("%.1f MB", mb)
+                            }
+                            viewModelScope.launch(Dispatchers.Main) {
+                                activeDownloadProgress[downloadKey] = text
+                            }
+                        }
                     )
                     if (fileInfo != null && fileInfo.playableOffline) {
                         downloader.saveMetadata(detail.item.title, episode.name, detail.item.cover, fileInfo.file)
@@ -1434,6 +1453,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 withContext(Dispatchers.Main) {
                     activeDownloadKeys.remove(downloadKey)
+                    activeDownloadProgress.remove(downloadKey)
+                    activeDownloadInfo.remove(downloadKey)
                 }
             }
         }
@@ -1500,14 +1521,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
+private const val ACTION_PIP_CONTROL = "com.juying.app.action.PIP_CONTROL"
+private const val EXTRA_PIP_CONTROL = "extra_pip_control"
+private const val PIP_CONTROL_PLAY_PAUSE = 1
+private const val PIP_CONTROL_PREV = 2
+private const val PIP_CONTROL_NEXT = 3
+
 class MainActivity : ComponentActivity() {
     private lateinit var updateManager: AppUpdateManager
+
+    // 画中画小窗遥控按钮（播放/暂停、上一集/下一集）广播接收器
+    private val pipActionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+            when (intent.getIntExtra(EXTRA_PIP_CONTROL, -1)) {
+                PIP_CONTROL_PLAY_PAUSE -> PipController.onTogglePlayPause?.invoke()
+                PIP_CONTROL_PREV -> PipController.onPrevEpisode?.invoke()
+                PIP_CONTROL_NEXT -> PipController.onNextEpisode?.invoke()
+            }
+            // 操作后刷新小窗按钮（暂停/播放图标、上/下集可用性）
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && isInPictureInPictureMode) {
+                try { setPictureInPictureParams(buildPipParams()) } catch (_: Exception) {}
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         updateManager = AppUpdateManager(this)
         enableEdgeToEdge()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val filter = android.content.IntentFilter(ACTION_PIP_CONTROL)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(pipActionReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(pipActionReceiver, filter)
+            }
+        }
         setContent {
             val vm: MainViewModel = viewModel()
             var showStartupSplash by remember { mutableStateOf(true) }
@@ -1530,14 +1581,54 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            try { unregisterReceiver(pipActionReceiver) } catch (_: Exception) {}
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // 小窗模式下播放器隐藏顶部栏/进度条等控制层（由 EmbeddedVideoPlayer 读取）
+        PipController.inPipMode = isInPictureInPictureMode
+    }
+
+    private fun buildPipParams(): android.app.PictureInPictureParams {
+        fun pipAction(control: Int, iconRes: Int, title: String): android.app.RemoteAction {
+            val intent = android.content.Intent(ACTION_PIP_CONTROL)
+                .setPackage(packageName)
+                .putExtra(EXTRA_PIP_CONTROL, control)
+            val pending = android.app.PendingIntent.getBroadcast(
+                this, control, intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            return android.app.RemoteAction(
+                android.graphics.drawable.Icon.createWithResource(this, iconRes), title, title, pending
+            )
+        }
+        val actions = mutableListOf<android.app.RemoteAction>()
+        if (PipController.hasPrev) actions += pipAction(PIP_CONTROL_PREV, android.R.drawable.ic_media_previous, "上一集")
+        actions += pipAction(
+            PIP_CONTROL_PLAY_PAUSE,
+            if (PipController.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+            if (PipController.isPlaying) "暂停" else "播放"
+        )
+        if (PipController.hasNext) actions += pipAction(PIP_CONTROL_NEXT, android.R.drawable.ic_media_next, "下一集")
+        return android.app.PictureInPictureParams.Builder()
+            .setAspectRatio(android.util.Rational(16, 9))
+            .setActions(actions)
+            .build()
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        // 只有播放器在屏且正在播放时才进入画中画；首页等其他页面退出不再触发小窗
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+            && PipController.playerActive && PipController.isPlaying
+        ) {
             try {
-                val params = android.app.PictureInPictureParams.Builder()
-                    .setAspectRatio(android.util.Rational(16, 9))
-                    .build()
-                enterPictureInPictureMode(params)
+                enterPictureInPictureMode(buildPipParams())
             } catch (_: Exception) {}
         }
     }
@@ -2270,12 +2361,15 @@ fun PlayerViewScreen(vm: MainViewModel) {
         AllEpisodesModal(vm) { showAllEpisodesModal = false }
     }
 
+    // 横屏（全屏播放）时播放器必须精确占满可见区域：
+    // 若按宽度推导 16:9 高度（宽×9/16），在不同尺寸/比例的机型上会超出屏幕高度，
+    // 导致顶部栏和进度条下方控制行被裁切（见用户反馈的横屏截屏）。
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     Column(Modifier.fillMaxSize()) {
         // ── Video Player Area ──
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+            modifier = (if (isLandscape) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9f))
                 .background(Color.Black)
         ) {
             val playResult = vm.currentPlayResult
@@ -2290,6 +2384,9 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     onBack = { vm.goBackFromPlayer() },
                     onNextEpisode = if (vm.currentEpisodeIndex < detail.episodes.size - 1) {
                         { vm.selectEpisode(vm.currentEpisodeIndex + 1) }
+                    } else null,
+                    onPrevEpisode = if (vm.currentEpisodeIndex > 0) {
+                        { vm.selectEpisode(vm.currentEpisodeIndex - 1) }
                     } else null
                 )
             } else {
@@ -2315,6 +2412,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
             }
         }
 
+        // 横屏时播放器已占满全屏，下方 Tab 与详情内容不再渲染，避免超出可见区域
+        if (!isLandscape) {
         // ── Navigation Tabs below Player (动漫 | 评论) ──
         TabRow(
             selectedTabIndex = if (activeTab == "details") 0 else 1,
@@ -2440,15 +2539,28 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     }
 
                     if (vm.showDownloadEpisodeModal) {
+                        var selectedEpSet by remember { mutableStateOf(setOf<Episode>()) }
+
                         AlertDialog(
                             onDismissRequest = { vm.showDownloadEpisodeModal = false },
                             title = {
-                                Text("选择要下载的剧集", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("选择要下载的剧集", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                    TextButton(onClick = {
+                                        selectedEpSet = if (selectedEpSet.size == detail.episodes.size) emptySet() else detail.episodes.toSet()
+                                    }) {
+                                        Text(if (selectedEpSet.size == detail.episodes.size) "取消全选" else "全选", color = AppColors.cyan, fontSize = 12.sp)
+                                    }
+                                }
                             },
                             text = {
                                 Column(Modifier.fillMaxWidth().heightIn(max = 350.dp)) {
                                     Text(
-                                        "当前播放源：${detail.item.sourceTitle} · 共 ${detail.episodes.size} 集",
+                                        "当前源：${detail.item.sourceTitle} · 已勾选 ${selectedEpSet.size}/${detail.episodes.size} 集",
                                         color = AppColors.cyan,
                                         fontSize = 12.sp,
                                         modifier = Modifier.padding(bottom = 8.dp)
@@ -2460,22 +2572,39 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                         gridItemsIndexed(detail.episodes) { index, ep ->
                                             val key = "${detail.item.title}_${ep.name}"
                                             val isDownloading = vm.activeDownloadKeys.contains(key)
+                                            val isSelected = selectedEpSet.contains(ep)
                                             Surface(
                                                 onClick = {
-                                                    vm.startDownloadEpisode(detail, ep)
+                                                    if (!isDownloading) {
+                                                        selectedEpSet = if (isSelected) selectedEpSet - ep else selectedEpSet + ep
+                                                    }
                                                 },
                                                 modifier = Modifier.padding(4.dp),
                                                 shape = RoundedCornerShape(8.dp),
-                                                color = if (isDownloading) AppColors.cyan.copy(alpha = 0.25f) else AppColors.panel2
+                                                color = when {
+                                                    isDownloading -> AppColors.cyan.copy(alpha = 0.25f)
+                                                    isSelected -> AppColors.rose.copy(alpha = 0.3f)
+                                                    else -> AppColors.panel2
+                                                },
+                                                border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, AppColors.rose) else null
                                             ) {
                                                 Box(
                                                     modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     Text(
-                                                        if (isDownloading) "${ep.name}\n(下载中)" else ep.name,
-                                                        color = if (isDownloading) AppColors.cyan else AppColors.text,
+                                                        when {
+                                                            isDownloading -> "${ep.name}\n(下载中)"
+                                                            isSelected -> "✓ ${ep.name}"
+                                                            else -> ep.name
+                                                        },
+                                                        color = when {
+                                                            isDownloading -> AppColors.cyan
+                                                            isSelected -> AppColors.rose
+                                                            else -> AppColors.text
+                                                        },
                                                         fontSize = 12.sp,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                                         maxLines = 2
                                                     )
@@ -2486,8 +2615,27 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                 }
                             },
                             confirmButton = {
+                                Button(
+                                    onClick = {
+                                        val toDownload = selectedEpSet.toList()
+                                        vm.showDownloadEpisodeModal = false
+                                        toDownload.forEach { ep ->
+                                            vm.startDownloadEpisode(detail, ep)
+                                        }
+                                    },
+                                    enabled = selectedEpSet.isNotEmpty(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.rose)
+                                ) {
+                                    Text(
+                                        if (selectedEpSet.isEmpty()) "请选择剧集" else "确认下载 (${selectedEpSet.size}集)",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            },
+                            dismissButton = {
                                 TextButton(onClick = { vm.showDownloadEpisodeModal = false }) {
-                                    Text("完成", color = AppColors.cyan)
+                                    Text("取消", color = AppColors.muted)
                                 }
                             },
                             containerColor = AppColors.panel
@@ -2661,6 +2809,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     }
                 }
             }
+        }
         }
     }
 }
@@ -3058,7 +3207,8 @@ fun FavoritesScreen(vm: MainViewModel) {
 @Composable
 fun OfflineCacheScreen(vm: MainViewModel) {
     var refreshKey by remember { mutableStateOf(0) }
-    val downloads = remember(refreshKey, vm.notice) { vm.getDownloadedFilesList() }
+    val downloads = remember(refreshKey, vm.notice, vm.activeDownloadKeys.size) { vm.getDownloadedFilesList() }
+    val activeKeys = vm.activeDownloadKeys.toList()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
@@ -3068,70 +3218,129 @@ fun OfflineCacheScreen(vm: MainViewModel) {
             IconButton(onClick = { vm.view = "profile" }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
             }
-            Text("离线缓存 (${downloads.size})", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "离线缓存 (${downloads.size}已完成" + if (activeKeys.isNotEmpty()) " · ${activeKeys.size}下载中)" else ")",
+                color = AppColors.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
         Spacer(Modifier.height(12.dp))
 
-        if (downloads.isEmpty()) {
+        if (downloads.isEmpty() && activeKeys.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted, modifier = Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
                     Text("暂无离线缓存视频", color = AppColors.muted, fontSize = 14.sp)
-                    Text("在详情页点击「下载番剧」可选择剧集离线下载", color = AppColors.muted.copy(alpha = 0.7f), fontSize = 12.sp)
+                    Text("在详情页点击「下载番剧」选完后点击「确认下载」", color = AppColors.muted.copy(alpha = 0.7f), fontSize = 12.sp)
                 }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(downloads.size) { index ->
-                    val downloadItem = downloads[index]
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable { vm.playOfflineVideo(downloadItem) },
-                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                if (activeKeys.isNotEmpty()) {
+                    item {
+                        Text("正在缓存中 (${activeKeys.size})", color = AppColors.cyan, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
+                    }
+                    items(activeKeys.size) { idx ->
+                        val key = activeKeys[idx]
+                        val (title, epName) = vm.activeDownloadInfo[key] ?: (key to "下载中")
+                        val progressText = vm.activeDownloadProgress[key] ?: "下载中..."
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            colors = CardDefaults.cardColors(containerColor = AppColors.cyan.copy(alpha = 0.12f)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.4f))
                         ) {
-                            val context = LocalContext.current
-                            val coverPath: String = downloadItem.coverPath.orEmpty()
-                            AsyncImage(
-                                model = coverRequest(context, coverPath),
-                                contentDescription = null,
-                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    downloadItem.title,
-                                    color = AppColors.text,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    downloadItem.episodeName,
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                LoadingSpinner(modifier = Modifier.size(22.dp), color = AppColors.cyan)
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(epName, color = AppColors.cyan, fontSize = 12.sp)
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
                                     color = AppColors.cyan,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    "文件大小：${downloadItem.fileSizeFormatted} · 点击播放",
-                                    color = AppColors.muted,
-                                    fontSize = 11.sp
-                                )
+                                    modifier = Modifier.padding(start = 8.dp)
+                                ) {
+                                    Text(
+                                        "缓存中 $progressText",
+                                        color = AppColors.bg,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
                             }
-                            IconButton(onClick = {
-                                vm.deleteDownloadedFile(downloadItem)
-                                refreshKey++
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除视频", tint = AppColors.rose)
+                        }
+                    }
+                    item {
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
+
+                if (downloads.isNotEmpty()) {
+                    if (activeKeys.isNotEmpty()) {
+                        item {
+                            Text("已完成离线缓存 (${downloads.size})", color = AppColors.text, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
+                        }
+                    }
+                    items(downloads.size) { index ->
+                        val downloadItem = downloads[index]
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable { vm.playOfflineVideo(downloadItem) },
+                            colors = CardDefaults.cardColors(containerColor = AppColors.panel)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val context = LocalContext.current
+                                val coverPath: String = downloadItem.coverPath.orEmpty()
+                                AsyncImage(
+                                    model = coverRequest(context, coverPath),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        downloadItem.title,
+                                        color = AppColors.text,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        downloadItem.episodeName,
+                                        color = AppColors.cyan,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        "文件大小：${downloadItem.fileSizeFormatted} · 【点击即可播放】",
+                                        color = AppColors.muted,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    vm.deleteDownloadedFile(downloadItem)
+                                    refreshKey++
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除缓存", tint = AppColors.rose)
+                                }
                             }
                         }
                     }
