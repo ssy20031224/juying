@@ -1186,7 +1186,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     targetAdapters.forEach { adapter ->
                         launch {
                             val rawItems = try {
-                                withTimeout(12_000L) {
+                                withTimeout(6_000L) {
                                     // Always try the source's native filter endpoint
                                     // first, including the unfiltered “recent” view.
                                     var res = adapter.searchFiltered(
@@ -1229,7 +1229,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     totalLibrary = finalList.size
                                 }
                                 loading = false
-                                libraryLoadingMore = false
                                 notice = "已检索呈现 ${items.size} 部符合要求作品 (${done}/${targetAdapters.size} 源就绪)"
                             }
                         }
