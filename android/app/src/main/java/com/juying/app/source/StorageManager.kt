@@ -85,6 +85,24 @@ class StorageManager(context: Context) {
         return !exists
     }
 
+    fun mergeCloudData(remoteFavorites: List<SourceItem>, remoteHistory: List<HistoryItem>) {
+        val mergedFavorites = getFavorites().toMutableList()
+        remoteFavorites.forEach { remote ->
+            if (mergedFavorites.none { isMatch(it, remote) }) mergedFavorites.add(remote)
+        }
+        val mergedHistory = getHistory().toMutableList()
+        remoteHistory.forEach { remote ->
+            val index = mergedHistory.indexOfFirst {
+                itemKey(it.item) == itemKey(remote.item) && it.episodeName == remote.episodeName
+            }
+            if (index >= 0) mergedHistory[index] = remote else mergedHistory.add(remote)
+        }
+        prefs.edit()
+            .putString("favorites", gson.toJson(mergedFavorites.take(200)))
+            .putString("watch_history", gson.toJson(mergedHistory.take(50)))
+            .apply()
+    }
+
     fun getThemeMode(): String = prefs.getString("theme_mode", "dark") ?: "dark"
     fun setThemeMode(mode: String) { prefs.edit().putString("theme_mode", mode).apply() }
 

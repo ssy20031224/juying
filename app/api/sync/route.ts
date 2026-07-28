@@ -111,6 +111,7 @@ export async function POST(request: Request) {
           userId: user.id,
           mediaKey: media,
           episodeKey: episode,
+          mediaSnapshot: text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}",
           episodeName: text(item.episodeName, 180),
           sourceKey: text(item.sourceKey, 120),
           positionMs: asInt(item.positionMs, 0, 86_400_000),
@@ -121,6 +122,7 @@ export async function POST(request: Request) {
           target: [watchProgress.userId, watchProgress.mediaKey, watchProgress.episodeKey],
           set: {
             episodeName: text(item.episodeName, 180),
+            mediaSnapshot: text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}",
             sourceKey: text(item.sourceKey, 120),
             positionMs: asInt(item.positionMs, 0, 86_400_000),
             durationMs: asInt(item.durationMs, 0, 86_400_000),

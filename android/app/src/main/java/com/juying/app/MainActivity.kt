@@ -319,7 +319,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "登录成功，正在同步本机数据"
-                    accountRepository.sync(result.token, favoritesList, historyList)
+                    val remote = accountRepository.sync(result.token, favoritesList, historyList)
+                    storageManager.mergeCloudData(remote.favorites, remote.history)
+                    reloadStorageData()
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "登录失败"
@@ -344,7 +346,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "注册成功，已同步本机数据"
-                    accountRepository.sync(result.token, favoritesList, historyList)
+                    val remote = accountRepository.sync(result.token, favoritesList, historyList)
+                    storageManager.mergeCloudData(remote.favorites, remote.history)
+                    reloadStorageData()
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "注册失败"

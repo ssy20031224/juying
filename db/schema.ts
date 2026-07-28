@@ -66,6 +66,7 @@ export const watchProgress = sqliteTable(
       .references(() => users.id, { onDelete: "cascade" }),
     mediaKey: text("media_key").notNull(),
     episodeKey: text("episode_key").notNull(),
+    mediaSnapshot: text("media_snapshot").notNull().default("{}"),
     episodeName: text("episode_name").notNull().default(""),
     sourceKey: text("source_key").notNull().default(""),
     positionMs: integer("position_ms").notNull().default(0),

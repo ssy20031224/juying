@@ -1,0 +1,1 @@
+ALTER TABLE `watch_progress` ADD `media_snapshot` text DEFAULT '{}' NOT NULL;

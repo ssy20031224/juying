@@ -2,6 +2,7 @@ package com.juying.app.source
 
 import android.content.Context
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,6 +21,11 @@ data class AccountResult(
     val user: AccountUser? = null,
     val token: String? = null,
     val error: String? = null,
+)
+
+data class AccountSyncResult(
+    val favorites: List<SourceItem> = emptyList(),
+    val history: List<HistoryItem> = emptyList(),
 )
 
 class AccountRepository(context: Context) {
@@ -42,7 +48,7 @@ class AccountRepository(context: Context) {
         }
     }
 
-    suspend fun sync(token: String, favorites: List<SourceItem>, history: List<HistoryItem>) {
+    suspend fun sync(token: String, favorites: List<SourceItem>, history: List<HistoryItem>): AccountSyncResult =
         withContext(Dispatchers.IO) {
             val favoriteJson = favorites.map {
                 mapOf(
@@ -55,6 +61,7 @@ class AccountRepository(context: Context) {
                     "mediaKey" to "${it.item.sourceKey.substringBefore(',').trim()}:${it.item.id}",
                     "episodeKey" to it.episodeName,
                     "episodeName" to it.episodeName,
+                    "mediaSnapshot" to gson.toJson(it.item),
                     "sourceKey" to it.item.sourceKey.substringBefore(',').trim(),
                     "positionMs" to 0,
                     "durationMs" to 0,
@@ -62,8 +69,31 @@ class AccountRepository(context: Context) {
                 )
             }
             val payload = gson.toJson(mapOf("favorites" to favoriteJson, "progress" to progressJson))
-            request("/api/sync", token, "POST", payload)
+            parseSync(request("/api/sync", token, "POST", payload))
         }
+
+    private fun parseSync(jsonText: String): AccountSyncResult {
+        val json = org.json.JSONObject(jsonText)
+        val remoteFavorites = gson.fromJson<List<Map<String, String>>>(
+            json.optJSONArray("favorites")?.toString() ?: "[]",
+            object : TypeToken<List<Map<String, String>>>() {}.type
+        ).mapNotNull { row ->
+            runCatching { gson.fromJson(row["mediaSnapshot"] ?: "{}", SourceItem::class.java) }.getOrNull()
+        }
+        val remoteHistory = gson.fromJson<List<Map<String, Any>>>(
+            json.optJSONArray("progress")?.toString() ?: "[]",
+            object : TypeToken<List<Map<String, Any>>>() {}.type
+        ).mapNotNull { row ->
+            val snapshot = row["mediaSnapshot"]?.toString() ?: return@mapNotNull null
+            val item = runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull() ?: return@mapNotNull null
+            HistoryItem(
+                item = item,
+                episodeName = row["episodeName"]?.toString().orEmpty(),
+                playUrl = "",
+                timestamp = System.currentTimeMillis(),
+            )
+        }
+        return AccountSyncResult(remoteFavorites, remoteHistory)
     }
 
     private suspend fun requestAuth(path: String, email: String, password: String, nickname: String?): AccountResult =
