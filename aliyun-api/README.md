@@ -10,7 +10,7 @@
 3. 执行 `migrations/001_init.sql`。
 4. 在 DirectMail 创建并验证发信域名、发信地址。
 5. 创建 OSS Bucket 和仅允许头像目录读写的 RAM 用户。
-6. 复制 `.env.example` 为部署环境变量，禁止提交真实密钥。
+6. 复制 `env.example` 为 `.env` 或配置到云服务环境变量中，禁止提交真实密钥。
 
 ## 本地检查
 
