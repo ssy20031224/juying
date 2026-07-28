@@ -1,6 +1,7 @@
 package com.juying.app.source
 
 import android.content.Context
+import com.juying.app.BuildConfig
 import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -85,6 +86,6 @@ class CommentRepository(context: Context) {
     }
 
     companion object {
-        private const val API_BASE = "https://www.lanerc.app/api/comments"
+        private val API_BASE = "${BuildConfig.ACCOUNT_API_BASE}/api/comments"
     }
 }

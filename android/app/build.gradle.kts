@@ -14,6 +14,11 @@ val configuredManifestUrls = providers.gradleProperty("LANERC_UPDATE_MANIFEST_UR
     .orNull
     ?.trim()
     .orEmpty()
+val configuredAccountApiBase = providers.gradleProperty("LANERC_ACCOUNT_API_BASE")
+    .orNull
+    ?.trim()
+    ?.removeSuffix("/")
+    ?.takeIf { it.isNotEmpty() }
 
 val releaseStoreFile = providers.gradleProperty("LANERC_RELEASE_STORE_FILE").orNull
 val releaseStorePassword = providers.gradleProperty("LANERC_RELEASE_STORE_PASSWORD").orNull
@@ -43,6 +48,11 @@ android {
             "String",
             "UPDATE_MANIFEST_URLS",
             buildConfigString(configuredManifestUrls)
+        )
+        buildConfigField(
+            "String",
+            "ACCOUNT_API_BASE",
+            buildConfigString(configuredAccountApiBase ?: "https://api.lanerc.app")
         )
     }
 

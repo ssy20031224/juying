@@ -10,8 +10,15 @@
 - 验证码邮件：阿里云邮件推送 DirectMail。
 - Android API 域名：使用已备案的国内域名和 HTTPS。
 
-当前仓库的数据访问层仍保留 D1 兼容实现。正式面向国内用户发布账号功能前，应将 Drizzle
-SQLite schema 迁移为 MySQL schema，并把 API 部署到阿里云后再修改 Android 的 `API_BASE`。
+国内独立服务位于 `aliyun-api/`，包含 RDS MySQL 初始化脚本、账号 API、DirectMail、OSS
+头像上传和 Dockerfile。原 Next.js/D1 路由暂时保留为兼容层，但 Android 默认使用
+`https://api.lanerc.app`，不会再把 D1 作为国内生产账号服务。
+
+Android 可通过 Gradle 参数覆盖 API 地址：
+
+```text
+LANERC_ACCOUNT_API_BASE=https://api.lanerc.app
+```
 
 ## 邮件推送环境变量
 

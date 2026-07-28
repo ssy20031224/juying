@@ -3,6 +3,7 @@ package com.juying.app.source
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.juying.app.BuildConfig
 import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -228,6 +229,6 @@ class AccountRepository(context: Context) {
     }
 
     companion object {
-        private const val API_BASE = "https://www.lanerc.app"
+        private val API_BASE = BuildConfig.ACCOUNT_API_BASE
     }
 }
