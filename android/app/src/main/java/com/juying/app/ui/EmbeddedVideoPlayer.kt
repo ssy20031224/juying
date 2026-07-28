@@ -16,6 +16,10 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -168,6 +172,39 @@ private fun PauseIcon(modifier: Modifier = Modifier, tint: Color = Color.White) 
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(4.dp, 14.dp).background(tint, RoundedCornerShape(1.dp)))
         Box(modifier = Modifier.size(4.dp, 14.dp).background(tint, RoundedCornerShape(1.dp)))
+    }
+}
+
+@Composable
+private fun HudIcon(type: String, value: Int) {
+    when (type) {
+        "brightness" -> Box(
+            modifier = Modifier.size(18.dp).border(1.5.dp, Color.White, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(modifier = Modifier.size(6.dp).background(Color.White, CircleShape))
+        }
+        "volume" -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Box(modifier = Modifier.size(5.dp, 10.dp).background(Color.White, RoundedCornerShape(1.dp)))
+            if (value > 0) {
+                Box(modifier = Modifier.size(3.dp, 6.dp).background(Color.White, RoundedCornerShape(1.dp)))
+            } else {
+                Box(modifier = Modifier.size(6.dp, 1.5.dp).background(Color.White))
+            }
+        }
+        "seek" -> Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+        }
+        "speed" -> Box(
+            modifier = Modifier.size(18.dp).border(1.5.dp, Color.White, RoundedCornerShape(3.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("X", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
@@ -662,12 +699,7 @@ fun EmbeddedVideoPlayer(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    when (gestureHudType) {
-                        "brightness" -> Icon(Icons.Default.WbSunny, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                        "volume" -> Icon(if (gestureHudValue > 0) Icons.Default.VolumeUp else Icons.Default.VolumeOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                        "seek" -> Icon(if (gestureHudValue >= 0) Icons.Default.FastForward else Icons.Default.FastRewind, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                        "speed" -> Icon(Icons.Default.Speed, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                    }
+                    HudIcon(gestureHudType, gestureHudValue)
                     Text(gestureHudText, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 }
             }
