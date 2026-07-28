@@ -1186,7 +1186,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     targetAdapters.forEach { adapter ->
                         launch {
                             val rawItems = try {
-                                withTimeout(6_000L) {
+                                withTimeout(2_500L) {
                                     // Always try the source's native filter endpoint
                                     // first, including the unfiltered “recent” view.
                                     var res = adapter.searchFiltered(
@@ -1230,6 +1230,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                                 loading = false
                                 notice = "已检索呈现 ${items.size} 部符合要求作品 (${done}/${targetAdapters.size} 源就绪)"
+                            }
+                        }
+                    }
+
+                    // First-wave 180ms yield: Publish fast-responding network sources to UI within 100-300ms window
+                    launch {
+                        delay(180L)
+                        val snapshot = synchronized(fetchLock) { fetchedNewItems.toList() }
+                        if (snapshot.isNotEmpty()) {
+                            val streamed = applyLibraryFiltersFast(SourceManager.mergeSearchItems(snapshot))
+                            withContext(Dispatchers.Main) {
+                                if (requestId != libraryGeneration) return@withContext
+                                val existingKeys = libraryItems.map { SourceManager.normalizeTitle(it.title) }.toSet()
+                                val appendOnly = streamed.filter { SourceManager.normalizeTitle(it.title) !in existingKeys }
+                                if (appendOnly.isNotEmpty()) {
+                                    val finalList = libraryItems + appendOnly
+                                    libraryItems = finalList
+                                    items = finalList
+                                    totalLibrary = finalList.size
+                                    loading = false
+                                }
                             }
                         }
                     }
