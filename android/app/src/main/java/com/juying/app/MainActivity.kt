@@ -81,6 +81,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -1087,6 +1088,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var libraryPage by mutableStateOf(1)
     var libraryHasMore by mutableStateOf(true)
     var libraryLoadingMore by mutableStateOf(false)
+    var libraryLoadError by mutableStateOf<String?>(null)
     private var libraryJob: Job? = null
     private var libraryGeneration = 0
 
@@ -1144,18 +1146,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun fetchLibrary(reset: Boolean = true) {
-        libraryJob?.cancel()
+        // Pagination can be requested by several visible grid items in the
+        // same frame. Never cancel an active page request merely because a
+        // duplicate load-more signal arrived; that used to leave
+        // libraryLoadingMore=true forever after the cancelled job exited.
+        if (!reset && (libraryLoadingMore || !libraryHasMore || libraryJob?.isActive == true)) {
+            return
+        }
+        if (reset) libraryJob?.cancel()
         val requestId = ++libraryGeneration
         libraryJob = viewModelScope.launch {
+            try {
             if (reset) {
                 libraryPage = 1
                 val cached = applyLibraryFiltersFast(cachedHomePool)
                 libraryItems = cached
                 libraryHasMore = true
+                libraryLoadError = null
                 withContext(Dispatchers.Main) {
                     items = cached
                     totalLibrary = cached.size
-                    loading = false
+                    loading = cached.isEmpty()
                     libraryLoadingMore = false
                     notice = "正在检索多源片库..."
                 }
@@ -1163,6 +1174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (libraryLoadingMore || !libraryHasMore) return@launch
                 withContext(Dispatchers.Main) {
                     libraryLoadingMore = true
+                    libraryLoadError = null
                     notice = "正在预获取第 ${libraryPage} 页视频..."
                 }
             }
@@ -1180,6 +1192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val fetchedNewItems = mutableListOf<SourceItem>()
             val fetchLock = Any()
             val completedSources = AtomicInteger(0)
+            val nonEmptySources = AtomicInteger(0)
 
             withContext(Dispatchers.IO) {
                 coroutineScope {
@@ -1187,24 +1200,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         launch {
                             val rawItems = try {
                                 withTimeout(2_500L) {
-                                    // Always try the source's native filter endpoint
-                                    // first, including the unfiltered “recent” view.
-                                    var res = adapter.searchFiltered(
-                                        serverCategory(adapter, activeKind),
-                                        serverFilterMap(adapter),
-                                        currentPage
-                                    )
-                                    if (res.isEmpty()) {
-                                        val queryTerm = when {
-                                            activeGenre != "全部" -> activeGenre
-                                            activeKind != "全部" -> activeKind
-                                            else -> "漫"
+                                    // SourceExports blocks on Future.get().
+                                    // runInterruptible makes the 2.5s coroutine
+                                    // timeout actually interrupt that wait.
+                                    runInterruptible {
+                                        // Always try the source's native filter endpoint
+                                        // first, including the unfiltered “recent” view.
+                                        var res = adapter.searchFiltered(
+                                            serverCategory(adapter, activeKind),
+                                            serverFilterMap(adapter),
+                                            currentPage
+                                        )
+                                        if (res.isEmpty()) {
+                                            val queryTerm = when {
+                                                activeGenre != "全部" -> activeGenre
+                                                activeKind != "全部" -> activeKind
+                                                else -> "漫"
+                                            }
+                                            res = adapter.search(queryTerm, currentPage)
                                         }
-                                        res = adapter.search(queryTerm, currentPage)
+                                        res
                                     }
-                                    res
                                 }
                             } catch (_: Exception) { emptyList() }
+                            if (rawItems.isNotEmpty()) nonEmptySources.incrementAndGet()
 
                             val snapshot = synchronized(fetchLock) {
                                 fetchedNewItems.addAll(rawItems)
@@ -1255,15 +1274,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    // Absolute 2.5s safety timer to force dismiss loading spinner on UI
-                    launch {
-                        delay(2500L)
-                        withContext(Dispatchers.Main) {
-                            if (requestId == libraryGeneration && libraryLoadingMore) {
-                                libraryLoadingMore = false
-                            }
-                        }
-                    }
                 }
             }
 
@@ -1317,7 +1327,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val trulyNewItems = filtered.filter { SourceManager.normalizeTitle(it.title) !in existingKeys }
 
             val finalUpdatedList = if (reset) {
-                if (filtered.isNotEmpty()) filtered else dedupedBatch
+                when {
+                    filtered.isNotEmpty() -> filtered
+                    dedupedBatch.isNotEmpty() -> dedupedBatch
+                    else -> currentExisting
+                }
             } else {
                 currentExisting + trulyNewItems
             }
@@ -1329,12 +1343,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loading = false
                 libraryLoadingMore = false
 
-                if (!reset && trulyNewItems.isEmpty()) {
+                if (fetchedNewItems.isEmpty()) {
+                    libraryLoadError =
+                        "本次 ${targetAdapters.size} 个视频源均未返回内容，请检查网络后重试"
+                    libraryHasMore = true
+                    notice = libraryLoadError.orEmpty()
+                } else if (!reset && trulyNewItems.isEmpty()) {
+                    libraryLoadError = null
                     libraryHasMore = false
                     notice = "已为你展示全网多源片库全部作品 (共 ${finalUpdatedList.size} 部)"
                 } else {
+                    libraryLoadError = null
                     libraryPage = currentPage + 1
-                    notice = "已检索到 ${finalUpdatedList.size} 部作品"
+                    notice =
+                        "已检索到 ${finalUpdatedList.size} 部作品 (${nonEmptySources.get()}/${targetAdapters.size} 源返回内容)"
+                }
+            }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) {
+                    if (requestId == libraryGeneration) {
+                        libraryLoadError = "片库加载失败：${error.message ?: "未知错误"}"
+                        notice = libraryLoadError.orEmpty()
+                    }
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    if (requestId == libraryGeneration) {
+                        loading = false
+                        libraryLoadingMore = false
+                    }
                 }
             }
         }
@@ -2618,7 +2657,10 @@ fun LibraryView(vm: MainViewModel) {
         } else if (vm.items.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("暂无满足筛选条件的作品", color = AppColors.muted)
+                    Text(
+                        vm.libraryLoadError ?: "暂无满足筛选条件的作品",
+                        color = if (vm.libraryLoadError != null) AppColors.rose else AppColors.muted
+                    )
                     Spacer(Modifier.height(8.dp))
                     TextButton(onClick = { vm.fetchLibrary() }) {
                         Text("重新加载", color = AppColors.cyan)
@@ -2635,9 +2677,18 @@ fun LibraryView(vm: MainViewModel) {
                     key = { index, item -> "${item.sourceKey}:${item.id}:$index" }
                 ) { index, item ->
                     MovieCard(item, Modifier.padding(4.dp)) { vm.openMovie(item) }
-                    // Trigger pre-fetch 9 items (3 rows) before hitting the bottom
-                    if (index >= vm.items.size - 9 && vm.libraryHasMore && !vm.libraryLoadingMore && !vm.loading) {
-                        LaunchedEffect(index) { vm.loadNextPage() }
+                    // Exactly one card triggers pre-fetch. The previous >=
+                    // condition launched up to nine concurrent loadNextPage()
+                    // calls and could cancel the request that owned the spinner.
+                    val prefetchIndex = (vm.items.size - 9).coerceAtLeast(0)
+                    if (
+                        index == prefetchIndex &&
+                        vm.libraryHasMore &&
+                        vm.libraryLoadError == null &&
+                        !vm.libraryLoadingMore &&
+                        !vm.loading
+                    ) {
+                        LaunchedEffect(vm.items.size, vm.libraryPage) { vm.loadNextPage() }
                     }
                 }
 
@@ -2651,6 +2702,22 @@ fun LibraryView(vm: MainViewModel) {
                                 LoadingSpinner(modifier = Modifier.size(20.dp), color = AppColors.cyan)
                                 Spacer(Modifier.width(8.dp))
                                 Text("转圈加载中... 正在预获取更多视频", color = AppColors.cyan, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                } else if (vm.libraryLoadError != null) {
+                    item(span = { GridItemSpan(3) }, key = "footer_load_error") {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                vm.libraryLoadError.orEmpty(),
+                                color = AppColors.rose,
+                                fontSize = 13.sp
+                            )
+                            TextButton(onClick = { vm.loadNextPage() }) {
+                                Text("点击重试", color = AppColors.cyan)
                             }
                         }
                     }

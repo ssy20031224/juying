@@ -795,11 +795,16 @@ class SourceExports(private val sourceKey: String, private val gson: Gson) {
 
     private inline fun <T> evalSafe(crossinline block: QuickJs.() -> T): T {
         val instance = qjs ?: throw IllegalStateException("QuickJS not initialized for $sourceKey")
+        val future = executor.submit(java.util.concurrent.Callable {
+            instance.block()
+        })
         return try {
-            executor.submit(java.util.concurrent.Callable {
-                instance.block()
-            }).get(4, TimeUnit.SECONDS)
+            future.get(4, TimeUnit.SECONDS)
         } catch (e: Exception) {
+            // Also cancel the underlying QuickJS/network task. Without this,
+            // the single-thread source executor remains occupied after the UI
+            // timeout and later requests queue behind a task nobody awaits.
+            future.cancel(true)
             android.util.Log.w("QuickJsEngine", "[$sourceKey] evalSafe timeout or failed: ${e.message}")
             throw e
         }
