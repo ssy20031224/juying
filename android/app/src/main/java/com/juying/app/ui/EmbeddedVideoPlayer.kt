@@ -76,14 +76,12 @@ import androidx.media3.common.Player
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.VideoSize
-import androidx.media3.common.util.Size as Media3Size
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.Contrast
 import androidx.media3.effect.RgbAdjustment
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -378,10 +376,12 @@ fun EmbeddedVideoPlayer(
     // The player is prepared paused and only starts after the output surface
     // is ready. Do not show a false pause state before Media3 starts.
     var isPlaying by remember { mutableStateOf(false) }
+    var playbackRequested by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableStateOf(0L) }
     var duration by remember { mutableStateOf(0L) }
     var isSeeking by remember { mutableStateOf(false) }
     var sliderPosition by remember { mutableStateOf(0f) }
+    var resumeAfterSliderSeek by remember { mutableStateOf(false) }
 
     var isFullscreen by remember { mutableStateOf(false) }
     var isLocked by remember { mutableStateOf(false) }
@@ -561,6 +561,9 @@ fun EmbeddedVideoPlayer(
     }
 
     var boundPlayerView by remember(playbackKey) { mutableStateOf<PlayerView?>(null) }
+    // 首帧渲染/缓冲状态：驱动“加载中”指示，避免等待首帧期间误以为黑屏死机
+    var firstFrameRendered by remember(playbackKey) { mutableStateOf(false) }
+    var playerBuffering by remember(playbackKey) { mutableStateOf(true) }
 
     val exoPlayer = remember(playbackKey) {
 
@@ -580,18 +583,19 @@ fun EmbeddedVideoPlayer(
             .setLoadControl(loadControl)
             .build()
             .apply {
-            // Media3 requires the effects pipeline to be initialized before
-            // prepare(). The previous first call happened from LaunchedEffect
-            // after prepare(), which could race the initial video surface.
-            setVideoEffects(emptyList())
+            // 不在启动时初始化视频效果管线（setVideoEffects 即使是空列表也会让播放走
+            // effects VideoSink 路径；该管线在部分机型上以 0x0 输出尺寸初始化，
+            // 导致首帧不可见、画面冻结、seek 被旧帧状态干扰）。
+            // 效果只在用户在清晰度弹窗中开启「硬件画质增强」时才应用（见下方 LaunchedEffect）。
             setMediaSource(createMediaSource(url, type))
             prepare()
             // AndroidView below starts playback only after its actual output
             // surface is attached, available and has non-zero dimensions.
             playWhenReady = false
+            // 全量事件日志（logcat tag: EventLogger）：时间线、时长、轨道、seek、
+            // 缓冲等事件全量输出，用于定位卡顿/seek 弹回/黑屏的确切环节
+            addAnalyticsListener(androidx.media3.exoplayer.util.EventLogger())
             addListener(object : Player.Listener {
-                private var renderedBeforeVideoSize = false
-
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
                     android.util.Log.i(
@@ -600,21 +604,68 @@ fun EmbeddedVideoPlayer(
                     )
                 }
 
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                    playbackRequested = playWhenReady
+                }
+
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     val videoGroups = currentTracks.groups.count { it.type == C.TRACK_TYPE_VIDEO }
+                    playerBuffering = playbackState == Player.STATE_BUFFERING
                     android.util.Log.i(
                         PLAYER_DIAG_TAG,
                         "state=$playbackState playWhenReady=$playWhenReady videoGroups=$videoGroups"
+                    )
+                    val stateName = when (playbackState) {
+                        Player.STATE_IDLE -> "IDLE"
+                        Player.STATE_BUFFERING -> "BUFFERING"
+                        Player.STATE_READY -> "READY"
+                        Player.STATE_ENDED -> "ENDED"
+                        else -> "?"
+                    }
+                    SourceLogManager.info(
+                        "player", "播放状态",
+                        "$stateName pos=${currentPosition}ms buffered=${bufferedPosition}ms duration=${duration}ms playWhenReady=$playWhenReady"
                     )
                     if (playbackState == Player.STATE_READY) {
                         duration = duration.coerceAtLeast(this@apply.duration.coerceAtLeast(0L))
                     }
                 }
 
+                override fun onIsLoadingChanged(isLoading: Boolean) {
+                    SourceLogManager.info(
+                        "player", "加载状态",
+                        "isLoading=$isLoading pos=${currentPosition}ms buffered=${bufferedPosition}ms"
+                    )
+                }
+
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int
+                ) {
+                    val reasonName = when (reason) {
+                        Player.DISCONTINUITY_REASON_SEEK -> "SEEK"
+                        Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> "AUTO"
+                        Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT -> "SEEK_ADJUST"
+                        Player.DISCONTINUITY_REASON_REMOVE -> "REMOVE"
+                        Player.DISCONTINUITY_REASON_INTERNAL -> "INTERNAL"
+                        else -> "reason=$reason"
+                    }
+                    // seek 弹回/进度异常跳变的关键证据
+                    SourceLogManager.warn(
+                        "player", "进度跳变",
+                        "$reasonName ${oldPosition.positionMs}ms -> ${newPosition.positionMs}ms"
+                    )
+                }
+
                 override fun onRenderedFirstFrame() {
                     // This is evidence, not a start trigger: Media3 reports
                     // that a frame reached its configured video output.
-                    renderedBeforeVideoSize = videoSize.width <= 0 || videoSize.height <= 0
+                    firstFrameRendered = true
+                    SourceLogManager.success(
+                        "player", "首帧渲染",
+                        "pos=${currentPosition}ms size=${videoSize.width}x${videoSize.height}"
+                    )
                     android.util.Log.i(
                         PLAYER_DIAG_TAG,
                         "first-frame-rendered position=${currentPosition}ms size=${videoSize.width}x${videoSize.height}"
@@ -627,44 +678,14 @@ fun EmbeddedVideoPlayer(
                         "video-size=${videoSize.width}x${videoSize.height} ratio=${videoSize.pixelWidthHeightRatio}"
                     )
                     if (videoSize.width > 0 && videoSize.height > 0) {
-                        val player = this@apply
                         boundPlayerView?.post {
                             val view = boundPlayerView ?: return@post
                             view.videoSurfaceView?.requestLayout()
                             view.requestLayout()
                             view.invalidate()
-
-                            // Some decoders report a rendered frame while its
-                            // size is still 0x0. That frame never becomes
-                            // visible until fullscreen rebinds the surface.
-                            // Rebind once when the real dimensions arrive so
-                            // Media3 renders a correctly-sized frame now.
-                            if (renderedBeforeVideoSize) {
-                                android.util.Log.i(
-                                    PLAYER_DIAG_TAG,
-                                    "redraw-after-zero-size-frame view=${view.width}x${view.height}"
-                                )
-                                renderedBeforeVideoSize = false
-                                // The effects video sink rendered once while
-                                // its output resolution was still 0x0. Notify
-                                // only the video renderer of the real surface
-                                // size, then re-seek the current position to
-                                // draw a fresh frame. This keeps PlayerView
-                                // attached and preserves the playback clock.
-                                val outputWidth = view.videoSurfaceView?.width
-                                    ?.takeIf { it > 0 } ?: view.width
-                                val outputHeight = view.videoSurfaceView?.height
-                                    ?.takeIf { it > 0 } ?: view.height
-                                repeat(player.rendererCount) { rendererIndex ->
-                                    if (player.getRendererType(rendererIndex) == C.TRACK_TYPE_VIDEO) {
-                                        player.createMessage(player.getRenderer(rendererIndex))
-                                            .setType(Renderer.MSG_SET_VIDEO_OUTPUT_RESOLUTION)
-                                            .setPayload(Media3Size(outputWidth, outputHeight))
-                                            .send()
-                                    }
-                                }
-                                player.seekTo(player.currentPosition.coerceAtLeast(0L))
-                            }
+                            // 注意：不要在这里调用 player.seekTo() 或向渲染器发消息。
+                            // 视频尺寸事件会在用户 seek 后同步触发，若在此按
+                            // currentPosition 重定位，会把用户的 seek 目标“弹回”旧位置。
                         }
                     }
                 }
@@ -875,13 +896,13 @@ fun EmbeddedVideoPlayer(
     // 离开播放器（首页/片库等）立即清除，避免任意页面退出都触发画中画。
     SideEffect {
         PipController.playerActive = !playError
-        PipController.isPlaying = isPlaying
+        PipController.isPlaying = playbackRequested
         PipController.hasNext = onNextEpisode != null
         PipController.hasPrev = onPrevEpisode != null
     }
     DisposableEffect(exoPlayer) {
         PipController.onTogglePlayPause = {
-            if (exoPlayer.isPlaying) {
+            if (exoPlayer.playWhenReady) {
                 exoPlayer.pause()
                 PipController.isPlaying = false
             } else {
@@ -928,23 +949,32 @@ fun EmbeddedVideoPlayer(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .pointerInput(duration, isLocked) {
+            .pointerInput(duration, isLocked, controlsVisible) {
                 var startX = 0f
+                var startY = 0f
                 var totalX = 0f
                 var totalY = 0f
                 var volumeAcc = 0f
+                var startedOnControls = false
+                var resumeAfterGestureSeek = false
 
                 detectDragGestures(
                     onDragStart = { offset ->
                         startX = offset.x
+                        startY = offset.y
                         totalX = 0f
                         totalY = 0f
                         volumeAcc = 0f
+                        // The bottom control area owns the timeline Slider.
+                        // Never apply the outer full-screen seek gesture there,
+                        // otherwise one drag performs two separate seekTo calls.
+                        startedOnControls = controlsVisible && startY > size.height * 0.70f
+                        resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
                     onDrag = { _, amount ->
                         totalX += amount.x
                         totalY += amount.y
-                        if (isLocked) return@detectDragGestures
+                        if (isLocked || startedOnControls) return@detectDragGestures
 
                         val width = size.width.coerceAtLeast(1)
 
@@ -979,7 +1009,11 @@ fun EmbeddedVideoPlayer(
                         }
                     },
                     onDragEnd = {
-                        if (isLocked || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
+                        if (
+                            isLocked ||
+                            startedOnControls ||
+                            kotlin.math.abs(totalX) < kotlin.math.abs(totalY)
+                        ) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                         val deltaMs = if (kotlin.math.abs(totalX) < width * 0.35f) {
@@ -987,9 +1021,15 @@ fun EmbeddedVideoPlayer(
                         } else {
                             (duration.coerceAtLeast(60_000L) * proportion).toLong()
                         }
-                        exoPlayer.seekTo(
-                            (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                        val targetPosition =
+                            (exoPlayer.currentPosition + deltaMs)
+                                .coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                        android.util.Log.i(
+                            PLAYER_DIAG_TAG,
+                            "gesture-seek target=${targetPosition}ms resume=$resumeAfterGestureSeek"
                         )
+                        exoPlayer.seekTo(targetPosition)
+                        exoPlayer.playWhenReady = resumeAfterGestureSeek
                     }
                 )
             }
@@ -999,7 +1039,7 @@ fun EmbeddedVideoPlayer(
                         controlsVisible = !controlsVisible
                     },
                     onDoubleTap = {
-                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                        if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
                     }
                 )
             }
@@ -1093,6 +1133,17 @@ fun EmbeddedVideoPlayer(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+
+            // 等待首帧/缓冲中的加载指示：避免等待期间误判为黑屏死机
+            if (playerBuffering || !firstFrameRendered) {
+                CircularProgressIndicator(
+                    color = AppColors.cyan,
+                    strokeWidth = 4.dp,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(46.dp)
+                )
+            }
         }
 
         // ── Hardware Super-Res Scanline Comparison Line Animation (Monochrome) ──
@@ -1291,12 +1342,14 @@ fun EmbeddedVideoPlayer(
                             )
                         }
                         IconButton(
-                            onClick = { if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play() },
+                            onClick = {
+                                if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
+                            },
                             modifier = Modifier
                                 .size(62.dp)
                                 .background(Color.Black.copy(alpha = 0.55f), CircleShape)
                         ) {
-                            if (isPlaying) {
+                            if (playbackRequested) {
                                 PauseIcon(tint = Color.White)
                             } else {
                                 Icon(
@@ -1351,11 +1404,19 @@ fun EmbeddedVideoPlayer(
                             Slider(
                                 value = if (isSeeking) sliderPosition else currentPosition.toFloat(),
                                 onValueChange = {
+                                    if (!isSeeking) {
+                                        resumeAfterSliderSeek = exoPlayer.playWhenReady
+                                    }
                                     isSeeking = true
                                     sliderPosition = it
                                 },
                                 onValueChangeFinished = {
+                                    android.util.Log.i(
+                                        PLAYER_DIAG_TAG,
+                                        "slider-seek target=${sliderPosition.toLong()}ms resume=$resumeAfterSliderSeek"
+                                    )
                                     exoPlayer.seekTo(sliderPosition.toLong())
+                                    exoPlayer.playWhenReady = resumeAfterSliderSeek
                                     isSeeking = false
                                 },
                                 valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
@@ -1395,13 +1456,13 @@ fun EmbeddedVideoPlayer(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 // Play / Pause
-                                IconButton(
-                                    onClick = {
-                                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                                    },
+                                    IconButton(
+                                        onClick = {
+                                            if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
+                                        },
                                     modifier = Modifier.size(32.dp)
                                 ) {
-                                if (isPlaying) {
+                                if (playbackRequested) {
                                     PauseIcon(tint = Color.White)
                                 } else {
                                     Icon(
