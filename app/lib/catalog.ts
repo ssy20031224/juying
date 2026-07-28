@@ -7,7 +7,7 @@ import type {
   SourceVariant,
 } from "./adapters/types";
 
-export type SourcedItem = SourceItem & { sourceTitle: string; score?: string; variants?: SourceVariant[] };
+export type SourcedItem = SourceItem & { sourceTitle: string; score?: string };
 export type SourcedDetail = {
   variant: SourceVariant;
   item: SourceItem;
@@ -35,106 +35,50 @@ export function canonicalMediaId(title: string, year?: string): string {
 }
 
 export function toVariant(item: SourcedItem): SourceVariant {
-  if (item.variants && item.variants.length > 0 && item.variants[0]?.sourceMediaId && !item.variants[0].sourceMediaId.startsWith("media_")) {
-    return item.variants[0];
-  }
   return {
-    sourceKey: item.sourceKey || "",
-    sourceTitle: item.sourceTitle || "",
-    sourceMediaId: (item.id && item.id.startsWith("media_")) ? (item.variants?.[0]?.sourceMediaId || item.id) : (item.id || ""),
-    title: item.title || "",
-    year: item.year || "",
-    kind: item.kind || "",
-    cover: item.cover || "",
-    description: item.description || "",
+    sourceKey: item.sourceKey,
+    sourceTitle: item.sourceTitle,
+    sourceMediaId: item.id,
+    title: item.title,
+    year: item.year,
+    kind: item.kind,
+    cover: item.cover,
+    description: item.description,
   };
 }
 
 export function mergeSearchItems(items: SourcedItem[]): CanonicalMedia[] {
   const grouped = new Map<string, CanonicalMedia>();
-  const byTitle = new Map<string, string>(); // normalizedTitle → groupKey
 
   for (const item of items) {
-    if (!item) continue;
-    const rawVariants = (Array.isArray(item.variants) && item.variants.length) ? item.variants : [toVariant(item)];
-    const existingVariants: SourceVariant[] = rawVariants.map((v) => ({
-      ...v,
-      sourceKey: v?.sourceKey || item.sourceKey || "",
-      sourceTitle: v?.sourceTitle || item.sourceTitle || "",
-      sourceMediaId: v?.sourceMediaId || item.id || "",
-    }));
-
-    const normTitle = normalizeTitle(item.title || "");
-    const groupKey = `${normTitle}|${item.year || ""}`;
-    let key = groupKey;
-    let existing = grouped.get(key);
-
-    if (!existing && !item.year) {
-      const altKey = byTitle.get(normTitle);
-      if (altKey) { key = altKey; existing = grouped.get(key); }
-    }
-    if (!existing && item.year) {
-      const keyWithoutYear = `${normTitle}|`;
-      const existingWithout = grouped.get(keyWithoutYear);
-      if (existingWithout) {
-        grouped.delete(keyWithoutYear);
-        const merged: CanonicalMedia = {
-          ...existingWithout,
-          id: item.id && item.id.startsWith("media_") ? item.id : canonicalMediaId(item.title || "", item.year),
-          year: item.year,
-          kind: item.kind || existingWithout.kind,
-          cover: item.cover || existingWithout.cover,
-          description: item.description || existingWithout.description,
-          score: item.score || existingWithout.score,
-          variants: Array.isArray(existingWithout.variants) ? [...existingWithout.variants] : [],
-        };
-        grouped.set(key, merged);
-        existing = merged;
-      }
-    }
-
+    const groupKey = `${normalizeTitle(item.title)}|${item.year || ""}`;
+    const variant = toVariant(item);
+    const existing = grouped.get(groupKey);
     if (!existing) {
-      const entry: CanonicalMedia = {
-        id: item.id && item.id.startsWith("media_") ? item.id : canonicalMediaId(item.title || "", item.year),
-        title: item.title || "",
-        year: item.year || "",
-        kind: item.kind || "",
-        tags: item.tags,
-        status: item.status || "",
-        score: item.score || "8.5",
-        cover: item.cover || "",
-        description: item.description || "",
-        sourceKey: item.sourceKey || "",
-        sourceTitle: item.sourceTitle || "",
-        sourceCount: existingVariants.length,
-        variants: [...existingVariants],
-      };
-      grouped.set(key, entry);
-      byTitle.set(normTitle, key);
+      grouped.set(groupKey, {
+        id: canonicalMediaId(item.title, item.year),
+        title: item.title,
+        year: item.year,
+        kind: item.kind,
+        score: item.score,
+        cover: item.cover,
+        description: item.description,
+        sourceKey: item.sourceKey,
+        sourceTitle: item.sourceTitle,
+        sourceCount: 1,
+        variants: [variant],
+      });
       continue;
     }
 
-    if (!Array.isArray(existing.variants)) {
-      existing.variants = [];
-    }
-
-    for (const variant of existingVariants) {
-      const vId = variant.sourceMediaId || "";
-      if (!vId.startsWith("media_") && !existing.variants.some((entry) => (entry?.sourceKey === variant.sourceKey) && ((entry?.sourceMediaId || "") === vId))) {
-        existing.variants.push(variant);
-      }
+    if (!existing.variants.some((entry) => entry.sourceKey === variant.sourceKey && entry.sourceMediaId === variant.sourceMediaId)) {
+      existing.variants.push(variant);
     }
     existing.sourceCount = existing.variants.length;
     if (!existing.cover && item.cover) existing.cover = item.cover;
     if (!existing.description && item.description) existing.description = item.description;
     if (!existing.kind && item.kind) existing.kind = item.kind;
     if (!existing.year && item.year) existing.year = item.year;
-    if (!existing.status && item.status) existing.status = item.status;
-    if (item.tags?.length) {
-      const mergedTags = new Set(existing.tags || []);
-      for (const t of item.tags) mergedTags.add(t);
-      existing.tags = [...mergedTags];
-    }
   }
 
   return [...grouped.values()];
@@ -192,22 +136,14 @@ export function mergeDetails(details: SourcedDetail[]): { item: CanonicalMedia; 
   });
 
   const primaryItem = primary.item;
-  const bestYear = primaryItem.year || details.find((d) => d.item.year)?.item.year || "";
-  const bestKind = primaryItem.kind || details.find((d) => d.item.kind)?.item.kind || "";
-  const bestCover = primaryItem.cover || details.find((d) => d.item.cover)?.item.cover || "";
-  const bestDesc = primaryItem.description || details.find((d) => d.item.description)?.item.description || "";
-  const bestStatus = primaryItem.status || details.find((d) => d.item.status)?.item.status || "";
-  const mergedTags = [...new Set(details.flatMap((d) => d.item.tags || []))];
   return {
     item: {
-      id: canonicalMediaId(primaryItem.title, bestYear),
+      id: canonicalMediaId(primaryItem.title, primaryItem.year),
       title: primaryItem.title,
-      year: bestYear,
-      kind: bestKind,
-      tags: mergedTags.length ? mergedTags : undefined,
-      status: bestStatus,
-      cover: bestCover,
-      description: bestDesc,
+      year: primaryItem.year,
+      kind: primaryItem.kind,
+      cover: primaryItem.cover,
+      description: primaryItem.description,
       sourceKey: primary.variant.sourceKey,
       sourceTitle: primary.variant.sourceTitle,
       sourceCount: variants.length,

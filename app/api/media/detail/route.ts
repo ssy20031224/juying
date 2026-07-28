@@ -21,9 +21,9 @@ export async function POST(request: Request) {
     list.findIndex((entry) => entry.sourceKey === variant.sourceKey && entry.sourceMediaId === variant.sourceMediaId) === index,
   );
 
-  const outcomes = await mapWithConcurrency(unique, 5, async (variant): Promise<SourcedDetail> => {
+  const outcomes = await mapWithConcurrency(unique, 3, async (variant): Promise<SourcedDetail> => {
     const source = SOURCES.find((entry) => entry.key === variant.sourceKey);
-    const adapter = source ? sourceAdapters[source.adapter ?? source.key] : undefined;
+    const adapter = source?.adapter ? sourceAdapters[source.adapter] : undefined;
     if (!source || !adapter) throw new Error("source adapter unavailable");
     const result = await cached(
       `detail:${source.key}:${variant.sourceMediaId}`,
@@ -44,23 +44,7 @@ export async function POST(request: Request) {
   }] : []);
 
   if (!details.length) {
-    const primary = unique[0];
-    return NextResponse.json({
-      id: primary.sourceMediaId,
-      title: primary.title || "未命名影片",
-      year: primary.year || "",
-      kind: primary.kind || "影视",
-      score: "-",
-      cover: primary.cover || "",
-      description: primary.description || "所选来源的网络响应超时或已被清理，无法完成全量剧集解析。",
-      sourceKey: primary.sourceKey,
-      sourceTitle: primary.sourceTitle || primary.sourceKey,
-      sourceCount: unique.length,
-      variants: unique,
-      episodes: [],
-      error: "第三方来源详情拉取超时",
-      errors,
-    });
+    return NextResponse.json({ error: "all source details failed", errors }, { status: 502 });
   }
 
   const merged = mergeDetails(details);

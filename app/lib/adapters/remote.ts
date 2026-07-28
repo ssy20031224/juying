@@ -250,48 +250,6 @@ export class XifanAdapter implements SourceAdapter {
     })).filter((entry) => entry.id && entry.title);
   }
 
-  async searchFiltered(kind: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const typeMap: Record<string, string> = { 日漫: "1", 完结: "2", 剧场版: "3", 欧美: "21" };
-    const tid = typeMap[kind] || "1";
-    const genre = filters.genre || "";
-    const year = filters.year || "";
-    const sort = filters.sort || "";
-    const body = new URLSearchParams({
-      type: tid,
-      page: String(page),
-      class: genre,
-      year: year,
-      by: sort === "time" || sort === "update" ? "time" : sort === "score" ? "score" : sort === "hot" ? "hits" : "",
-    });
-    const resp = await text(`${XIFAN_SITE}/index.php/ds_api/vod`, signal, {
-      method: "POST",
-      headers: { ...this.headers, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded", Referer: `${XIFAN_SITE}/show/${tid}.html` },
-      body,
-    });
-    try {
-      const j = JSON.parse(resp) as Json;
-      if (Number(j.code) !== 1 || !Array.isArray(j.list)) return [];
-      return (j.list as Json[]).flatMap((it: Json) => {
-        const id = firstMatch(String(it.url || ""), /\/bangumi\/(\d+)\.html/);
-        if (!id) return [];
-        const classText = clean(it.vod_class || it.type_name || "");
-        return [{
-          sourceKey: this.sourceKey,
-          id,
-          title: clean(it.vod_name),
-          year: clean(it.vod_year || year),
-          kind: classText.split(/[\s,，、/|·]+/)[0] || kind || "日漫",
-          tags: classText ? classText.split(/[\s,，、/|·]+/).map((s: string) => s.trim()).filter(Boolean) : undefined,
-          cover: absoluteXifan(String(it.vod_pic || "")),
-          description: clean(it.vod_blurb || ""),
-          sourceCount: 1,
-        }];
-      });
-    } catch {
-      return [];
-    }
-  }
-
   async detail(id: string, signal: AbortSignal) {
     const html = await text(`${XIFAN_SITE}/bangumi/${encodeURIComponent(id)}.html`, signal, { headers: this.headers });
     const title = clean(
@@ -337,7 +295,7 @@ export class XifanAdapter implements SourceAdapter {
     if (!url) url = firstMatch(html, /"url"\s*:\s*"([^"]+\.(?:m3u8|mp4|flv|mkv)[^"]*)"/).replace(/\\\//g, "/");
     if (!url) throw new Error("xifanacg requires browser sniffing for this line");
     const encoded = url.replace(/[^\x00-\x7F]/g, (char) => encodeURIComponent(char));
-    return { url: encoded, type: mediaType(url), headers: { "User-Agent": UA_IPHONE } };
+    return { url: encoded, type: mediaType(url) };
   }
 }
 
@@ -351,14 +309,12 @@ export class GuguAdapter implements SourceAdapter {
   private banners: SourceItem[] = [];
 
   private map(raw: Json): SourceItem {
-    const kindText = clean(raw.vod_class ?? raw.type_name ?? "");
     return {
       sourceKey: this.sourceKey,
       id: String(raw.vod_id ?? ""),
       title: clean(raw.vod_name),
       year: clean(raw.vod_year),
-      kind: kindText.split(/[\s,，、/|·]+/).slice(0, 2).join(" "),
-      tags: kindText ? kindText.split(/[\s,，、/|·]+/).map((s: string) => s.trim()).filter(Boolean) : undefined,
+      kind: clean(raw.vod_class ?? raw.type_name).split(/[\s,，、/|·]+/).slice(0, 2).join(" "),
       cover: String(raw.vod_pic || ""),
       description: clean(raw.vod_content),
       sourceCount: 1,
@@ -425,17 +381,6 @@ export class GuguAdapter implements SourceAdapter {
     if (/^\d+$/.test(query) && this.types.some((entry) => entry.id === query)) return this.typeList(query, page, signal);
     const data = await this.post("/getappapi.index/searchList", { type_id: "0", keywords: query, page: String(page) }, signal);
     return asArray(data.search_list).map((entry) => this.map(entry)).filter((entry) => entry.id && entry.title);
-  }
-
-  async searchFiltered(kind: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    await this.ensureHome(signal);
-    const typeId = kind && /^\d+$/.test(kind) ? kind : this.types.find((t) => t.name.includes(kind))?.id || "0";
-    const extra: Record<string, string> = { type_id: typeId, page: String(page) };
-    if (filters.genre) extra.class = filters.genre;
-    if (filters.year) extra.year = filters.year;
-    if (filters.sort) extra.sort = filters.sort === "time" || filters.sort === "update" ? "time" : filters.sort === "score" ? "score" : filters.sort === "hot" ? "hits" : "";
-    const data = await this.post(`/getappapi.index/typeFilterVodList?page=${page}`, extra, signal);
-    return asArray(data.recommend_list).map((entry) => this.map(entry)).filter((entry) => entry.id && entry.title);
   }
 
   async detail(id: string, signal: AbortSignal) {

@@ -6,7 +6,7 @@ type Json = Record<string, any>;
 export type HomeSection = { title: string; key: string; items: SourceItem[] };
 
 const UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36";
-const UA_CYC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) cyc-desktop/1.0.8 Chrome/128.0.6613.36 Electron/32.0.1 Safari/537.36";
+const UA_CYC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 cyc-desktop/1.0.8 Chrome/128.0 Safari/537.36";
 
 // Lanerc's own JS source resolves its service host at runtime. These are
 // implementation details of that adapter, not user-facing environment vars.
@@ -76,21 +76,16 @@ function sha1(value: string): string { return createHash("sha1").update(value).d
 function sha256(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function guessName(value: unknown, fallback: string): string { return clean(value) || fallback; }
 function number(value: unknown): number | undefined { const n = Number(value); return Number.isFinite(n) && n > 0 ? n : undefined; }
-function yearNum(value: unknown): string { const n = Number(value); return Number.isFinite(n) && n > 1900 ? String(n) : ""; }
 
 function item(sourceKey: string, raw: Json): SourceItem {
-  const kindText = clean(raw.type ?? raw.vod_class ?? raw.vodArea ?? raw.type_name ?? "");
   return {
     sourceKey,
     id: String(raw.id ?? raw.vod_id ?? raw.vodId ?? ""),
     title: guessName(raw.title ?? raw.name ?? raw.vod_name ?? raw.vodName, "未命名"),
-    year: yearNum(raw.year ?? raw.vod_year ?? raw.vodYear) || yearNum(raw.vodPubdate),
-    kind: kindText.split(/[\s,，、/|·]+/)[0] || "",
-    tags: kindText ? kindText.split(/[\s,，、/|·]+/).map((s: string) => s.trim()).filter(Boolean) : undefined,
-    status: clean(raw.remarks ?? raw.vod_remarks ?? raw.vodRemarks ?? raw.vod_continu ?? raw.new_continue ?? raw.serialDesc ?? raw.vod_status ?? ""),
-    score: clean(raw.score ?? raw.vod_score ?? raw.vodScore),
-    cover: String(raw.pic ?? raw.vod_pic ?? raw.vodPic ?? raw.img ?? raw.image ?? raw.cover ?? raw.banner ?? raw.fengmiantu ?? raw.dahengtu ?? ""),
-    description: clean(raw.desc ?? raw.vod_content ?? raw.vodContent ?? raw.description ?? raw.vod_blurb ?? raw.vodBlurb ?? raw.blurb ?? raw.shortBlurb ?? raw.vod_use_content ?? ""),
+    year: clean(raw.year ?? raw.vod_year ?? raw.vodYear),
+    kind: clean(raw.type ?? raw.vod_class ?? raw.vodArea),
+    cover: String(raw.pic ?? raw.vod_pic ?? raw.vodPic ?? raw.img ?? raw.image ?? raw.cover ?? raw.banner ?? ""),
+    description: clean(raw.desc ?? raw.vod_content ?? raw.vodContent ?? raw.description),
     sourceCount: 1,
   };
 }
@@ -207,25 +202,9 @@ export class LanercAdapter implements SourceAdapter {
     return { sign: String(flag.sign || this.runtime.sign || ""), auth: String(flag.auth || this.runtime.auth || LANERC_AUTH_FALLBACK) };
   }
 
-  private categoryKeys = new Set<string>();
-
   async search(query: string, _page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    if (!query) {
-      const sections = await this.home(signal).catch(() => []);
-      return sections.flatMap((s) => s.items);
-    }
-    // Category key detection: if query matches a known category, browse instead of search
-    if (this.categoryKeys.size === 0) await this.home(signal).catch(() => {});
-    if (this.categoryKeys.has(query)) {
-      return this.searchFiltered(query, {}, 1, signal);
-    }
     const data = lanercPayload(await this.apiGet(`app/vod/search?keyword=${encodeURIComponent(query)}`, signal));
-    const items = (Array.isArray(data.search_vods) ? data.search_vods : []).map((raw: Json) => item(this.sourceKey, raw));
-    if (!items.length) {
-      const sections = await this.home(signal).catch(() => []);
-      return sections.flatMap((s) => s.items);
-    }
-    return items;
+    return (Array.isArray(data.search_vods) ? data.search_vods : []).map((raw: Json) => item(this.sourceKey, raw));
   }
 
   async home(signal: AbortSignal): Promise<HomeSection[]> {
@@ -238,11 +217,8 @@ export class LanercAdapter implements SourceAdapter {
     if (hot.length) sections.push({ title: "热门", key: "", items: hot.slice(0, 12) });
     for (const group of Array.isArray(home.vod_list) ? home.vod_list : []) {
       const title = String(group?.sort_name || "分类");
-      const key = String(group?.sort_id || title);
-      this.categoryKeys.add(key);
-      if (title) this.categoryKeys.add(title);
       const values = cards(group?.vods, title).slice(0, 12);
-      if (values.length) sections.push({ title, key, items: values });
+      if (values.length) sections.push({ title, key: String(group?.sort_id || title), items: values });
     }
     return sections;
   }
@@ -264,28 +240,8 @@ export class LanercAdapter implements SourceAdapter {
     return { item: result, episodes };
   }
 
-  async searchFiltered(kind: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const genre = filters.genre || "";
-    const year = filters.year || "";
-    let sortBy = filters.sort || "";
-    if (sortBy === "score") sortBy = "vod_score";
-    else if (sortBy === "time" || sortBy === "update") sortBy = "";
-    const classId = ""; // Kind mapping to sort_id requires home data; omit for now
-    const params = new URLSearchParams({
-      page: String(page),
-      class_id: classId,
-      vod_class: genre,
-      year: year,
-      sort_by: sortBy,
-    });
-    const data = lanercPayload(await this.apiGet(`app/vod/filter?${params}`, signal));
-    const list = (Array.isArray(data.filter_vods) ? data.filter_vods : []).map((raw: Json) => item(this.sourceKey, raw));
-    return list;
-  }
-
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
     const values = await this.runtimeValues(signal, flag);
-    const host = this.resolvedHost || LANERC_FALLBACK_ENDPOINT;
     const response = await this.apiPost("app/proxyx3x", { vid: String(flag.vid || ""), player: String(flag.player || ""), sign: values.sign, auth: values.auth }, signal);
     const url = String(lanercFindDeep(response, "play_url") || "");
     if (!url) throw new Error("Lanerc returned no play url");
@@ -305,33 +261,8 @@ export class AuvFunAdapter implements SourceAdapter {
     return parseMaybeEncrypted(raw, process.env.AUVFUN_AES_KEY?.trim() || AUVFUN_DEFAULT_AES_KEY);
   }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    if (!query) {
-      const sections = await this.home(signal).catch(() => []);
-      return sections.flatMap((s) => s.items);
-    }
-    // Hex key detection: 32-char hex = tab ID → category browsing
-    if (/^[0-9a-f]{32}$/.test(query)) {
-      const data = await this.call("/video/getList", { tabId: query }, signal);
-      const all: SourceItem[] = [];
-      const seen = new Set<string>();
-      for (const section of Array.isArray(data.data) ? data.data : []) {
-        for (const raw of Array.isArray((section as Json).videoList) ? (section as Json).videoList as Json[] : []) {
-          const it = item(this.sourceKey, raw);
-          if (!it.id || seen.has(it.id)) continue;
-          seen.add(it.id);
-          all.push(it);
-        }
-      }
-      const start = (page - 1) * 20;
-      return all.slice(start, start + 20);
-    }
     const data = await this.call("/video/search", { keyWord: query, page: String(page), size: "20" }, signal);
-    const items = (Array.isArray(data.data) ? data.data : []).map((raw) => item(this.sourceKey, raw));
-    if (!items.length) {
-      const sections = await this.home(signal).catch(() => []);
-      return sections.flatMap((s) => s.items);
-    }
-    return items;
+    return (Array.isArray(data.data) ? data.data : []).map((raw) => item(this.sourceKey, raw));
   }
   async home(signal: AbortSignal): Promise<HomeSection[]> {
     const tabs = await this.call("/tab/getList", {}, signal);
@@ -350,32 +281,6 @@ export class AuvFunAdapter implements SourceAdapter {
     const episodes: Episode[] = (Array.isArray(raw.episodeList) ? raw.episodeList : []).map((episode: Json, index: number) => ({ id: String(episode.id ?? index), name: guessName(episode.title, `第${index + 1}集`), route: "在线播放", flag: { videoId: id, episodeId: String(episode.id ?? ""), videoTitle: title } }));
     return { item: result, episodes };
   }
-  async searchFiltered(kind: string, _filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const tabs = await this.call("/tab/getList", {}, signal);
-    const tabList = Array.isArray(tabs.data) ? tabs.data : [];
-    const target = tabList.find((t: Json) => String(t.title || "").includes(String(kind || ""))) || tabList[0];
-    const tabId = String(target?.id || "");
-    if (!tabId) {
-      const sections = await this.home(signal).catch(() => []);
-      const all = sections.flatMap((s) => s.items);
-      const start = (page - 1) * 20;
-      return all.slice(start, start + 20);
-    }
-    const data = await this.call("/video/getList", { tabId }, signal);
-    const all: SourceItem[] = [];
-    const seen = new Set<string>();
-    for (const section of Array.isArray(data.data) ? data.data : []) {
-      for (const raw of Array.isArray((section as Json).videoList) ? (section as Json).videoList as Json[] : []) {
-        const it = item(this.sourceKey, raw);
-        if (!it.id || seen.has(it.id)) continue;
-        seen.add(it.id);
-        all.push(it);
-      }
-    }
-    const start = (page - 1) * 20;
-    return all.slice(start, start + 20);
-  }
-
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
     const data = await this.call("/episode/jx", { videoTitle: flag.videoTitle || "", episodeId: flag.episodeId || "", deviceId: process.env.AUVFUN_DEVICE_ID?.trim() || AUVFUN_DEFAULT_DEVICE_ID }, signal);
     const list = Array.isArray(data.data?.resolutionList) ? data.data.resolutionList : [];
@@ -384,14 +289,7 @@ export class AuvFunAdapter implements SourceAdapter {
     const preferred = [...resolutions].sort((a, b) => (b.height || 0) - (a.height || 0))[0];
     const playHeader = data.data?.playHeader || {};
     const referer = String(playHeader.Referer || "https://pan.quark.cn/");
-    const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36";
-    const headers: Record<string, string> = {
-      "User-Agent": String(playHeader.UserAgent || playHeader["User-Agent"] || chromeUA),
-      Referer: referer,
-      Origin: String(playHeader.Referer ? playHeader.Referer.replace(/\/$/, "") : referer).replace(/\/$/, ""),
-    };
-    if (playHeader.Cookie) headers.Cookie = String(playHeader.Cookie);
-    return { url: preferred.url, type: preferred.type, resolutions, headers, referer };
+    return { url: preferred.url, type: preferred.type, resolutions, referer, headers: { "User-Agent": String(playHeader.UserAgent || UA_CHROME), Referer: referer, ...(playHeader.Cookie ? { Cookie: String(playHeader.Cookie) } : {}) } };
   }
 }
 
@@ -399,43 +297,10 @@ export class CycappAdapter implements SourceAdapter {
   readonly sourceKey = "cycapp";
   private base() { return (process.env.CYCAPP_BASE_URL?.trim() || CYCAPP_DEFAULT_BASE).replace(/\/$/, ""); }
   private async call(path: string, signal: AbortSignal, referer?: string): Promise<Json> {
-    try {
-      const response = await fetch(`${this.base()}${path}`, {
-        signal: timeoutSignal(signal, 15000),
-        headers: { "User-Agent": UA_CYC, Referer: referer || `${this.base()}/`, Accept: "application/json" },
-        cache: "no-store",
-      });
-      if (!response.ok) return {};
-      const text = await response.text();
-      try { return JSON.parse(text) as Json; } catch { return {}; }
-    } catch { return {}; }
+    return requestJson(`${this.base()}${path}`, signal, { "User-Agent": UA_CYC, Referer: referer || `${this.base()}/`, Accept: "application/json" });
   }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    // Numeric TID detection: "20"/"21"/"26"/"27" → category browsing
-    if (/^\d+$/.test(query)) {
-      const data = await this.call(`/video/query?page=${page}&limit=20&tid=${query}`, signal);
-      const list = (Array.isArray(data.data) ? data.data : []).map((raw) => item(this.sourceKey, raw));
-      if (list.length) return list;
-    }
-    const endpoint = query
-      ? `/video/search?text=${encodeURIComponent(query)}&pg=${page}&type_id=0&limit=20`
-      : `/video/query?page=${page}&limit=20&tid=20`;
-    const data = await this.call(endpoint, signal);
-    let list = (Array.isArray(data.data) ? data.data : []).map((raw) => item(this.sourceKey, raw));
-    if (!list.length) {
-      const rank = await this.call("/rank/video_list?id=1", signal);
-      list = (Array.isArray(rank.data) ? rank.data : []).map((raw: Json) => item(this.sourceKey, raw));
-    }
-    if (!list.length) {
-      const sections = await this.home(signal).catch(() => []);
-      list = sections.flatMap((s) => s.items);
-    }
-    return list;
-  }
-  async searchFiltered(kind: string, _filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const kindMap: Record<string, string> = { 日漫: "20", 剧场版: "21", "4K": "26", 国漫: "27" };
-    const tid = kindMap[kind] || "21";
-    const data = await this.call(`/video/query?page=${page}&limit=20&tid=${tid}`, signal);
+    const data = await this.call(query ? `/video/search?text=${encodeURIComponent(query)}&pg=${page}&type_id=0&limit=20` : `/video/query?page=${page}&limit=20&tid=20`, signal);
     return (Array.isArray(data.data) ? data.data : []).map((raw) => item(this.sourceKey, raw));
   }
   async home(signal: AbortSignal): Promise<HomeSection[]> {
@@ -443,11 +308,10 @@ export class CycappAdapter implements SourceAdapter {
     const rank = await this.call("/rank/video_list?id=1", signal);
     const rankItems = (Array.isArray(rank.data) ? rank.data : []).map((raw: Json) => item(this.sourceKey, raw)).slice(0, 12);
     if (rankItems.length) sections.push({ title: "动画排行榜", key: "20", items: rankItems });
-    const cats = [{ key: "20", title: "TV动画" }, { key: "21", title: "剧场版" }, { key: "26", title: "4K专区" }, { key: "27", title: "国漫" }];
-    for (const cat of cats) {
-      const data = await this.call(`/video/query?page=1&limit=12&tid=${cat.key}`, signal);
+    for (const category of ["20", "21", "26", "27"]) {
+      const data = await this.call(`/video/query?page=1&limit=12&tid=${category}`, signal);
       const items = (Array.isArray(data.data) ? data.data : []).map((raw: Json) => item(this.sourceKey, raw)).slice(0, 12);
-      if (items.length) sections.push({ title: cat.title, key: cat.key, items });
+      if (items.length) sections.push({ title: `分类 ${category}`, key: category, items });
     }
     return sections;
   }
@@ -468,105 +332,36 @@ export class CycappAdapter implements SourceAdapter {
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
     let url = String(flag.url || "").split("#")[0];
     if (!url) throw new Error("cycapp missing episode url");
-    if (/\.(m3u8|mp4|flv)(?:$|[?#])/i.test(url)) return { url, type: mediaType(url) };
-    try {
+    if (!/\.m3u8(?:$|[?#])/i.test(url)) {
       const resolved = await requestJson(url, signal, { "User-Agent": UA_CYC, Referer: url, Accept: "application/json" });
       url = String(resolved.url || url);
-    } catch { /* keep original url */ }
-    return { url, type: mediaType(url) };
+    }
+    return { url, type: mediaType(url), referer: url, headers: { "User-Agent": UA_CYC, Referer: url } };
   }
 }
 
 export class JinpaiAdapter implements SourceAdapter {
   readonly sourceKey = "jinpai";
-  private resolvedHost = "";
-  private hosts() {
-    const configured = process.env.JINPAI_BASE_URL?.trim();
-    if (configured) return [configured.replace(/\/$/, "")];
-    return [
-      "https://y2s52n7.com",
-      "https://m.hkybqufgh.com",
-      "https://m.sizhengxt.com",
-      "https://m.9zhoukj.com",
-      "https://m.jiabaide.cn",
-      "https://www.hkybqufgh.com",
-    ].map((h) => h.replace(/\/$/, ""));
-  }
-  private async resolveHost(signal: AbortSignal): Promise<string> {
-    if (this.resolvedHost) return this.resolvedHost;
-    const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
-    for (const host of this.hosts()) {
-      try {
-        const t = String(Date.now());
-        const resp = await requestJson(`${host}/api/mw-movie/anonymous/home/hotSearch`, signal, { sign: sha1(md5(`key=${key}&t=${t}`)), T: t, Deviceid: "Deviceid", "User-Agent": "okhttp/3.15", Accept: "application/json" }, 8000);
-        if (resp && typeof resp === "object") { this.resolvedHost = host; return host; }
-      } catch { /* next host */ }
-    }
-    this.resolvedHost = this.hosts()[0];
-    return this.resolvedHost;
-  }
+  private base() { return (process.env.JINPAI_BASE_URL?.trim() || JINPAI_DEFAULT_BASE).replace(/\/$/, ""); }
   private async call(path: string, raw: string, timestamp: string, signal: AbortSignal): Promise<Json> {
-    try {
-      const host = await this.resolveHost(signal);
-      return await requestJson(`${host}${path}`, signal, { sign: sha1(md5(raw)), T: timestamp, Deviceid: "Deviceid", "User-Agent": "okhttp/3.15", Accept: "application/json" });
-    } catch { return {}; }
+    return requestJson(`${this.base()}${path}`, signal, { sign: sha1(md5(raw)), T: timestamp, Deviceid: "Deviceid", "User-Agent": "okhttp/3.15", Accept: "application/json" });
   }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
     const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
-    const t = String(Date.now());
-    const tabArea: Record<string, string> = { 动漫: "", 日本: "日本", 大陆: "中国大陆" };
-    if (query && tabArea[query] !== undefined) {
-      const area = tabArea[query];
-      const path = `/api/mw-movie/anonymous/video/list?type1=4&pageNum=${page}&area=${encodeURIComponent(area)}&year=`;
-      const raw = `area=${area}&pageNum=${page}&type1=4&year=&key=${key}&t=${t}`;
-      const data = await this.call(path, raw, t, signal);
-      const list = data.data?.list;
-      return (Array.isArray(list) ? list : []).map((rawItem: Json) => {
-        const year = yearNum(rawItem.vodYear) || yearNum(String(rawItem.vodPubdate || "").substring(0, 4));
-        return item(this.sourceKey, { id: rawItem.vodId, title: rawItem.vodName, pic: rawItem.vodPic, year, type: rawItem.vodArea, remarks: rawItem.vodRemarks });
-      });
-    }
+    const t = String(Math.floor(Date.now() / 1000));
     const path = query ? `/api/mw-movie/anonymous/video/searchByWord?keyword=${encodeURIComponent(query)}&pageNum=${page}&pageSize=20` : `/api/mw-movie/anonymous/video/list?type1=4&pageNum=${page}&area=&year=`;
     const raw = query ? `keyword=${query}&pageNum=${page}&pageSize=20&key=${key}&t=${t}` : `area=&pageNum=${page}&type1=4&year=&key=${key}&t=${t}`;
     const data = await this.call(path, raw, t, signal);
     const list = query ? data.data?.result?.list : data.data?.list;
-    return (Array.isArray(list) ? list : []).filter((value: Json) => !query || Number(value.typeId1) === 4).map((rawItem: Json) => {
-      const year = yearNum(rawItem.vodYear) || yearNum(String(rawItem.vodPubdate || "").substring(0, 4));
-      return item(this.sourceKey, { id: rawItem.vodId, title: rawItem.vodName, pic: rawItem.vodPic, year, type: rawItem.vodArea, remarks: rawItem.vodRemarks });
-    });
-  }
-  async searchFiltered(kind: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
-    const t = String(Date.now());
-    const areaMap: Record<string, string> = { 日漫: "日本", 国漫: "中国大陆", 欧美: "美国" };
-    const area = filters.area || areaMap[kind] || "";
-    const year = filters.year || "";
-    const path = `/api/mw-movie/anonymous/video/list?type1=4&pageNum=${page}&area=${encodeURIComponent(area)}&year=${encodeURIComponent(year)}`;
-    const raw = `area=${area}&pageNum=${page}&type1=4&year=${year}&key=${key}&t=${t}`;
-    const data = await this.call(path, raw, t, signal);
-    const list = data.data?.list;
-    return (Array.isArray(list) ? list : []).map((rawItem: Json) => {
-      const yr = yearNum(rawItem.vodYear) || yearNum(String(rawItem.vodPubdate || "").substring(0, 4));
-      return item(this.sourceKey, { id: rawItem.vodId, title: rawItem.vodName, pic: rawItem.vodPic, year: yr, type: rawItem.vodArea, remarks: rawItem.vodRemarks });
-    });
+    return (Array.isArray(list) ? list : []).filter((value: Json) => !query || Number(value.typeId1) === 4).map((rawItem: Json) => item(this.sourceKey, { id: rawItem.vodId, title: rawItem.vodName, pic: rawItem.vodPic, year: rawItem.vodYear, type: rawItem.vodArea, remarks: rawItem.vodRemarks }));
   }
   async home(signal: AbortSignal): Promise<HomeSection[]> {
-    const buckets = [
-      { title: "最新动漫", key: "", area: "" },
-      { title: "日本番", key: "日本", area: "日本" },
-      { title: "国产动漫", key: "大陆", area: "中国大陆" },
-      { title: "欧美动漫", key: "", area: "美国" },
-    ];
-    const sections: HomeSection[] = [];
-    for (const b of buckets) {
-      const items = await this.searchFiltered("", b.area ? { area: b.area } : {}, 1, signal);
-      if (items.length) sections.push({ title: b.title, key: b.key, items: items.slice(0, 12) });
-    }
-    return sections;
+    const items = await this.search("", 1, signal);
+    return items.length ? [{ title: "最新动漫", key: "", items: items.slice(0, 12) }] : [];
   }
   async detail(id: string, signal: AbortSignal) {
     const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
-    const t = String(Date.now());
+    const t = String(Math.floor(Date.now() / 1000));
     const data = await this.call(`/api/mw-movie/anonymous/video/detail?id=${encodeURIComponent(id)}`, `id=${id}&key=${key}&t=${t}`, t, signal);
     const raw = data.data || {};
     const result = item(this.sourceKey, { id, title: raw.vodName, pic: raw.vodPic, year: raw.vodYear, type: raw.vodArea, desc: raw.vodContent, remarks: raw.vodRemarks });
@@ -575,13 +370,13 @@ export class JinpaiAdapter implements SourceAdapter {
   }
   async play(flag: Episode["flag"], signal: AbortSignal): Promise<PlayResult> {
     const key = process.env.JINPAI_KEY?.trim() || JINPAI_DEFAULT_KEY;
-    const t = String(Date.now());
+    const t = String(Math.floor(Date.now() / 1000));
     const id = String(flag.id || "");
     const nid = String(flag.nid || "");
     const data = await this.call(`/api/mw-movie/anonymous/v2/video/episode/url?id=${encodeURIComponent(id)}&nid=${encodeURIComponent(nid)}`, `id=${id}&nid=${nid}&key=${key}&t=${t}`, t, signal);
     const resolutions = (Array.isArray(data.data?.list) ? data.data.list : []).filter((raw: Json) => /^https?:/i.test(String(raw?.url || ""))).map((raw: Json, index: number) => quality(raw.resolutionName || raw.resolution, String(raw.url), index, raw));
     if (!resolutions.length) throw new Error("jinpai returned no resolution");
-    return { url: resolutions[0].url, type: resolutions[0].type, resolutions };
+    return { url: resolutions[0].url, type: resolutions[0].type, resolutions, referer: this.base(), headers: { Origin: this.base(), Referer: this.base(), "User-Agent": UA_CHROME } };
   }
 }
 
@@ -596,38 +391,10 @@ export class SanqiuAdapter implements SourceAdapter {
   }
   private async call(path: string, signal: AbortSignal): Promise<Json> { return requestJson(`${this.base()}${path}`, signal, this.headers()); }
   async search(query: string, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const tabArea: Record<string, string> = { 动漫: "", 日本: "日本", 大陆: "大陆" };
-    if (query && tabArea[query] !== undefined) {
-      return this.searchFiltered(query, {}, page, signal);
-    }
     const path = query ? `/api.php/app/search/index?wd=${encodeURIComponent(query)}&page=${page}&limit=15` : `/api.php/app/filter/vod?type_name=%E5%8A%A8%E6%BC%AB&sort=time&page=${page}`;
     const data = await this.call(path, signal);
     const list = Array.isArray(data.data) ? data.data : [];
     return list.filter((raw: Json) => !query || String(raw.type_name || "动漫") === "动漫").map((raw: Json) => item(this.sourceKey, raw));
-  }
-  async searchFiltered(kind: string, filters: Record<string, string>, page: number, signal: AbortSignal): Promise<SourceItem[]> {
-    const areaMap: Record<string, string> = { 日漫: "日本", 国漫: "大陆", 欧美: "欧美" };
-    const area = areaMap[kind] || "";
-    const year = filters.year || "";
-    const sort = filters.sort || "time";
-    const params = new URLSearchParams({
-      type_name: "动漫",
-      page: String(page),
-      sort: sort,
-    });
-    if (area) params.set("area", area);
-    if (year) params.set("year", year);
-    const data = await this.call(`/api.php/app/filter/vod?${params}`, signal);
-    const list = Array.isArray(data.data) ? data.data : [];
-    const fixed = list.map((raw: Json) => {
-      const pic = String(raw.vod_pic || raw.pic || "");
-      if (pic.includes("zxki.cn/api/imgfdl?url=")) {
-        const m = pic.match(/zxki\.cn\/api\/imgfdl\?url=(.+)$/);
-        if (m) raw = { ...raw, vod_pic: `https://cms.meilinvps.com/img.php?url=${m[1]}`, pic: `https://cms.meilinvps.com/img.php?url=${m[1]}` };
-      }
-      return item(this.sourceKey, raw);
-    });
-    return fixed;
   }
   async home(signal: AbortSignal): Promise<HomeSection[]> {
     const items = await this.search("", 1, signal);

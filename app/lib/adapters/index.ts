@@ -1,33 +1,14 @@
 import type { SourceAdapter } from "./types";
 import { nativeAdapters } from "./native";
 import { remoteAdapters } from "./remote";
-import { extraAdapters } from "./extra-sources";
-import { createJsAdapter } from "./js-source";
-import { SOURCES } from "../sources";
+import { CompleteScriptAdapter } from "./script-worker";
 
 export const sourceAdapters: Record<string, SourceAdapter> = {
   ...nativeAdapters,
   ...remoteAdapters,
-  ...extraAdapters,
+  guazi: new CompleteScriptAdapter("guazi", "guazi.js"),
+  shuangxing: new CompleteScriptAdapter("shuangxing", "shuangxing.js"),
+  akianime: new CompleteScriptAdapter("akianime", "akianime.js"),
+  lmm85: new CompleteScriptAdapter("lmm85", "lmm85.js"),
+  dmbus: new CompleteScriptAdapter("dmbus", "dmbus.js"),
 };
-
-for (const source of SOURCES) {
-  if (source.runtime === "js-worker" || !source.adapter) {
-    if (!sourceAdapters[source.key]) {
-      try {
-        sourceAdapters[source.key] = createJsAdapter(source.key, source.localFile);
-      } catch {
-        // Source file missing or cannot be loaded — skip
-      }
-    }
-  } else {
-    const adapterKey = source.adapter;
-    if (!sourceAdapters[adapterKey]) {
-      try {
-        sourceAdapters[adapterKey] = createJsAdapter(source.key, source.localFile);
-      } catch {
-        // Source file missing or cannot be loaded — skip
-      }
-    }
-  }
-}

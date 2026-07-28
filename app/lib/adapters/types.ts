@@ -6,9 +6,6 @@ export type SourceItem = {
   title: string;
   year?: string;
   kind?: string;
-  tags?: string[];
-  status?: string;
-  score?: string;
   cover?: string;
   description?: string;
   sourceCount: number;
@@ -21,8 +18,6 @@ export type SourceVariant = {
   title: string;
   year?: string;
   kind?: string;
-  tags?: string[];
-  status?: string;
   cover?: string;
   description?: string;
 };
@@ -47,8 +42,6 @@ export type CanonicalMedia = {
   title: string;
   year?: string;
   kind?: string;
-  tags?: string[];
-  status?: string;
   score?: string;
   cover?: string;
   description?: string;
@@ -84,8 +77,6 @@ export type PlayResult = {
   resolutions?: QualityOption[];
   expiresAt?: string;
 };
-
-export type HomeSection = { title: string; key: string; items: SourceItem[] };
 
 export interface SourceAdapter {
   readonly sourceKey?: string;

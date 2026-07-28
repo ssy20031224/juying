@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Episode, MediaType, PlayResult, SourceAdapter, SourceItem, HomeSection } from "./types";
+import type { Episode, MediaType, PlayResult, SourceAdapter, SourceItem } from "./types";
+import type { HomeSection } from "./native";
 
 type AnyObject = Record<string, unknown>;
 const bundledScripts = import.meta.glob("../../../config/source-scripts/*.js", { query: "?raw", import: "default", eager: true }) as Record<string, string>;

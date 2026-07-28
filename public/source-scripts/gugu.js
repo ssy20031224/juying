@@ -121,7 +121,7 @@ function toItem(v) {
         id: (v.vod_id == null) ? '' : String(v.vod_id),
         name: decodeEntities(v.vod_name || ''),
         pic: v.vod_pic || '',
-        type: limitCats(v.vod_class || v.type_name || '', 99),
+        type: limitCats(v.vod_class || v.type_name || '', 2),
         year: v.vod_year || '',
         remarks: decodeEntities(v.vod_remarks || ''),
         desc: ''
@@ -263,7 +263,7 @@ function detail(id) {
         var d = dj.vod || {};
         out.name    = decodeEntities(d.vod_name || '');
         out.pic     = d.vod_pic || '';
-        out.type    = limitCats(d.vod_class || '', 99);
+        out.type    = limitCats(d.vod_class || '', 2);
         out.year    = d.vod_year || '';
         out.remarks = decodeEntities(d.vod_remarks || '');
         out.desc    = trim(decodeEntities(stripTags(d.vod_content || '')));
