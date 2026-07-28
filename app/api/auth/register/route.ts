@@ -10,11 +10,12 @@ import {
   publicUser,
   sessionCookie,
 } from "../../../lib/auth";
+import { consumeVerificationCode } from "../../../lib/email";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  let body: { email?: unknown; password?: unknown; nickname?: unknown };
+  let body: { email?: unknown; password?: unknown; nickname?: unknown; code?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -23,6 +24,7 @@ export async function POST(request: Request) {
 
   const email = normalizeEmail(String(body.email ?? ""));
   const password = String(body.password ?? "");
+  const code = String(body.code ?? "").trim();
   const nickname = normalizeNickname(String(body.nickname ?? "")) || `漫友_${Math.floor(1000 + Math.random() * 9000)}`;
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -34,11 +36,17 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  if (!code) {
+    return Response.json({ error: "email verification code required" }, { status: 400 });
+  }
 
   const db = await getDb();
   const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
   if (existing.length > 0) {
     return Response.json({ error: "email already registered" }, { status: 409 });
+  }
+  if (!(await consumeVerificationCode(email, "register", code))) {
+    return Response.json({ error: "invalid or expired email verification code" }, { status: 400 });
   }
 
   const user = {
@@ -46,6 +54,7 @@ export async function POST(request: Request) {
     email,
     passwordHash: await hashPassword(password),
     nickname,
+    avatarUrl: "",
   };
   await db.insert(users).values(user);
 

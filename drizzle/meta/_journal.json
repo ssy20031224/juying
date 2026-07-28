@@ -15,6 +15,13 @@
       "when": 1785213511382,
       "tag": "0001_certain_blonde_phantom",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785215525907,
+      "tag": "0002_big_typhoid_mary",
+      "breakpoints": true
     }
   ]
 }

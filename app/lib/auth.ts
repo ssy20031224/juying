@@ -10,6 +10,7 @@ export type AuthUser = {
   id: string;
   email: string;
   nickname: string;
+  avatarUrl: string;
 };
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -170,6 +171,7 @@ export async function getCurrentUser(request: Request): Promise<AuthUser | null>
       id: users.id,
       email: users.email,
       nickname: users.nickname,
+      avatarUrl: users.avatarUrl,
     })
     .from(authSessions)
     .innerJoin(users, eq(authSessions.userId, users.id))
@@ -192,5 +194,6 @@ export function publicUser(user: AuthUser) {
     id: user.id,
     email: user.email,
     nickname: user.nickname,
+    avatarUrl: user.avatarUrl,
   };
 }

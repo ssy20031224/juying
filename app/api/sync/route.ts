@@ -71,6 +71,8 @@ export async function POST(request: Request) {
     favorites?: unknown;
     progress?: unknown;
     deviceCache?: unknown;
+    replaceFavorites?: unknown;
+    replaceProgress?: unknown;
   };
   try {
     body = await request.json();
@@ -84,6 +86,12 @@ export async function POST(request: Request) {
   const db = await getDb();
 
   await db.transaction(async (tx) => {
+    if (body.replaceFavorites === true) {
+      await tx.delete(favorites).where(eq(favorites.userId, user.id));
+    }
+    if (body.replaceProgress === true) {
+      await tx.delete(watchProgress).where(eq(watchProgress.userId, user.id));
+    }
     for (const raw of favoriteItems) {
       if (!raw || typeof raw !== "object") continue;
       const item = raw as Record<string, unknown>;

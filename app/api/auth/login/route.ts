@@ -31,7 +31,7 @@ export async function POST(request: Request) {
   const token = await createSession(user.id);
   return new Response(
     JSON.stringify({
-      user: publicUser({ id: user.id, email: user.email, nickname: user.nickname }),
+      user: publicUser({ id: user.id, email: user.email, nickname: user.nickname, avatarUrl: user.avatarUrl }),
       token,
     }),
     {

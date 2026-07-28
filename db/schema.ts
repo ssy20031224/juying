@@ -17,6 +17,7 @@ export const users = sqliteTable(
     email: text("email").notNull(),
     passwordHash: text("password_hash").notNull(),
     nickname: text("nickname").notNull(),
+    avatarUrl: text("avatar_url").notNull().default(""),
     createdAt: integer("created_at").notNull().default(now()),
     updatedAt: integer("updated_at").notNull().default(now()),
   },
@@ -38,6 +39,23 @@ export const authSessions = sqliteTable(
     uniqueIndex("auth_sessions_token_unique").on(table.tokenHash),
     index("auth_sessions_user_idx").on(table.userId),
     index("auth_sessions_expires_idx").on(table.expiresAt),
+  ],
+);
+
+export const verificationCodes = sqliteTable(
+  "verification_codes",
+  {
+    id: text("id").primaryKey(),
+    email: text("email").notNull(),
+    purpose: text("purpose").notNull(),
+    codeHash: text("code_hash").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    consumedAt: integer("consumed_at"),
+    createdAt: integer("created_at").notNull().default(now()),
+  },
+  (table) => [
+    index("verification_codes_email_purpose_idx").on(table.email, table.purpose),
+    index("verification_codes_expires_idx").on(table.expiresAt),
   ],
 );
 

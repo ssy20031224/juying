@@ -1,0 +1,32 @@
+import { eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import { getDb } from "../../../../db";
+import { users } from "../../../../db/schema";
+import { consumeVerificationCode } from "../../../lib/email";
+import { getCurrentUser, normalizeEmail, publicUser } from "../../../lib/auth";
+
+export const dynamic = "force-dynamic";
+
+export async function POST(request: Request) {
+  const current = await getCurrentUser(request);
+  if (!current) return NextResponse.json({ error: "authentication required" }, { status: 401 });
+  let body: { email?: unknown; code?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "invalid json" }, { status: 400 });
+  }
+  const email = normalizeEmail(String(body.email ?? ""));
+  const code = String(body.code ?? "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !code) {
+    return NextResponse.json({ error: "email and verification code required" }, { status: 400 });
+  }
+  const db = await getDb();
+  const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+  if (existing.length > 0) return NextResponse.json({ error: "email already registered" }, { status: 409 });
+  if (!(await consumeVerificationCode(email, "change-email", code))) {
+    return NextResponse.json({ error: "invalid or expired email verification code" }, { status: 400 });
+  }
+  await db.update(users).set({ email, updatedAt: Math.floor(Date.now() / 1000) }).where(eq(users.id, current.id));
+  return NextResponse.json({ user: publicUser({ ...current, email }) });
+}

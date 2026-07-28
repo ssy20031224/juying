@@ -6,8 +6,11 @@ import android.app.Application
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -58,6 +61,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -319,9 +323,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "登录成功，正在同步本机数据"
-                    val remote = accountRepository.sync(result.token, favoritesList, historyList)
+                    val remote = accountRepository.pull(result.token)
                     storageManager.mergeCloudData(remote.favorites, remote.history)
                     reloadStorageData()
+                    accountRepository.sync(result.token, favoritesList, historyList)
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "登录失败"
@@ -331,13 +336,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun registerAccount(email: String, password: String, nickname: String) {
+    fun requestAccountCode(email: String, purpose: String) {
         if (accountBusy) return
         viewModelScope.launch {
             accountBusy = true
             accountMessage = ""
             try {
-                val result = accountRepository.register(email, password, nickname)
+                accountRepository.requestCode(email, purpose)
+                accountMessage = "验证码已发送，请检查邮箱"
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "验证码发送失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun registerAccount(email: String, password: String, confirmPassword: String, nickname: String, code: String) {
+        if (accountBusy) return
+        if (password != confirmPassword) {
+            accountMessage = "两次输入的密码不一致"
+            return
+        }
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                val result = accountRepository.register(email, password, nickname, code)
                 if (result.user == null || result.token.isNullOrBlank()) {
                     accountMessage = result.error ?: "注册失败"
                 } else {
@@ -346,12 +371,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "注册成功，已同步本机数据"
-                    val remote = accountRepository.sync(result.token, favoritesList, historyList)
+                    val remote = accountRepository.pull(result.token)
                     storageManager.mergeCloudData(remote.favorites, remote.history)
                     reloadStorageData()
+                    accountRepository.sync(result.token, favoritesList, historyList)
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "注册失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun resetAccountPassword(email: String, code: String, password: String, confirmPassword: String) {
+        if (accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                accountRepository.resetPassword(email, code, password, confirmPassword)
+                accountMessage = "密码已重置，请使用新密码登录"
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "密码重置失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun changeAccountEmail(email: String, code: String) {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank() || accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                val result = accountRepository.changeEmail(token, email, code)
+                if (result.user != null) {
+                    accountUser = result.user
+                    updateUserEmail(result.user.email)
+                    accountMessage = "邮箱修改成功"
+                } else {
+                    accountMessage = result.error ?: "邮箱修改失败"
+                }
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "邮箱修改失败"
             } finally {
                 accountBusy = false
             }
@@ -365,6 +430,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             storageManager.clearAuthToken()
             accountUser = null
             accountMessage = "已退出云端账号，本机数据仍保留"
+        }
+    }
+
+    fun uploadAccountAvatar(uri: Uri) {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank() || accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            val resolver = getApplication<Application>().contentResolver
+            val extension = when (resolver.getType(uri)) {
+                "image/png" -> "png"
+                "image/webp" -> "webp"
+                "image/gif" -> "gif"
+                else -> "jpg"
+            }
+            val file = File(getApplication<Application>().cacheDir, "avatar_upload_${System.currentTimeMillis()}.$extension")
+            try {
+                resolver.openInputStream(uri)?.use { input ->
+                    file.outputStream().use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("无法读取图片")
+                val result = accountRepository.uploadAvatar(token, file)
+                if (result.user != null) {
+                    accountUser = result.user
+                    accountMessage = "头像上传成功"
+                } else {
+                    accountMessage = result.error ?: "头像上传失败"
+                }
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "头像上传失败"
+            } finally {
+                file.delete()
+                accountBusy = false
+            }
         }
     }
 
@@ -408,6 +507,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addComment() {
+        if (accountUser == null) {
+            accountMessage = "请先登录后发表评论"
+            return
+        }
         val text = commentDraft.trim()
         if (text.isEmpty()) return
         commentDraft = ""
@@ -500,6 +603,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun reloadStorageData() {
         historyList = storageManager.getHistory()
         favoritesList = storageManager.getFavorites()
+    }
+
+    private fun syncAccountData() {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank() || accountUser == null) return
+        viewModelScope.launch {
+            runCatching { accountRepository.sync(token, favoritesList, historyList) }
+        }
     }
 
     fun loadHome() {
@@ -1339,8 +1450,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.Main) {
                     isPlayLoading = false
                     currentPlayResult = cachedPlay
-                    storageManager.addHistory(detail.item, ep.name, cachedPlay.url)
-                    reloadStorageData()
+                    if (accountUser != null) {
+                        storageManager.addHistory(detail.item, ep.name, cachedPlay.url)
+                        reloadStorageData()
+                        syncAccountData()
+                    }
                     notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 }
@@ -1362,8 +1476,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                     ResultCache.putPlay(playCacheKey, playResult)  // Cache for instant replay
                     currentPlayResult = playResult
-                    storageManager.addHistory(detail.item, ep.name, playResult.url)
-                    reloadStorageData()
+                    if (accountUser != null) {
+                        storageManager.addHistory(detail.item, ep.name, playResult.url)
+                        reloadStorageData()
+                        syncAccountData()
+                    }
                     notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 } else {
@@ -1636,12 +1753,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(item: SourceItem) {
+        if (accountUser == null) {
+            accountMessage = "请先登录后使用收藏"
+            return
+        }
         storageManager.toggleFavorite(item)
         reloadStorageData()
+        syncAccountData()
     }
 
     fun isFavorite(item: SourceItem): Boolean {
-        return storageManager.isFavorite(item)
+        return accountUser != null && storageManager.isFavorite(item)
     }
 
     fun clearHistory() {
@@ -3096,6 +3218,178 @@ fun ActionButton(
 }
 
 @Composable
+fun AccountEntryCard(vm: MainViewModel) {
+    var dialogVisible by remember { mutableStateOf(false) }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
+                color = AppColors.text,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (vm.accountUser == null) "未登录时观看和离线缓存仍可使用，登录后开启账号数据同步。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
+                color = AppColors.muted,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(10.dp))
+            if (vm.accountUser == null) {
+                Button(
+                    onClick = { dialogVisible = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("登录 / 注册") }
+            } else {
+                OutlinedButton(onClick = { vm.logoutAccount() }) { Text("退出云端账号") }
+            }
+            if (vm.accountMessage.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
+            }
+        }
+    }
+    if (dialogVisible) {
+        AccountDialog(vm) { dialogVisible = false }
+    }
+}
+
+@Composable
+fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+    var registering by remember { mutableStateOf(false) }
+    var forgot by remember { mutableStateOf(false) }
+    var email by remember { mutableStateOf(vm.userEmail) }
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var nickname by remember { mutableStateOf(vm.commentNick) }
+    var code by remember { mutableStateOf("") }
+
+    LaunchedEffect(vm.accountUser) {
+        if (vm.accountUser != null) onDismiss()
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = AppColors.panel,
+            tonalElevation = 8.dp,
+            modifier = Modifier.fillMaxWidth().padding(8.dp)
+        ) {
+            Column(
+                Modifier.padding(20.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when {
+                            forgot -> "重置密码"
+                            registering -> "注册账号"
+                            else -> "登录账号"
+                        },
+                        color = AppColors.text,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭", tint = AppColors.muted)
+                    }
+                }
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("邮箱") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (registering) {
+                    OutlinedTextField(
+                        value = nickname,
+                        onValueChange = { nickname = it.take(24) },
+                        label = { Text("昵称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                if (forgot || registering) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = code,
+                            onValueChange = { code = it.take(6) },
+                            label = { Text("邮箱验证码") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = {
+                                vm.requestAccountCode(email, if (forgot) "reset-password" else "register")
+                            },
+                            enabled = !vm.accountBusy && isValidEmail(email)
+                        ) { Text("获取验证码") }
+                    }
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(if (forgot) "新密码" else "密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (registering || forgot) {
+                    OutlinedTextField(
+                        value = confirmPassword,
+                        onValueChange = { confirmPassword = it },
+                        label = { Text("确认密码") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Button(
+                    onClick = {
+                        when {
+                            forgot -> vm.resetAccountPassword(email, code, password, confirmPassword)
+                            registering -> vm.registerAccount(email, password, confirmPassword, nickname, code)
+                            else -> vm.loginAccount(email, password)
+                        }
+                    },
+                    enabled = !vm.accountBusy && isValidEmail(email) &&
+                        (if (forgot || registering) code.length == 6 && isPasswordStrong(password) && password == confirmPassword
+                        else password.isNotBlank()),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (forgot) "重置密码" else if (registering) "注册并同步" else "登录并同步")
+                }
+                TextButton(
+                    onClick = {
+                        forgot = false
+                        registering = !registering
+                        code = ""
+                    },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                ) { Text(if (registering) "已有账号？返回登录" else "没有账号？注册") }
+                if (!registering && !forgot) {
+                    TextButton(
+                        onClick = { forgot = true; code = "" },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    ) { Text("忘记密码？") }
+                }
+                if (vm.accountMessage.isNotBlank()) {
+                    Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun ProfileView(vm: MainViewModel) {
     val avatars = listOf("👤", "🦊", "🐲", "🐱")
     val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
@@ -3117,7 +3411,16 @@ fun ProfileView(vm: MainViewModel) {
                         color = AppColors.cyan.copy(alpha = 0.2f),
                         modifier = Modifier.size(56.dp)
                     ) {
-                        AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
+                        if (!vm.accountUser?.avatarUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = vm.accountUser?.avatarUrl,
+                                contentDescription = "账号头像",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
+                        }
                     }
                     Spacer(Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
@@ -3133,85 +3436,7 @@ fun ProfileView(vm: MainViewModel) {
             Spacer(Modifier.height(16.dp))
         }
 
-        item {
-            var accountEmail by remember { mutableStateOf(vm.userEmail) }
-            var accountPassword by remember { mutableStateOf("") }
-            var accountNickname by remember { mutableStateOf(vm.commentNick) }
-            var registering by remember { mutableStateOf(false) }
-            Card(
-                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
-                        color = AppColors.text,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        if (vm.accountUser == null) "未登录时继续使用本机数据；登录后自动合并到账号。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
-                        color = AppColors.muted,
-                        fontSize = 12.sp
-                    )
-                    if (vm.accountUser == null) {
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = accountEmail,
-                            onValueChange = { accountEmail = it },
-                            label = { Text("邮箱") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        if (registering) {
-                            OutlinedTextField(
-                                value = accountNickname,
-                                onValueChange = { accountNickname = it.take(24) },
-                                label = { Text("昵称") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(8.dp))
-                        }
-                        OutlinedTextField(
-                            value = accountPassword,
-                            onValueChange = { accountPassword = it },
-                            label = { Text("密码") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    if (registering) vm.registerAccount(accountEmail, accountPassword, accountNickname)
-                                    else vm.loginAccount(accountEmail, accountPassword)
-                                },
-                                enabled = !vm.accountBusy && isValidEmail(accountEmail) && isPasswordStrong(accountPassword),
-                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
-                            ) {
-                                Text(if (registering) "注册并同步" else "登录并同步")
-                            }
-                            TextButton(onClick = { registering = !registering }) {
-                                Text(if (registering) "已有账号？登录" else "没有账号？注册")
-                            }
-                        }
-                    } else {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(onClick = { vm.logoutAccount() }) { Text("退出云端账号") }
-                    }
-                    if (vm.accountMessage.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
-                    }
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-        }
+        item { AccountEntryCard(vm) }
 
         // Secondary Entrance Buttons (二级界面入口)
         item {
@@ -3220,17 +3445,23 @@ fun ProfileView(vm: MainViewModel) {
 
             ProfileEntryCard(
                 title = "观看历史",
-                subtitle = "已播放 ${vm.historyList.size} 条记录",
+                subtitle = if (vm.accountUser == null) "登录后查看云端记录" else "已播放 ${vm.historyList.size} 条记录",
                 icon = Icons.Default.Refresh,
-                onClick = { vm.view = "profile_history" }
+                onClick = {
+                    if (vm.accountUser == null) vm.accountMessage = "登录后才能查看观看记录"
+                    else vm.view = "profile_history"
+                }
             )
             Spacer(Modifier.height(8.dp))
 
             ProfileEntryCard(
                 title = "我的追番 / 收藏",
-                subtitle = "已收藏 ${vm.favoritesList.size} 部作品",
+                subtitle = if (vm.accountUser == null) "登录后查看云端收藏" else "已收藏 ${vm.favoritesList.size} 部作品",
                 icon = Icons.Default.Favorite,
-                onClick = { vm.view = "profile_favorites" }
+                onClick = {
+                    if (vm.accountUser == null) vm.accountMessage = "登录后才能查看收藏"
+                    else vm.view = "profile_favorites"
+                }
             )
             Spacer(Modifier.height(8.dp))
 
@@ -3329,6 +3560,10 @@ fun ProfileEntryCard(title: String, subtitle: String, icon: androidx.compose.ui.
 
 @Composable
 fun HistoryScreen(vm: MainViewModel) {
+    if (vm.accountUser == null) {
+        LoginRequiredScreen(vm, "登录后查看观看记录")
+        return
+    }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3387,6 +3622,10 @@ fun HistoryScreen(vm: MainViewModel) {
 
 @Composable
 fun FavoritesScreen(vm: MainViewModel) {
+    if (vm.accountUser == null) {
+        LoginRequiredScreen(vm, "登录后查看收藏")
+        return
+    }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3436,6 +3675,23 @@ fun FavoritesScreen(vm: MainViewModel) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun LoginRequiredScreen(vm: MainViewModel, title: String) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Default.Lock, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(48.dp))
+        Spacer(Modifier.height(12.dp))
+        Text(title, color = AppColors.text, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = { vm.view = "profile" }, colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)) {
+            Text("去登录")
         }
     }
 }
@@ -3659,7 +3915,11 @@ fun SearchResultScreen(vm: MainViewModel) {
 @Composable
 fun SettingsScreen(vm: MainViewModel) {
     var emailInput by remember { mutableStateOf(vm.userEmail) }
+    var emailCodeInput by remember { mutableStateOf("") }
     var emailSuccess by remember { mutableStateOf(false) }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.uploadAccountAvatar(uri)
+    }
 
     var oldPassInput by remember { mutableStateOf("") }
     var newPassInput by remember { mutableStateOf("") }
@@ -3803,6 +4063,15 @@ fun SettingsScreen(vm: MainViewModel) {
                             }
                         }
                     }
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = { avatarPicker.launch("image/*") },
+                        enabled = vm.accountUser != null && !vm.accountBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (vm.accountUser == null) "登录后上传头像" else "从相册上传头像（JPG/PNG）")
+                    }
                 }
             }
             Spacer(Modifier.height(16.dp))
@@ -3834,6 +4103,21 @@ fun SettingsScreen(vm: MainViewModel) {
                             unfocusedBorderColor = AppColors.muted.copy(alpha = 0.3f)
                         )
                     )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = emailCodeInput,
+                            onValueChange = { emailCodeInput = it.take(6); emailSuccess = false },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("邮箱验证码") },
+                            singleLine = true
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = { vm.requestAccountCode(emailInput, "change-email") },
+                            enabled = vm.accountUser != null && validEmail && !vm.accountBusy
+                        ) { Text("获取验证码") }
+                    }
 
                     if (emailInput.isNotEmpty() && !validEmail) {
                         Spacer(Modifier.height(4.dp))
@@ -3848,12 +4132,12 @@ fun SettingsScreen(vm: MainViewModel) {
                     Spacer(Modifier.height(10.dp))
                     Button(
                         onClick = {
-                            if (validEmail) {
-                                vm.updateUserEmail(emailInput)
-                                emailSuccess = true
+                            if (validEmail && emailCodeInput.length == 6) {
+                                vm.changeAccountEmail(emailInput, emailCodeInput)
+                                emailSuccess = false
                             }
                         },
-                        enabled = validEmail && emailInput != vm.userEmail,
+                        enabled = vm.accountUser != null && validEmail && emailCodeInput.length == 6 && emailInput != vm.userEmail,
                         colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                         modifier = Modifier.align(Alignment.End)
                     ) {
@@ -3874,17 +4158,23 @@ fun SettingsScreen(vm: MainViewModel) {
                 Column(Modifier.padding(16.dp)) {
                     Text("账户密码修改", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                     Spacer(Modifier.height(4.dp))
-                    Text("密码规则：至少8位，且须包含大写字母、小写字母、数字、特殊字符中的至少3种", color = AppColors.muted, fontSize = 12.sp)
+                    Text("修改密码前需要验证当前账号邮箱。密码至少8位，并包含四类字符中的至少3种。", color = AppColors.muted, fontSize = 12.sp)
                     Spacer(Modifier.height(12.dp))
 
-                    OutlinedTextField(
-                        value = oldPassInput,
-                        onValueChange = { oldPassInput = it; passSuccess = false },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("当前原密码") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = oldPassInput,
+                            onValueChange = { oldPassInput = it.take(6); passSuccess = false },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("邮箱验证码") },
+                            singleLine = true
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = { vm.requestAccountCode(vm.accountUser?.email.orEmpty(), "reset-password") },
+                            enabled = vm.accountUser != null && !vm.accountBusy
+                        ) { Text("获取验证码") }
+                    }
                     Spacer(Modifier.height(8.dp))
 
                     val isStrong = isPasswordStrong(newPassInput)
@@ -3927,14 +4217,16 @@ fun SettingsScreen(vm: MainViewModel) {
                     Button(
                         onClick = {
                             if (isStrong && passMatches) {
-                                vm.updateUserPassword(newPassInput)
-                                passSuccess = true
-                                oldPassInput = ""
-                                newPassInput = ""
-                                confirmPassInput = ""
+                                vm.resetAccountPassword(
+                                    vm.accountUser?.email.orEmpty(),
+                                    oldPassInput,
+                                    newPassInput,
+                                    confirmPassInput
+                                )
+                                passSuccess = false
                             }
                         },
-                        enabled = isStrong && passMatches && newPassInput.isNotEmpty(),
+                        enabled = vm.accountUser != null && oldPassInput.length == 6 && isStrong && passMatches && newPassInput.isNotEmpty(),
                         colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                         modifier = Modifier.align(Alignment.End)
                     ) {
