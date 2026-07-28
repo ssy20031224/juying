@@ -80,6 +80,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -88,6 +89,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.juying.app.AppColors
 import com.juying.app.R
 import com.juying.app.source.Episode
+import com.juying.app.source.QualityOption
 import com.juying.app.source.SourceLogManager
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -335,6 +337,7 @@ fun EmbeddedVideoPlayer(
     type: String,
     headers: Map<String, String>?,
     referer: String?,
+    qualities: List<QualityOption> = emptyList(),
     title: String,
     episodeName: String,
     episodes: List<Episode> = emptyList(),
@@ -382,6 +385,24 @@ fun EmbeddedVideoPlayer(
     var blockColor by remember { mutableStateOf(false) }
     var danmakuAreaRatio by remember { mutableStateOf(1.0f) }
     var danmakuFontSizeScale by remember { mutableStateOf(1.0f) }
+
+    val adaptiveStream = remember(url, type) {
+        val lowerUrl = url.lowercase()
+        val lowerType = type.lowercase()
+        lowerUrl.contains(".m3u8") ||
+            lowerType.contains("m3u8") ||
+            lowerType.contains("hls") ||
+            lowerType.contains("application/x-mpegurl")
+    }
+    val qualityChoices = remember(qualities, adaptiveStream) {
+        if (qualities.isNotEmpty()) {
+            listOf("Auto") + qualities.map { it.name }.filter { it.isNotBlank() }.distinct()
+        } else if (adaptiveStream) {
+            listOf("Auto", "4K", "1080p", "720p", "480p")
+        } else {
+            listOf("Auto")
+        }
+    }
 
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showRatioMenu by remember { mutableStateOf(false) }
@@ -489,28 +510,26 @@ fun EmbeddedVideoPlayer(
     val playbackKey = remember(url, type, headers, referer) {
         listOf(url, type, referer ?: "", headers?.toSortedMap()?.entries?.joinToString(";") { "${it.key}=${it.value}" } ?: "").joinToString("|")
     }
-    val exoPlayer = remember(playbackKey) {
-        val cleanUrl = url.trim()
-        val requestHeaders = mutableMapOf<String, String>()
-        referer?.let {
-            if (it.isNotBlank() && !it.equals("never", ignoreCase = true)) {
-                requestHeaders["Referer"] = it
+    val requestHeaders = remember(playbackKey) {
+        mutableMapOf<String, String>().apply {
+            referer?.let {
+                if (it.isNotBlank() && !it.equals("never", ignoreCase = true)) {
+                    put("Referer", it)
+                }
+            }
+            headers?.forEach { (k, v) ->
+                if (v.isNotBlank() && !(k.equals("Referer", true) && v.equals("never", true))) {
+                    put(k, v)
+                }
             }
         }
-        headers?.forEach { (k, v) ->
-            if (v.isNotBlank() && !(k.equals("Referer", true) && v.equals("never", true))) {
-                requestHeaders[k] = v
-            }
-        }
-
-        val customUa = requestHeaders.entries.firstOrNull { it.key.equals("user-agent", ignoreCase = true) }?.let {
-            requestHeaders.remove(it.key)
-            it.value
-        }
-        val finalUa = customUa ?: BROWSER_UA
-
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            setUserAgent(finalUa)
+    }
+    val httpDataSourceFactory = remember(playbackKey) {
+        val customUa = requestHeaders.entries.firstOrNull {
+            it.key.equals("user-agent", ignoreCase = true)
+        }?.value
+        DefaultHttpDataSource.Factory().apply {
+            setUserAgent(customUa ?: BROWSER_UA)
             setAllowCrossProtocolRedirects(true)
             setConnectTimeoutMs(15000)
             setReadTimeoutMs(15000)
@@ -518,19 +537,22 @@ fun EmbeddedVideoPlayer(
                 setDefaultRequestProperties(requestHeaders)
             }
         }
-
-        val uri = Uri.parse(cleanUrl)
-        val mediaItem = MediaItem.fromUri(uri)
-        val isHls = cleanUrl.lowercase().contains(".m3u8") ||
-                    type.lowercase().contains("m3u8") ||
-                    type.lowercase().contains("hls") ||
-                    type.lowercase().contains("application/x-mpegurl")
-
-        val mediaSource = if (isHls) {
+    }
+    fun createMediaSource(targetUrl: String, targetType: String): MediaSource {
+        val cleanUrl = targetUrl.trim()
+        val mediaItem = MediaItem.fromUri(Uri.parse(cleanUrl))
+        val targetIsHls = cleanUrl.lowercase().contains(".m3u8") ||
+            targetType.lowercase().contains("m3u8") ||
+            targetType.lowercase().contains("hls") ||
+            targetType.lowercase().contains("application/x-mpegurl")
+        return if (targetIsHls) {
             HlsMediaSource.Factory(httpDataSourceFactory).createMediaSource(mediaItem)
         } else {
             ProgressiveMediaSource.Factory(httpDataSourceFactory).createMediaSource(mediaItem)
         }
+    }
+
+    val exoPlayer = remember(playbackKey) {
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
@@ -548,9 +570,12 @@ fun EmbeddedVideoPlayer(
             .setLoadControl(loadControl)
             .build()
             .apply {
-            setMediaSource(mediaSource)
+            setMediaSource(createMediaSource(url, type))
             prepare()
-            playWhenReady = true
+            // Wait until AndroidView has attached the TextureView surface.
+            // Starting the decoder before a surface exists can produce audio
+            // with a black frame until a fullscreen relayout rebinds it.
+            playWhenReady = false
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
@@ -568,7 +593,7 @@ fun EmbeddedVideoPlayer(
                         "player",
                         "播放失败",
                         "${error.errorCodeName}: ${error.message ?: "unknown"}",
-                        "url=${cleanUrl.take(300)} type=$type headers=${requestHeaders.keys.joinToString(",")}"
+                        "url=${url.trim().take(300)} type=$type headers=${requestHeaders.keys.joinToString(",")}"
                     )
                     playError = true
                     onError()
@@ -606,6 +631,16 @@ fun EmbeddedVideoPlayer(
     }
 
     LaunchedEffect(selectedQuality) {
+        val selectedVariant = qualities.firstOrNull { it.name == selectedQuality }
+        if (selectedVariant != null) {
+            // Concrete variants are switched by replacing the media source;
+            // constraints are only useful for adaptive HLS/DASH streams.
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                .buildUpon()
+                .clearVideoSizeConstraints()
+                .build()
+            return@LaunchedEffect
+        }
         val builder = exoPlayer.trackSelectionParameters.buildUpon()
         when (selectedQuality) {
             "4K" -> builder.setMaxVideoSize(3840, 2160)
@@ -615,6 +650,25 @@ fun EmbeddedVideoPlayer(
             else -> builder.clearVideoSizeConstraints()
         }
         exoPlayer.trackSelectionParameters = builder.build()
+    }
+
+    fun switchQuality(option: QualityOption?) {
+        val targetUrl = option?.url ?: url
+        val targetType = option?.type ?: type
+        if (targetUrl.isBlank() || targetUrl == exoPlayer.currentMediaItem?.localConfiguration?.uri?.toString()) {
+            return
+        }
+        val position = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val shouldPlay = exoPlayer.playWhenReady
+        try {
+            exoPlayer.setMediaSource(createMediaSource(targetUrl, targetType))
+            exoPlayer.prepare()
+            if (position > 0L) exoPlayer.seekTo(position)
+            exoPlayer.playWhenReady = shouldPlay
+        } catch (e: Exception) {
+            android.util.Log.w("EmbeddedPlayer", "quality switch failed: ${e.message}")
+            Toast.makeText(context, "清晰度切换失败，请稍后重试", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // 扫描线动画进度持久化：remember 一个 Animatable，保证中途取消后能接着当前位置回退
@@ -874,6 +928,7 @@ fun EmbeddedVideoPlayer(
                         .inflate(R.layout.juying_player_view, FrameLayout(ctx), false) as PlayerView).apply {
                         player = exoPlayer
                         useController = false
+                        setKeepContentOnPlayerReset(true)
                         isClickable = false
                         isFocusable = false
                         setOnTouchListener { _, _ -> false }
@@ -882,6 +937,15 @@ fun EmbeddedVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
+                        // Bind and lay out the TextureView before starting the
+                        // decoder. This avoids the first frame waiting for a
+                        // later fullscreen-induced relayout.
+                        post {
+                            player = exoPlayer
+                            requestLayout()
+                            invalidate()
+                            exoPlayer.playWhenReady = true
+                        }
                     }
                 },
                 update = { view ->
@@ -1400,11 +1464,13 @@ fun EmbeddedVideoPlayer(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            listOf("Auto", "4K", "1080p", "720p", "480p").forEach { quality ->
+                            qualityChoices.forEach { quality ->
                                 val active = selectedQuality == quality
                                 Surface(
                                     onClick = {
                                         selectedQuality = quality
+                                        val variant = qualities.firstOrNull { it.name == quality }
+                                        switchQuality(if (quality == "Auto") null else variant)
                                         showQualityMenu = false
                                     },
                                     shape = RoundedCornerShape(10.dp),
@@ -1419,6 +1485,21 @@ fun EmbeddedVideoPlayer(
                                     )
                                 }
                             }
+                        }
+                        if (qualities.isEmpty() && !adaptiveStream) {
+                            Text(
+                                "当前视频源只提供一条视频流，暂时没有可切换的独立清晰度。",
+                                color = AppColors.muted,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
+                        } else if (qualities.isNotEmpty()) {
+                            Text(
+                                "切换会复用当前来源的请求头，并尽量保持当前播放位置。",
+                                color = AppColors.muted,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(top = 14.dp),

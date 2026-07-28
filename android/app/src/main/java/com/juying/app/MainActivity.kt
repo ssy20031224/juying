@@ -2672,6 +2672,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     type = playResult.type,
                     headers = playResult.headers,
                     referer = playResult.referer,
+                    qualities = playResult.qualities,
                     title = detail.item.title,
                     episodeName = currentEpisode?.name.orEmpty(),
                     onBack = { vm.goBackFromPlayer() },

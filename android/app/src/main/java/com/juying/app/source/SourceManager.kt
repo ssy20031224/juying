@@ -611,11 +611,32 @@ class SourceAdapter(
                 if (!cookie.isNullOrBlank() && mergedHeaders.keys.none { it.equals("Cookie", true) }) {
                     mergedHeaders["Cookie"] = cookie
                 }
+                // Source scripts may return several concrete streams in
+                // `resolutions`. Preserve them so the player can really
+                // switch URL instead of only changing an ExoPlayer constraint
+                // on the already-selected stream.
+                val qualities = obj.get("resolutions")
+                    ?.takeIf { it.isJsonArray }
+                    ?.asJsonArray
+                    ?.mapNotNull { item ->
+                        if (!item.isJsonObject) return@mapNotNull null
+                        val q = item.asJsonObject
+                        val qUrl = q.get("url")?.asString?.trim().orEmpty()
+                        if (qUrl.isBlank()) return@mapNotNull null
+                        QualityOption(
+                            name = q.get("name")?.asString?.trim().orEmpty().ifBlank { "清晰度" },
+                            url = qUrl,
+                            type = q.get("type")?.asString?.trim().orEmpty().ifBlank { "auto" }
+                        )
+                    }
+                    ?.distinctBy { it.name to it.url }
+                    .orEmpty()
                 PlayResult(
                     url = url,
                     type = type,
                     headers = mergedHeaders.takeIf { it.isNotEmpty() },
-                    referer = referer
+                    referer = referer,
+                    qualities = qualities
                 )
             } else {
                 PlayResult(url = raw, type = "auto")

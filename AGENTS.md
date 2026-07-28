@@ -280,6 +280,12 @@ COMMENTS_POSTING_ENABLED=false
 - 播放源加载和换源应继续遵循“来源失败隔离、切换源后重新解析”的现有状态机，不得通过账号或评论服务阻塞播放。
 - 当前真实弹幕通道尚未接入；播放器只保留弹幕显示设置和未来接入位置，禁止把本地临时文本伪装为已发送的远端弹幕。
 
+本次修改验证：
+
+- Android：`.\gradlew.bat :app:compileDebugKotlin` 通过。
+- Android：`.\gradlew.bat :app:assembleDebug` 通过，产物为 `android/app/build/outputs/apk/debug/app-debug.apk`。
+- `git diff --check` 通过；尚未创建新版本 Tag 或推送，等待用户确认实际设备播放效果。
+
 ## 13. 近期提交记录
 
 以下提交对应本轮账号、云端和临时停用改动：
@@ -307,3 +313,10 @@ COMMENTS_POSTING_ENABLED=false
 - Git 工作区干净，`HEAD` 与 `origin/main` 一致。
 
 真实阿里云联调仍需要部署环境中的 RDS、DirectMail、OSS 和 HTTPS API 域名配置；没有这些配置时，不得把账号功能标记为已上线。
+
+## 15. 2026-07-28 首帧渲染与清晰度切换修复
+
+- `juying_player_view.xml` 继续使用 `TextureView`；播放器现在先完成 TextureView 绑定和一次布局请求，再将 `playWhenReady` 设为 `true`，避免“有声音、无画面，切全屏后才出现”的首帧时序问题。
+- `SourceManager` 解析播放脚本返回的 `resolutions` 数组为 `PlayResult.qualities`，不再丢弃源脚本已经提供的多档播放 URL。
+- 清晰度弹窗优先显示源实际提供的档位；切换具体档位时复用当前来源请求头、尽量保留播放位置并替换 Media3 media source。没有多档 URL 的普通直连视频只显示 `Auto` 并明确提示不可切换；自适应 HLS 仍可使用视频尺寸约束。
+- 本次播放器变更只影响首帧绑定和清晰度链路，不改变来源解析、换源和播放错误回退状态机。
