@@ -108,6 +108,17 @@ def normalize_base_url(value: str) -> str:
     return base_url
 
 
+def aliyun_distribution_key(apk_key: str) -> str:
+    """Return the neutral OSS object name used for Android package bytes.
+
+    Aliyun rejects public .apk downloads through the default OSS endpoint with
+    ApkDownloadForbidden unless a CNAME is bound. Android saves the verified
+    bytes to a local .apk file, so the remote object suffix is not significant.
+    """
+
+    return apk_key[:-4] + ".bin" if apk_key.lower().endswith(".apk") else apk_key + ".bin"
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -163,13 +174,14 @@ def manifest_command(args: argparse.Namespace) -> int:
         f"{env('ANDROID_OBJECT_PREFIX') or DEFAULT_APK_PREFIX}/{apk_path.name}"
     )
     urls: list[str] = []
-    for variable in (
-        "ALIYUN_OSS_PUBLIC_BASE_URL",
-        "TENCENT_COS_PUBLIC_BASE_URL",
-    ):
-        base_url = normalize_base_url(env(variable))
-        if base_url:
-            urls.append(f"{base_url}/{quote(apk_key, safe='/')}")
+    aliyun_base_url = normalize_base_url(env("ALIYUN_OSS_PUBLIC_BASE_URL"))
+    if aliyun_base_url:
+        aliyun_key = aliyun_distribution_key(apk_key)
+        urls.append(f"{aliyun_base_url}/{quote(aliyun_key, safe='/')}")
+
+    tencent_base_url = normalize_base_url(env("TENCENT_COS_PUBLIC_BASE_URL"))
+    if tencent_base_url:
+        urls.append(f"{tencent_base_url}/{quote(apk_key, safe='/')}")
 
     repository = args.repository.strip().strip("/")
     tag = args.tag.strip()
@@ -261,8 +273,10 @@ def upload_aliyun(apk_path: Path, manifest_path: Path) -> bool:
         env("ALIYUN_OSS_ENDPOINT"),
         env("ALIYUN_OSS_BUCKET"),
     )
-    apk_key = normalize_object_key(
-        f"{env('ANDROID_OBJECT_PREFIX') or DEFAULT_APK_PREFIX}/{apk_path.name}"
+    apk_key = aliyun_distribution_key(
+        normalize_object_key(
+            f"{env('ANDROID_OBJECT_PREFIX') or DEFAULT_APK_PREFIX}/{apk_path.name}"
+        )
     )
     manifest_key = normalize_object_key(
         env("ANDROID_UPDATE_MANIFEST_KEY") or DEFAULT_MANIFEST_KEY
@@ -271,7 +285,9 @@ def upload_aliyun(apk_path: Path, manifest_path: Path) -> bool:
         apk_key,
         str(apk_path),
         headers={
-            "Content-Type": "application/vnd.android.package-archive",
+            # The object intentionally uses .bin and a neutral content type.
+            # Android stores it locally as .apk after SHA-256 verification.
+            "Content-Type": "application/octet-stream",
             "Cache-Control": "public, max-age=31536000, immutable",
         },
     )

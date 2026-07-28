@@ -1,5 +1,11 @@
 # 项目变更记录
 
+## 2026-07-28：修复阿里云 OSS 更新下载回退 GitHub
+
+- 确认默认 OSS Endpoint 对 `.apk` 返回 `ApkDownloadForbidden`，导致客户端实际回退 GitHub。
+- 阿里云发布对象改为 `.bin` 和 `application/octet-stream`；客户端仍保存为本地 `.apk` 并执行 SHA-256 校验。
+- 腾讯云 COS 和 GitHub Release 继续发布标准 `.apk`。
+
 ## 2026-07-28：Android 播放器横屏/画中画/手势修复与评论云端存储
 
 - **横屏裁切修复**：播放页容器竖屏保持 16:9、横屏改为 `fillMaxSize()` 精确占满可见区域，修复部分机型横屏时顶部栏与进度条下方控制行被裁切；全屏统一处理系统栏与刘海屏 `SHORT_EDGES`，控制层避让挖孔区域。

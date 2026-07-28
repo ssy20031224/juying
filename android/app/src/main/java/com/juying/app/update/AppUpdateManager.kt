@@ -131,10 +131,16 @@ class AppUpdateManager(private val context: Context) {
         val cloudUrls = mutableListOf<String>()
         if (versionName.isNotBlank()) {
             val apkName = "juying-$versionName.apk"
-            listOf(ALIYUN_OSS_PUBLIC_BASE, TENCENT_COS_PUBLIC_BASE).forEach { base ->
+            val cloudObjects = listOf(
+                // 阿里云默认 OSS 域名拒绝直接分发 .apk；远端对象使用 .bin，
+                // 下载后仍保存为本地 .apk，并在安装前完成 SHA-256 校验。
+                ALIYUN_OSS_PUBLIC_BASE to "juying-$versionName.bin",
+                TENCENT_COS_PUBLIC_BASE to apkName
+            )
+            cloudObjects.forEach { (base, objectName) ->
                 base.trim().trimEnd('/')
                     .takeIf { it.startsWith("https://", ignoreCase = true) }
-                    ?.let { cloudUrls += "$it/$APK_OBJECT_PREFIX/$apkName" }
+                    ?.let { cloudUrls += "$it/$APK_OBJECT_PREFIX/$objectName" }
             }
         }
         val mainland = info.apkUrls.filter {

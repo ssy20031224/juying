@@ -17,7 +17,8 @@
 
 | 文件 | 路径 |
 |---|---|
-| APK | `android/juying-版本号.apk` |
+| 阿里云安装包对象 | `android/juying-版本号.bin` |
+| 腾讯云安装包对象 | `android/juying-版本号.apk` |
 | 更新清单 | `api/android/update.json` |
 | GitHub Release APK | `releases/download/v版本号/juying-版本号.apk` |
 
@@ -65,6 +66,12 @@ keytool -genkeypair -v `
 建议创建只允许操作目标 Bucket 和 `android/`、`api/android/` 前缀的
 RAM 用户。APK 和更新清单必须能通过 HTTPS 匿名下载，可以使用公开读
 对象或绑定 CDN/自定义域名；不要给 RAM 用户不必要的全局权限。
+
+阿里云默认 OSS Endpoint 会对 `.apk` 公网下载返回
+`ApkDownloadForbidden` 并要求使用 CNAME。发布脚本因此把相同 APK
+字节上传为 `.bin` 对象，客户端下载后保存为本地 `.apk`，完成 SHA-256
+校验后再交给系统安装。使用已备案的 OSS CNAME/CDN 域名后仍可沿用此
+兼容方案。
 
 GitHub Actions Secrets：
 
