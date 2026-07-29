@@ -25,6 +25,111 @@ data class SourceItem(
     val sourceCount: Int = 1
 )
 
+enum class MediaReleaseState {
+    FINISHED,
+    SERIALIZING,
+    UPDATING,
+    UPCOMING,
+    UNKNOWN
+}
+
+data class MediaStatusSummary(
+    val state: MediaReleaseState,
+    val displayText: String,
+    val episodeText: String
+)
+
+/**
+ * Normalizes source-specific remarks without guessing that every number means
+ * "still serializing". Completion has the highest priority, followed by
+ * explicit upcoming/serializing/updating markers. A bare episode count remains
+ * UNKNOWN until a source supplies an actual release-state marker.
+ */
+fun resolveMediaStatus(item: SourceItem, episodeCount: Int? = null): MediaStatusSummary {
+    val rawStatus = item.status.trim()
+    val combined = buildString {
+        append(rawStatus)
+        append(' ')
+        append(item.tags.joinToString(" "))
+        append(' ')
+        append(item.kind)
+    }.replace(Regex("\\s+"), " ").trim()
+
+    val finished = listOf(
+        "已完结", "完结", "全集", "全剧终", "完毕", "大结局", "收官"
+    ).any { combined.contains(it, ignoreCase = true) } ||
+        Regex("\\bcomplete(?:d)?\\b|\\bfinished\\b", RegexOption.IGNORE_CASE).containsMatchIn(combined) ||
+        Regex("全\\s*\\d+(?:\\.\\d+)?\\s*[集话期]|\\d+(?:\\.\\d+)?\\s*[集话期]\\s*全").containsMatchIn(combined)
+
+    val upcoming = listOf(
+        "未开播", "待播", "即将开播", "预告", "定档"
+    ).any { combined.contains(it, ignoreCase = true) }
+
+    val serializing = listOf(
+        "连载中", "连载", "连载新番", "周更"
+    ).any { combined.contains(it, ignoreCase = true) }
+
+    val updating = listOf(
+        "更新中", "更新至", "更新到", "更至", "更新第", "已更新", "每周更新"
+    ).any { combined.contains(it, ignoreCase = true) }
+
+    val finishedCount = Regex("全\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]")
+        .find(combined)?.groupValues?.getOrNull(1)
+        ?: Regex("(\\d+(?:\\.\\d+)?)\\s*[集话期]\\s*全")
+            .find(combined)?.groupValues?.getOrNull(1)
+        ?: Regex("共\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]")
+            .find(combined)?.groupValues?.getOrNull(1)
+
+    val latestCount = Regex(
+        "(?:更新至|更新到|更至|更新第|已更新至?)\\s*第?\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]"
+    ).find(combined)?.groupValues?.getOrNull(1)
+        ?: Regex("第?\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]")
+            .find(rawStatus)?.groupValues?.getOrNull(1)
+
+    val reliableEpisodeCount = episodeCount?.takeIf { it > 0 }?.toString()
+    val movieLike = listOf("剧场版", "电影", "Movie", "OVA", "OAD")
+        .any { item.kind.contains(it, ignoreCase = true) || item.tags.any { tag -> tag.contains(it, ignoreCase = true) } }
+
+    val state = when {
+        finished -> MediaReleaseState.FINISHED
+        upcoming -> MediaReleaseState.UPCOMING
+        updating -> MediaReleaseState.UPDATING
+        serializing -> MediaReleaseState.SERIALIZING
+        movieLike && reliableEpisodeCount == "1" -> MediaReleaseState.FINISHED
+        else -> MediaReleaseState.UNKNOWN
+    }
+
+    val count = when (state) {
+        MediaReleaseState.FINISHED -> finishedCount ?: reliableEpisodeCount ?: latestCount
+        MediaReleaseState.SERIALIZING, MediaReleaseState.UPDATING -> latestCount ?: reliableEpisodeCount
+        else -> reliableEpisodeCount ?: latestCount
+    }
+    val episodeText = when {
+        state == MediaReleaseState.FINISHED && movieLike && (count == null || count == "1") -> "正片"
+        state == MediaReleaseState.FINISHED && count != null -> "全${count}集"
+        (state == MediaReleaseState.SERIALIZING || state == MediaReleaseState.UPDATING) && count != null -> "更新至${count}集"
+        count != null -> "${count}集"
+        else -> ""
+    }
+    val statusLabel = when (state) {
+        MediaReleaseState.FINISHED -> "已完结"
+        MediaReleaseState.SERIALIZING -> "连载中"
+        MediaReleaseState.UPDATING -> "更新中"
+        MediaReleaseState.UPCOMING -> "未开播"
+        MediaReleaseState.UNKNOWN -> "状态待确认"
+    }
+    val fallbackDetail = rawStatus
+        .takeIf { it.isNotBlank() && it != statusLabel }
+        ?.take(24)
+        .orEmpty()
+    val detail = episodeText.ifBlank { fallbackDetail }
+    return MediaStatusSummary(
+        state = state,
+        displayText = if (detail.isBlank()) statusLabel else "$statusLabel | $detail",
+        episodeText = episodeText
+    )
+}
+
 data class HomeSection(
     val title: String,
     val key: String,
@@ -538,6 +643,23 @@ class SourceAdapter(
                 title = (json["name"]?.toString() ?: json["title"]?.toString() ?: json["vod_name"]?.toString() ?: "").replace("<[^>]+>".toRegex(), "").trim(),
                 year = json["year"]?.toString() ?: json["vod_year"]?.toString() ?: "",
                 kind = json["type"]?.toString() ?: json["kind"]?.toString() ?: json["vod_class"]?.toString() ?: "",
+                tags = listOf("tags", "tag", "genre", "class", "vod_class", "type")
+                    .flatMap { field ->
+                        val value = json[field] ?: return@flatMap emptyList()
+                        when (value) {
+                            is List<*> -> value.mapNotNull { it?.toString() }
+                            else -> listOf(value.toString())
+                        }
+                    }
+                    .flatMap { it.split(Regex("[,，、/|·\\s]+")) }
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct(),
+                status = json["status"]?.toString()
+                    ?: json["remarks"]?.toString()
+                    ?: json["vod_remarks"]?.toString()
+                    ?: "",
+                score = json["score"]?.toString() ?: json["vod_score"]?.toString() ?: "",
                 cover = json["pic"]?.toString() ?: json["cover"]?.toString() ?: json["thumb"]?.toString() ?: json["vod_pic"]?.toString() ?: "",
                 description = json["desc"]?.toString() ?: json["description"]?.toString() ?: json["vod_blurb"]?.toString() ?: "",
                 sourceKey = key,
@@ -561,6 +683,10 @@ class SourceAdapter(
         } catch (_: Exception) {
             DetailResult(defaultItem, emptyList())
         }
+    }
+
+    fun related(id: String): List<SourceItem> {
+        return parseItems(exports.related(id))
     }
 
     fun play(flagStr: String): PlayResult {

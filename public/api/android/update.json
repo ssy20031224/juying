@@ -1,10 +1,10 @@
 {
-  "versionCode": 10214,
-  "versionName": "1.2.14",
-  "title": "🎉 聚影 1.2.14 版本更新",
-  "notes": "更新内容：\n1. 解决 3X << 快退触发暂停 & 去除多余图标\n2. 播放失败界面新增「重新加载」按钮\n3. 修复长按快进/快退松手后弹出上下控制栏\n4. 修复点击上一集/下一集播放失败（过期播放地址）\n5.点击视频卡片秒进播放器（零延迟交互）",
+  "versionCode": 10216,
+  "versionName": "1.2.16",
+  "title": "🎉 聚影 1.2.16 版本更新",
+  "notes": "更新内容：修复了一些已知问题。",
   "apkUrls": [
-    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.14.bin"
+    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.16.bin"
   ],
   "sha256": ""
 }

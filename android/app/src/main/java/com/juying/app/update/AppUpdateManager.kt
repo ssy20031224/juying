@@ -12,7 +12,10 @@ import com.juying.app.BuildConfig
 import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.CacheControl
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -28,6 +31,76 @@ data class AppUpdateInfo(
     val sha256: String = "",
     val source: String = ""
 )
+
+internal fun parseUpdateManifest(raw: String, source: String): AppUpdateInfo {
+    val root = JSONObject(raw)
+    val update = root.optJSONObject("update")
+    val scopes = listOfNotNull(update, root)
+
+    fun firstString(vararg names: String): String =
+        scopes.firstNotNullOfOrNull { json ->
+            names.firstNotNullOfOrNull { name ->
+                json.opt(name)?.let { value ->
+                    when (value) {
+                        is String -> value.trim().takeIf(String::isNotBlank)
+                        is JSONArray -> buildList {
+                            for (index in 0 until value.length()) {
+                                value.optString(index).trim()
+                                    .takeIf(String::isNotBlank)
+                                    ?.let(::add)
+                            }
+                        }.joinToString("\n").takeIf(String::isNotBlank)
+                        else -> null
+                    }
+                }
+            }
+        }.orEmpty()
+
+    val urls = mutableListOf<String>()
+    scopes.forEach { json ->
+        json.optJSONArray("apkUrls")?.let { array ->
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf { it.startsWith("https://") }?.let(urls::add)
+            }
+        }
+        firstStringFrom(json, "apkUrl", "downloadUrl", "download_url")
+            .takeIf { it.startsWith("https://") }
+            ?.let(urls::add)
+    }
+
+    val versionCode = scopes.firstNotNullOfOrNull { json ->
+        json.optInt("versionCode", 0).takeIf { it > 0 }
+            ?: json.optInt("version_code", 0).takeIf { it > 0 }
+    } ?: throw IllegalArgumentException("missing versionCode")
+    val versionName = firstString("versionName", "version_name", "version")
+        .ifBlank { versionCode.toString() }
+
+    return AppUpdateInfo(
+        versionCode = versionCode,
+        versionName = versionName,
+        title = firstString("title", "releaseTitle", "release_title", "updateTitle", "name")
+            .ifBlank { "发现新版本 $versionName" },
+        notes = firstString(
+            "notes",
+            "releaseNotes",
+            "release_notes",
+            "updateContent",
+            "update_content",
+            "changelog",
+            "changeLog",
+            "content",
+            "description"
+        ).ifBlank { "修复问题并提升使用体验" },
+        apkUrls = urls.distinct(),
+        sha256 = firstString("sha256", "sha_256"),
+        source = source
+    )
+}
+
+private fun firstStringFrom(json: JSONObject, vararg names: String): String =
+    names.firstNotNullOfOrNull { name ->
+        json.optString(name).trim().takeIf(String::isNotBlank)
+    }.orEmpty()
 
 sealed interface UpdateCheckResult {
     data class Available(val info: AppUpdateInfo) : UpdateCheckResult
@@ -100,9 +173,9 @@ class AppUpdateManager(private val context: Context) {
 
         val errors = mutableListOf<String>()
         MANIFEST_URLS.forEach { url ->
-            val body = fetchText(url)
+            val body = fetchText(url, cacheBust = manual)
             if (body != null) {
-                val info = runCatching { parseManifest(body, url) }.getOrNull()
+                val info = runCatching { parseUpdateManifest(body, url) }.getOrNull()
                 if (info != null) return@withContext compare(info)
                 errors += "$url: invalid manifest"
             } else {
@@ -110,7 +183,11 @@ class AppUpdateManager(private val context: Context) {
             }
         }
 
-        val githubBody = fetchText(GITHUB_RELEASE_API, acceptJson = true)
+        val githubBody = fetchText(
+            GITHUB_RELEASE_API,
+            acceptJson = true,
+            cacheBust = manual
+        )
         if (githubBody != null) {
             val info = runCatching { parseGithubRelease(githubBody) }.getOrNull()
             if (info != null) return@withContext compare(info)
@@ -298,11 +375,31 @@ class AppUpdateManager(private val context: Context) {
         return info.versionCode > BuildConfig.VERSION_CODE
     }
 
-    private fun fetchText(url: String, acceptJson: Boolean = false): String? {
+    private fun fetchText(
+        url: String,
+        acceptJson: Boolean = false,
+        cacheBust: Boolean = false
+    ): String? {
         if (!url.startsWith("https://", ignoreCase = true)) return null
+        val requestUrl = if (cacheBust) {
+            url.toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("_juying_check", (System.currentTimeMillis() / 60_000L).toString())
+                ?.build()
+                ?.toString()
+                ?: url
+        } else {
+            url
+        }
         val request = Request.Builder()
-            .url(url)
+            .url(requestUrl)
             .header("User-Agent", "juying/${BuildConfig.VERSION_NAME} Android")
+            .apply {
+                if (cacheBust) {
+                    cacheControl(CacheControl.Builder().noCache().build())
+                    header("Pragma", "no-cache")
+                }
+            }
             .apply { if (acceptJson) header("Accept", "application/vnd.github+json") }
             .get()
             .build()
@@ -313,26 +410,6 @@ class AppUpdateManager(private val context: Context) {
         } catch (_: Exception) {
             null
         }
-    }
-
-    private fun parseManifest(raw: String, source: String): AppUpdateInfo {
-        val json = JSONObject(raw)
-        val urls = mutableListOf<String>()
-        json.optJSONArray("apkUrls")?.let { array ->
-            for (index in 0 until array.length()) {
-                array.optString(index).takeIf { it.startsWith("https://") }?.let(urls::add)
-            }
-        }
-        json.optString("apkUrl").takeIf { it.startsWith("https://") }?.let(urls::add)
-        return AppUpdateInfo(
-            versionCode = json.getInt("versionCode"),
-            versionName = json.optString("versionName", json.getInt("versionCode").toString()),
-            title = json.optString("title", "发现新版本"),
-            notes = json.optString("notes", "修复问题并提升使用体验"),
-            apkUrls = urls.distinct(),
-            sha256 = json.optString("sha256"),
-            source = source
-        )
     }
 
     private fun parseGithubRelease(raw: String): AppUpdateInfo? {

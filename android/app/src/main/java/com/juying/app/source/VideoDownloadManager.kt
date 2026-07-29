@@ -34,21 +34,39 @@ class VideoDownloadManager(private val context: Context) {
             "lanerc/${safe(title)}"
         )
         root.mkdirs()
-        val suffix = if (isHls(url)) "m3u8" else "mp4"
-        val output = File(root, "${safe(episodeName)}.$suffix")
+        var suffix = if (isHls(url)) "m3u8" else "mp4"
+        var output = File(root, "${safe(episodeName)}.$suffix")
+        val infoFile = File(root, "${safe(episodeName)}.info")
         if (output.exists() && output.length() > 0L) {
-            return@withContext DownloadedFile(output, true)
+            val complete = if (suffix == "m3u8") {
+                isOfflineHlsComplete(output)
+            } else {
+                infoFile.exists()
+            }
+            if (complete) return@withContext DownloadedFile(output, true)
+            output.delete()
         }
 
         val request = request(url, headers, referer)
         val response = try { client.newCall(request).execute() } catch (_: Exception) { return@withContext null }
         response.use { res ->
             if (!res.isSuccessful) return@withContext null
-            if (!isHls(url) && !isHls(res.header("Content-Type").orEmpty())) {
+            val responseIsHls = isHls(url) || isHls(res.header("Content-Type").orEmpty())
+            if (responseIsHls && suffix != "m3u8") {
+                suffix = "m3u8"
+                output = File(root, "${safe(episodeName)}.$suffix")
+                if (output.exists() && isOfflineHlsComplete(output)) {
+                    return@withContext DownloadedFile(output, true)
+                }
+                output.delete()
+            }
+            if (!responseIsHls) {
                 val body = res.body ?: return@withContext null
                 val total = body.contentLength().coerceAtLeast(0L)
+                val partial = File(root, "${output.name}.part")
+                partial.delete()
                 body.byteStream().use { input ->
-                    output.outputStream().use { out ->
+                    partial.outputStream().use { out ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                         var done = 0L
                         var read: Int
@@ -60,6 +78,20 @@ class VideoDownloadManager(private val context: Context) {
                         }
                     }
                 }
+                if (partial.length() <= 0L) {
+                    partial.delete()
+                    return@withContext null
+                }
+                if (!partial.renameTo(output)) {
+                    try {
+                        partial.copyTo(output, overwrite = true)
+                        partial.delete()
+                    } catch (_: Exception) {
+                        partial.delete()
+                        output.delete()
+                        return@withContext null
+                    }
+                }
                 return@withContext DownloadedFile(output, true)
             }
 
@@ -67,39 +99,75 @@ class VideoDownloadManager(private val context: Context) {
             if (playlist.isBlank()) return@withContext null
             val segmentLines = playlist.lines().filter { it.isNotBlank() && !it.startsWith("#") }
             if (segmentLines.isEmpty() || !playlist.contains("#EXTINF")) {
-                // Master playlists are saved for re-resolution rather than
-                // pretending they are fully offline.
-                output.writeText(playlist)
+                // A master playlist is not a completed offline video. Do not
+                // leave it behind where the downloads screen can mistake it
+                // for a playable cache entry.
                 return@withContext DownloadedFile(output, false)
             }
 
             val rewritten = StringBuilder()
+            val episodePrefix = safe(episodeName)
+            val resourceUriRegex = Regex("URI=\"([^\"]+)\"")
+            val directiveResources = playlist.lines().count { line ->
+                (line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) &&
+                    resourceUriRegex.containsMatchIn(line) &&
+                    !line.contains("METHOD=NONE")
+            }
             var downloaded = 0L
-            val total = segmentLines.size.toLong()
+            val total = (segmentLines.size + directiveResources).toLong()
+            var segmentIndex = 0
+            var auxiliaryIndex = 0
+            var complete = true
             playlist.lines().forEach { line ->
-                if (line.isBlank() || line.startsWith("#")) {
-                    rewritten.appendLine(line)
-                } else {
-                    val segmentName = "segment_${downloaded.toString().padStart(5, '0')}.ts"
-                    val segmentUrl = resolve(url, line)
-                    val segmentRequest = request(segmentUrl, headers, referer)
-                    val segmentResponse = try { client.newCall(segmentRequest).execute() } catch (_: Exception) { null }
-                    segmentResponse?.use { segment ->
-                        if (segment.isSuccessful && segment.body != null) {
-                            File(root, segmentName).outputStream().use { out ->
-                                segment.body!!.byteStream().use { input -> input.copyTo(out) }
-                            }
-                            rewritten.appendLine(segmentName)
+                if (line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) {
+                    val match = resourceUriRegex.find(line)
+                    if (match == null || line.contains("METHOD=NONE")) {
+                        rewritten.appendLine(line)
+                    } else {
+                        val child = match.groupValues[1]
+                        val remoteUrl = resolve(url, child)
+                        val defaultExtension = if (line.startsWith("#EXT-X-KEY")) "key" else "mp4"
+                        val localName = "${episodePrefix}_aux_${auxiliaryIndex.toString().padStart(3, '0')}." +
+                            resourceExtension(remoteUrl, defaultExtension)
+                        auxiliaryIndex += 1
+                        if (downloadResource(remoteUrl, File(root, localName), headers, referer)) {
+                            rewritten.appendLine(line.replace(child, localName))
                             downloaded += 1
                             onProgress(downloaded, total)
                         } else {
-                            rewritten.appendLine(line)
+                            complete = false
                         }
-                    } ?: rewritten.appendLine(line)
+                    }
+                } else if (line.isBlank() || line.startsWith("#")) {
+                    rewritten.appendLine(line)
+                } else {
+                    val segmentUrl = resolve(url, line)
+                    val segmentName = "${episodePrefix}_segment_${segmentIndex.toString().padStart(5, '0')}." +
+                        resourceExtension(segmentUrl, "ts")
+                    segmentIndex += 1
+                    if (downloadResource(segmentUrl, File(root, segmentName), headers, referer)) {
+                        rewritten.appendLine(segmentName)
+                        downloaded += 1
+                        onProgress(downloaded, total)
+                    } else {
+                        complete = false
+                    }
                 }
             }
-            output.writeText(rewritten.toString())
-            return@withContext DownloadedFile(output, downloaded > 0)
+            if (!complete || downloaded != total || total <= 0L) {
+                root.listFiles()
+                    ?.filter { it.name.startsWith("${episodePrefix}_segment_") || it.name.startsWith("${episodePrefix}_aux_") }
+                    ?.forEach { it.delete() }
+                output.delete()
+                return@withContext DownloadedFile(output, false)
+            }
+            val partialPlaylist = File(root, "${output.name}.part")
+            partialPlaylist.writeText(rewritten.toString())
+            if (!partialPlaylist.renameTo(output)) {
+                partialPlaylist.copyTo(output, overwrite = true)
+                partialPlaylist.delete()
+            }
+            return@withContext DownloadedFile(output, isOfflineHlsComplete(output))
         }
     }
 
@@ -188,10 +256,16 @@ class VideoDownloadManager(private val context: Context) {
         try {
             val videoFile = item.videoFile
             val parent = videoFile.parentFile
+            if (videoFile.extension.equals("m3u8", ignoreCase = true)) {
+                localPlaylistResources(videoFile).forEach { it.delete() }
+            }
             if (videoFile.exists()) videoFile.delete()
             val infoFile = File(parent, "${safe(item.episodeName)}.info")
             if (infoFile.exists()) infoFile.delete()
-            parent?.listFiles()?.filter { it.name.startsWith("segment_") }?.forEach { it.delete() }
+            val episodePrefix = safe(item.episodeName)
+            parent?.listFiles()
+                ?.filter { it.name.startsWith("${episodePrefix}_segment_") || it.name.startsWith("${episodePrefix}_aux_") }
+                ?.forEach { it.delete() }
             if (parent != null && parent.listFiles().isNullOrEmpty()) {
                 parent.delete()
             }
@@ -204,7 +278,7 @@ class VideoDownloadManager(private val context: Context) {
         if (file.isFile) {
             if (file.name.endsWith(".m3u8")) {
                 var total = file.length()
-                file.parentFile?.listFiles()?.filter { it.name.startsWith("segment_") }?.forEach { total += it.length() }
+                localPlaylistResources(file).forEach { total += it.length() }
                 return total
             }
             return file.length()
@@ -230,6 +304,94 @@ class VideoDownloadManager(private val context: Context) {
             builder.header("User-Agent", it)
         }
         return builder.build()
+    }
+
+    private fun downloadResource(
+        url: String,
+        destination: File,
+        headers: Map<String, String>?,
+        referer: String?
+    ): Boolean {
+        val partial = File(destination.parentFile, "${destination.name}.part")
+        partial.delete()
+        val response = try {
+            client.newCall(request(url, headers, referer)).execute()
+        } catch (_: Exception) {
+            return false
+        }
+        response.use { resource ->
+            val body = resource.body
+            if (!resource.isSuccessful || body == null) return false
+            return try {
+                partial.outputStream().use { out ->
+                    body.byteStream().use { input -> input.copyTo(out) }
+                }
+                if (partial.length() <= 0L) {
+                    partial.delete()
+                    false
+                } else {
+                    if (!partial.renameTo(destination)) {
+                        partial.copyTo(destination, overwrite = true)
+                        partial.delete()
+                    }
+                    true
+                }
+            } catch (_: Exception) {
+                partial.delete()
+                false
+            }
+        }
+    }
+
+    private fun isOfflineHlsComplete(playlist: File): Boolean {
+        if (!playlist.exists() || playlist.length() <= 0L) return false
+        val text = try { playlist.readText() } catch (_: Exception) { return false }
+        if (!text.contains("#EXTINF")) return false
+        val resources = localPlaylistResources(playlist)
+        val uriRegex = Regex("URI=\"([^\"]+)\"")
+        val expectedResources = text.lines().count { line ->
+            (line.isNotBlank() && !line.startsWith("#")) ||
+                ((line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) &&
+                    uriRegex.containsMatchIn(line) &&
+                    !line.contains("METHOD=NONE"))
+        }
+        if (expectedResources <= 0 || resources.size < expectedResources) return false
+        return resources.all { it.exists() && it.length() > 0L }
+    }
+
+    private fun localPlaylistResources(playlist: File): Set<File> {
+        val parent = playlist.parentFile ?: return emptySet()
+        val uriRegex = Regex("URI=\"([^\"]+)\"")
+        return try {
+            buildSet {
+                playlist.readLines().forEach { line ->
+                    val reference = when {
+                        line.isNotBlank() && !line.startsWith("#") -> line.trim()
+                        line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP") ->
+                            uriRegex.find(line)?.groupValues?.getOrNull(1)
+                        else -> null
+                    } ?: return@forEach
+                    if (!reference.startsWith("http://", true) &&
+                        !reference.startsWith("https://", true)
+                    ) {
+                        add(File(parent, Uri.decode(reference)))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun resourceExtension(url: String, fallback: String): String {
+        val candidate = try {
+            URI(url).path.substringAfterLast('.', "")
+        } catch (_: Exception) {
+            ""
+        }
+        return candidate.lowercase()
+            .takeIf { it.matches(Regex("[a-z0-9]{1,8}")) }
+            ?: fallback
     }
 
     private fun resolve(base: String, child: String): String =

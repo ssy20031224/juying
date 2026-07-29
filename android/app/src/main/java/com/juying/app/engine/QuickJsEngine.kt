@@ -905,6 +905,26 @@ class SourceExports(private val sourceKey: String, private val gson: Gson) {
         }
     }
 
+    fun related(id: String): String {
+        val startTime = System.currentTimeMillis()
+        return try {
+            val i = gson.toJson(id)
+            val res = callFn("related", i, "[]")
+            val duration = System.currentTimeMillis() - startTime
+            if (res == "[]" || res.isBlank()) {
+                com.juying.app.source.SourceLogManager.warn(sourceKey, "相关推荐", "作品 $id 暂无相关推荐 (${duration}ms)")
+            } else {
+                com.juying.app.source.SourceLogManager.success(sourceKey, "相关推荐", "作品 $id 获取成功 (${duration}ms)", res.take(200))
+            }
+            res
+        } catch (e: Exception) {
+            val duration = System.currentTimeMillis() - startTime
+            android.util.Log.e("SourceExports", "related failed: ${e.message}", e)
+            com.juying.app.source.SourceLogManager.error(sourceKey, "相关推荐", "作品 $id 获取异常: ${e.message} (${duration}ms)")
+            "[]"
+        }
+    }
+
     fun play(flagJson: String): String {
         val startTime = System.currentTimeMillis()
         return try {

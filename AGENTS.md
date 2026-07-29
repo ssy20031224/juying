@@ -328,3 +328,12 @@ COMMENTS_POSTING_ENABLED=false
 - Media3 `setVideoEffects()` 第一次调用必须发生在 `prepare()` 之前。播放器构建时先用空列表初始化效果管线；默认未开启画质增强时，不再于首轮 Compose effect 中重复异步重配视频渲染器。
 - 诊断日志统一使用 `JuyingPlayerDiag`，仅记录播放状态、视频尺寸、Surface 类型/尺寸和来源 host，不记录带签名参数的完整播放 URL、Cookie 或令牌。
 - 复现时通过 `adb logcat -s JuyingPlayerDiag:* EmbeddedPlayer:*` 区分：没有 `video-size` 是视频轨道/解码问题；有 `video-size` 但 Surface 未 ready 是视图生命周期问题；Surface ready 且有 `first-frame-rendered` 仍黑屏才是设备合成层或 TextureView 输出问题。
+
+## 16. 2026-07-29 Android 榜单、排期与相关推荐
+
+- `android/app/src/main/java/com/juying/app/source/DiscoveryData.kt`：从来源可验证字段构建 Android 来源榜和周表；禁止生成虚构热度、播放量、集数或更新时间。
+- `SourceAdapter`/`SourceExports` 的 `related(id)` 是可选来源合约；来源未实现或返回空列表时，播放器保持真实空状态。
+- 逆向取证样本保存于 `C:\Users\songz\Desktop\public-work\lanerc_analysis\remote_scripts\lanerc_rank.js` 与 `lanerc_week.js`；真实入口名是 `lanerc_rank.js`/`lanerc_week.js`，不是文件名 `ranking.js`/`calendar.js`。
+- Android 只在 `LanercDiscoveryRepository` 中原生实现经过审计的只读 `/app/rank`、`/app/week` 数据契约，不下载或执行远程 JS。该 Repository 必须继续使用独立网络客户端和独立内存 TTL，不得引用 `ResultCache`、`SourceAdapter.play()`、QuickJS executor 或播放器状态。
+- 远程榜单/周表失败必须保持本地来源回退；不能让发现数据异常转换成详情解析或播放失败。
+- 更新面板显示 `update.json` 的发布者自定义标题和完整说明；发布工作流中的手动输入、可选 `.github/android-release-*.{txt,md}`、annotated tag 和默认文案按优先级生成同一份清单/Release 内容。

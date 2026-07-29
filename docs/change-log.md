@@ -1,5 +1,46 @@
 # 项目变更记录
 
+## 2026-07-29：Android 原生移植榜单/周表与自定义更新说明
+
+- 新增 `LanercDiscoveryRepository`，原生移植已审计 `lanerc_rank.js`、`lanerc_week.js` 的只读数据契约：请求 `/app/rank`、`/app/week`，恢复自定义 Base64 字符表并使用 AES-256-ECB/PKCS5 解码。
+- 榜单热门/人气保留后端季度组原序；评分榜不照搬原脚本的“第三组”假语义，改为合并季度数据后按真实 `vod_score` 降序。
+- 周表使用服务端 `week_list.mon..sun`、`vod_total`、`vod_remarks`，显示真实星期、更新时间和当前集数；远程失败时回退到来源明确字段，不按卡片位置猜测。
+- 远程榜单/周表使用独立 OkHttp 客户端和独立 10 分钟内存缓存，不共享 QuickJS、`ResultCache`、播放地址缓存、Cookie、连接池或 Media3 状态；打开播放器不会发起发现数据网络请求。
+- 播放器相关推荐优先采用来源 `related(id)`；来源未提供时，才使用已经载入的榜单/周表条目按题材交集、年份和真实评分确定性排序，不随机伪造。
+- 更新清单兼容 `notes`、`releaseNotes`、`release_notes`、`updateContent`、`changelog` 等自定义说明字段；更新弹窗改为可滚动完整显示，不再截断为 8 行。
+- 用户主动点击“检测更新”时会绕过旧的 HTTP 清单缓存，避免已经推送新版本却仍显示上一次的标题或更新内容。
+- Android Release 支持手动填写 `release_title`/`release_notes`；标签推送还可读取 `.github/android-release-title.txt`、`.github/android-release-notes.md` 或 annotated tag 内容，生成的 `update.json` 与 GitHub Release 共用同一份说明。
+
+---
+
+## 2026-07-29：Android 来源推荐、真实周表与来源榜单优化
+
+- Android QuickJS 合约新增可选 `related(id)`，播放器详情页只在当前来源真实返回相关推荐时展示横向竖版卡片，不使用随机首页作品兜底。
+- 详情缓存继续支持快速首屏，但命中缓存后会在后台重新拉取详情并更新状态与剧集数，避免最近更新或完结作品持续显示旧数据。
+- 状态优先级调整为“完结 > 未开播 > 更新中 > 连载中”；同时出现“连载中、更新至XX集”时展示为“更新中”。
+- 片库固定三列改为最小 120dp 的自适应网格，手机、平板和横屏按可用宽度自动调整列数。
+- 周表删除按首页列表平均切分、`index + 12` 集和固定 `23:30` 的伪数据；现在只收录来源状态/标签中明确给出星期的作品，并展示来源提供的时间和集数。
+- 排行榜删除按列表序号生成的热度分与播放量；热门/人气榜保留来源首页对应分区的原始顺序，评分榜只接受真实数值评分。前三名使用领奖台，其余使用紧凑排行列表。
+- 首页额外保留来源原始分区供榜单使用；无首页数据时的关键词兜底明确标记为“内容推荐”，不再冒充热门榜。
+- 本阶段尚未接入逆向应用的远程榜单/周表；其后已由上方“原生移植榜单/周表”变更以隔离 Repository 接入。
+- 新增周表解析、来源榜单和状态优先级单元测试。
+
+---
+
+## 2026-07-29：Android 卡片/详情状态与离线播放修复
+
+- 视频卡片题材改为按来源顺序最多显示 4 项；超过 4 项显示 `...`，不再固定只显示 2 项。
+- 播放器下方“动漫”区域改为“作品名 + 题材 + 年份 + 实际集数”；点击“简介”后在播放器下方显示独立资料层并覆盖选集内容，资料层展示评分（有数据时）、年份、状态、集数、类型和完整简介。
+- 新增统一 Android 状态解析：完结标记优先于更新文本；显式区分“已完结 / 连载中 / 更新中 / 未开播 / 状态待确认”；裸集数和空状态不再被误判为连载，`0集` 也不再被误判为完结。
+- Android 详情解析补齐 `tags/status/score`，并用卡片摘要补足来源详情缺失的元数据；状态筛选改用同一套规范化规则。
+- 离线播放器的数据源从纯 HTTP 改为 Media3 `DefaultDataSource`，支持 `file://` 本地 MP4 和本地 HLS。
+- HLS 下载改为整集完整性校验：分片、加密密钥和初始化段全部下载并改写为本地相对路径后才标记完成；不同剧集使用独立分片前缀，避免互相覆盖；删除和空间统计只处理当前剧集资源。
+- Android 前端隐藏自定义 JS 导入、数据源诊断日志、账号昵称、账户邮箱和账户密码卡片；底层实现保留，便于后续受控恢复。
+- 新增 8 个状态解析单元测试。
+- 验证：`android\gradlew.bat :app:compileDebugKotlin`、`android\gradlew.bat :app:testDebugUnitTest` 通过。
+
+---
+
 ## 2026-07-28：修复阿里云 OSS 更新下载回退 GitHub
 
 - 确认默认 OSS Endpoint 对 `.apk` 返回 `ApkDownloadForbidden`，导致客户端实际回退 GitHub。
@@ -260,3 +301,11 @@
 - 将 AuvFun、Cycapp、Jinpai、Sanqiu 的默认主机和脚本内运行参数移入服务端 Native Adapter；环境变量保留为授权部署时的可选覆盖。
 - 实测 `/api/home` 已返回 AuvFun 4 个分区和 Sanqiu 最新动漫，Lanerc 仍正常返回；Cycapp 当前上游返回 401，Jinpai 仍需继续健康验证。
 - 前端首页不再额外截断每个来源分区，展示 Adapter 返回的完整分区结果；来源接口自身的分页上限仍需通过后续目录 API 扩展。
+
+## 2026-07-29：Lanerc 远程榜单/周表脚本取证（后续原生移植）
+
+- 从已启动的 Lanerc v1.0.6（实际包名 `com.clggjv.xcjfmd.ffo`）读取安装 APK，确认当前 Flutter 版本二进制只保留 `/app/config`、`/app/rank`、`/app/week` 接口字符串；没有把 `ranking.js` 或 `calendar.js` 打进 APK。
+- 解密旧版远程配置后确认真实代码地址为 `lanerc_rank.js` 与 `lanerc_week.js`，脚本保存于 `C:\Users\songz\Desktop\public-work\lanerc_analysis\remote_scripts\`，仅作为逆向参考样本。
+- `lanerc_rank.js`：请求 `/app/rank`，解码自定义 Base64 字母表和 AES-256-ECB/PKCS5；后端返回季度分组，三个 tab 固定映射第 0/1/2 组（热门/人气/评分），评分 tab 并不按分数重新排序；每页 30 条，结果 memo 10 分钟。
+- `lanerc_week.js`：请求 `/app/week`，一次返回 `week_list.mon..sun`；从 `vod_total` 取集数，从 `vod_remarks` 正则提取 `HH:mm`，整周 memo 10 分钟，`calendarDay()` 复用同一份缓存。
+- 两个脚本会对豆瓣封面附加 Referer 和浏览器 User-Agent，且主站失败后才尝试发现域名。由于脚本依赖第三方后端、加密密钥和未审计远程执行环境，本项目未直接执行或嵌入脚本；Android 仅移植其“真实字段优先、失败保持空状态、缓存有 TTL”的可验证行为。

@@ -77,6 +77,7 @@ import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.Size as Media3Size
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.Contrast
 import androidx.media3.effect.RgbAdjustment
@@ -549,6 +550,12 @@ fun EmbeddedVideoPlayer(
             }
         }
     }
+    val dataSourceFactory = remember(playbackKey) {
+        // DefaultHttpDataSource cannot open device files. Wrapping it in
+        // DefaultDataSource keeps remote request headers while adding file://
+        // and content:// support for completed offline downloads.
+        DefaultDataSource.Factory(context, httpDataSourceFactory)
+    }
     fun createMediaSource(targetUrl: String, targetType: String): MediaSource {
         val cleanUrl = targetUrl.trim()
         val mediaItem = MediaItem.fromUri(Uri.parse(cleanUrl))
@@ -557,9 +564,9 @@ fun EmbeddedVideoPlayer(
             targetType.lowercase().contains("hls") ||
             targetType.lowercase().contains("application/x-mpegurl")
         return if (targetIsHls) {
-            HlsMediaSource.Factory(httpDataSourceFactory).createMediaSource(mediaItem)
+            HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
         } else {
-            ProgressiveMediaSource.Factory(httpDataSourceFactory).createMediaSource(mediaItem)
+            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
         }
     }
 

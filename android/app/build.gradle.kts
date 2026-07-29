@@ -128,4 +128,7 @@ dependencies {
 
     // Android 12+ compatible animated system splash screen
     implementation("androidx.core:core-splashscreen:1.0.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

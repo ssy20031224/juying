@@ -14,6 +14,10 @@ on:
         description: "Optional Android versionCode; derived from version name when empty"
         required: false
         type: string
+      release_title:
+        description: "Update dialog title shown in the Android app"
+        required: false
+        type: string
       release_notes:
         description: "Release notes shown in the app"
         required: false
@@ -148,15 +152,34 @@ jobs:
           VERSION_CODE: ${{ steps.release.outputs.version_code }}
           TAG_NAME: ${{ steps.release.outputs.tag }}
           APK_NAME: ${{ steps.release.outputs.apk_name }}
+          RELEASE_TITLE_INPUT: ${{ inputs.release_title }}
           RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
         run: |
           mkdir -p release
           cp android/app/build/outputs/apk/release/app-release.apk "release/$APK_NAME"
+
+          if [[ -n "${RELEASE_TITLE_INPUT//[[:space:]]/}" ]]; then
+            printf '%s\n' "$RELEASE_TITLE_INPUT" > release/release-title.txt
+          elif [[ -s .github/android-release-title.txt ]]; then
+            cp .github/android-release-title.txt release/release-title.txt
+          else
+            printf '%s\n' "聚影 $VERSION_NAME 版本更新" > release/release-title.txt
+          fi
+
           if [[ -n "$RELEASE_NOTES_INPUT" ]]; then
             printf '%s\n' "$RELEASE_NOTES_INPUT" > release/release-notes.md
+          elif [[ -s .github/android-release-notes.md ]]; then
+            cp .github/android-release-notes.md release/release-notes.md
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]] && [[ "$(git cat-file -t "$TAG_NAME" 2>/dev/null || true)" == "tag" ]]; then
+            git for-each-ref "refs/tags/$TAG_NAME" --format='%(contents)' > release/release-notes.md
           else
             printf '%s\n' "性能优化、问题修复与稳定性提升。" > release/release-notes.md
           fi
+
+          if [[ ! -s release/release-notes.md ]]; then
+            printf '%s\n' "性能优化、问题修复与稳定性提升。" > release/release-notes.md
+          fi
+
           python scripts/release/android_release.py manifest \
             --apk "release/$APK_NAME" \
             --output release/update.json \
@@ -164,6 +187,7 @@ jobs:
             --version-code "$VERSION_CODE" \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG_NAME" \
+            --title "$(cat release/release-title.txt)" \
             --notes-file release/release-notes.md
 
       - name: Upload workflow artifact
@@ -173,6 +197,7 @@ jobs:
           path: |
             release/${{ steps.release.outputs.apk_name }}
             release/update.json
+            release/release-title.txt
             release/release-notes.md
           if-no-files-found: error
           retention-days: 30
@@ -196,10 +221,11 @@ jobs:
           APK_NAME: ${{ steps.release.outputs.apk_name }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
+          RELEASE_TITLE="$(cat release/release-title.txt)"
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" "release/$APK_NAME" release/update.json --clobber
             gh release edit "$TAG_NAME" \
-              --title "juying $VERSION_NAME" \
+              --title "$RELEASE_TITLE" \
               --notes-file release/release-notes.md
           else
             EXTRA_ARGS=()
@@ -210,7 +236,7 @@ jobs:
               "release/$APK_NAME" \
               release/update.json \
               --target "$GITHUB_SHA" \
-              --title "juying $VERSION_NAME" \
+              --title "$RELEASE_TITLE" \
               --notes-file release/release-notes.md \
               "${EXTRA_ARGS[@]}"
           fi

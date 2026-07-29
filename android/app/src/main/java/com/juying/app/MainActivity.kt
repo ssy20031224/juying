@@ -178,6 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sourceManager = SourceManager(application)
     private val storageManager = StorageManager(application)
     private val appUpdateManager = AppUpdateManager(application)
+    private val lanercDiscoveryRepository = LanercDiscoveryRepository()
     private val commentRepository = CommentRepository(application)
     private val accountRepository = AccountRepository(application)
     private var commentsLoadedFor: String? = null
@@ -195,6 +196,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var isSearchActive by mutableStateOf(false)
     var items by mutableStateOf<List<SourceItem>>(emptyList())
     var homeSections by mutableStateOf<List<HomeSection>>(emptyList())
+    var discoverySections by mutableStateOf<List<HomeSection>>(emptyList())
+        private set
+    var lanercRankings by mutableStateOf<Map<RankingKind, List<SourceRankingEntry>>>(emptyMap())
+        private set
+    var lanercSchedule by mutableStateOf<List<ScheduleEntry>>(emptyList())
+        private set
+    var lanercDiscoveryLoading by mutableStateOf(false)
+        private set
+    var lanercDiscoveryUpdatedAt by mutableStateOf(0L)
+        private set
+    var lanercDiscoveryError by mutableStateOf<String?>(null)
+        private set
 
     // Player & Detail State
     var activeDetail by mutableStateOf<DetailResult?>(null)
@@ -202,6 +215,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var currentPlayResult by mutableStateOf<PlayResult?>(null)
     var isPlayLoading by mutableStateOf(false)
     var playError by mutableStateOf<String?>(null)
+    var relatedItems by mutableStateOf<List<SourceItem>>(emptyList())
     var episodeCacheProgress by mutableStateOf<String?>(null)
     var downloadProgress by mutableStateOf<String?>(null)
 
@@ -517,7 +531,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun allPoolItems(): List<SourceItem> {
-        return (cachedHomePool + homeSections.flatMap { it.items }).distinctBy { it.id }
+        return (cachedHomePool + homeSections.flatMap { it.items } + libraryItems)
+            .distinctBy { "${it.sourceKey}:${it.id}:${SourceManager.normalizeTitle(it.title)}" }
+    }
+
+    fun remoteDiscoveryPool(): List<SourceItem> =
+        (lanercRankings.values.flatten().map { it.item } + lanercSchedule.map { it.item })
+            .distinctBy { SourceManager.normalizeTitle(it.title) }
+
+    fun refreshLanercDiscovery(force: Boolean = true) {
+        if (lanercDiscoveryLoading) return
+        viewModelScope.launch {
+            lanercDiscoveryLoading = true
+            val result = runCatching { lanercDiscoveryRepository.load(force) }
+            result.onSuccess { snapshot ->
+                lanercRankings = snapshot.rankings
+                lanercSchedule = snapshot.schedule
+                lanercDiscoveryUpdatedAt = snapshot.fetchedAt
+                lanercDiscoveryError = null
+            }.onFailure { error ->
+                lanercDiscoveryError = error.message ?: "榜单/周表加载失败"
+            }
+            lanercDiscoveryLoading = false
+        }
     }
 
     private fun commentMediaKey(item: SourceItem): String =
@@ -599,6 +635,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isAppInitialized = true
         reloadStorageData()
         reloadSourcesState()
+        // Independent metadata fetch. It never gates source initialization,
+        // detail parsing, play URL resolution, or player startup.
+        refreshLanercDiscovery(force = false)
         // TEMP: 登录/注册暂时关闭，保持本地模式，避免启动时访问账号服务。
         if (!TEMP_ACCOUNT_AUTH_DISABLED) restoreAccount()
         viewModelScope.launch {
@@ -654,6 +693,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadHomeInternal() {
+        val collectedSourceSections = mutableListOf<HomeSection>()
         val presetSections = linkedMapOf(
             "热门推荐" to mutableListOf<SourceItem>(),
             "最新更新" to mutableListOf<SourceItem>(),
@@ -687,13 +727,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loading = true
             notice = "正在并发动态加载多源视频..."
             if (cachedHomePool.isNotEmpty()) {
-                cachedHomePool.forEachIndexed { index, item ->
+            cachedHomePool.forEach { item ->
                     val kind = item.kind + " " + item.title
                     val targetKey = when {
                         kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
                         kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
                         kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
-                        index % 2 == 0 -> "热门推荐"
                         else -> "最新更新"
                     }
                     val targetList = presetSections[targetKey]
@@ -723,6 +762,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val jsSections = try {
                             withTimeout(10_000L) { adapter.homeSections() }
                         } catch (_: Exception) { emptyList() }
+                        if (jsSections.isNotEmpty()) {
+                            synchronized(collectedSourceSections) {
+                                collectedSourceSections += jsSections
+                            }
+                        }
 
                         // 2. If homeSections() is empty, fallback to empty query or popular query
                         val fetchedItems = if (jsSections.isNotEmpty()) {
@@ -740,13 +784,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                         if (fetchedItems.isNotEmpty()) {
                             synchronized(presetSections) {
-                                fetchedItems.forEachIndexed { idx, item ->
+                                val sourcedItems = if (jsSections.isNotEmpty()) {
+                                    jsSections.flatMap { section ->
+                                        section.items.map { item -> section.title to item }
+                                    }
+                                } else {
+                                    fetchedItems.map { "" to it }
+                                }
+                                sourcedItems.forEach { (sectionTitle, item) ->
                                     val kind = item.kind + " " + item.title + " " + item.tags.joinToString(" ")
                                     val targetKey = when {
+                                        listOf("热门", "热播", "排行", "人气").any { sectionTitle.contains(it) } -> "热门推荐"
+                                        listOf("最新", "更新", "新番", "上新").any { sectionTitle.contains(it) } -> "最新更新"
+                                        listOf("剧场", "电影").any { sectionTitle.contains(it) } -> "剧场版/电影"
+                                        listOf("国漫", "国产").any { sectionTitle.contains(it) } -> "国漫精粹"
+                                        listOf("日漫", "日本", "TV").any { sectionTitle.contains(it, ignoreCase = true) } -> "日漫精选"
                                         kind.contains("日漫") || kind.contains("日本") -> "日漫精选"
                                         kind.contains("国漫") || kind.contains("国产") -> "国漫精粹"
                                         kind.contains("剧场") || kind.contains("电影") -> "剧场版/电影"
-                                        idx % 2 == 0 -> "热门推荐"
                                         else -> "最新更新"
                                     }
                                     val targetList = presetSections[targetKey]
@@ -765,6 +820,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 val updatedList = synchronized(presetSections) { buildHomeSectionsList() }
                                 withContext(Dispatchers.Main) {
                                     homeSections = updatedList
+                                    discoverySections = synchronized(collectedSourceSections) {
+                                        collectedSourceSections
+                                            .distinctBy { "${it.sourceKey}:${it.title}:${it.key}" }
+                                            .toList()
+                                    }
                                     cachedHomePool = updatedList.flatMap { it.items }
                                     if (!isSearchActive) items = cachedHomePool
                                     notice = "已为你动态加载 ${updatedList.sumOf { it.items.size }} 部精彩作品"
@@ -777,7 +837,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Guaranteed fallback: if homeSections is empty, search popular terms to guarantee home cards!
+        withContext(Dispatchers.Main) {
+            discoverySections = synchronized(collectedSourceSections) {
+                collectedSourceSections
+                    .distinctBy { "${it.sourceKey}:${it.title}:${it.key}" }
+                    .toList()
+            }
+        }
+
+        // If every source omits home sections, show a clearly labelled content
+        // fallback. It must not be advertised as a measured popularity list.
         if (homeSections.isEmpty()) {
             withContext(Dispatchers.IO) {
                 val fallbackItems = mutableListOf<SourceItem>()
@@ -796,7 +865,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (fallbackItems.isNotEmpty()) {
                     val merged = SourceManager.mergeSearchItems(fallbackItems)
-                    val section = HomeSection(title = "🔥 热门推荐", key = "hot", items = merged)
+                    val section = HomeSection(title = "内容推荐", key = "fallback", items = merged)
                     withContext(Dispatchers.Main) {
                         homeSections = listOf(section)
                         cachedHomePool = merged
@@ -1137,6 +1206,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        if (activeStatus != "全部") {
+            filtered = filtered.filter { item ->
+                when (resolveMediaStatus(item).state) {
+                    MediaReleaseState.FINISHED -> activeStatus == "已完结"
+                    MediaReleaseState.SERIALIZING, MediaReleaseState.UPDATING -> activeStatus == "连载中"
+                    else -> false
+                }
+            }
+        }
+
         return when (activeSort) {
             "hot" -> filtered.sortedWith(compareByDescending<SourceItem> { it.sourceCount }
                 .thenByDescending { it.score.toDoubleOrNull() ?: 0.0 })
@@ -1298,12 +1377,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (activeStatus != "全部") {
                 filtered = filtered.filter { item ->
-                    val s = item.status
-                    when {
-                        s.isBlank() -> true
-                        activeStatus == "连载中" -> s.contains("连载") || s.contains("更新") || s.contains("话") || s.contains("集")
-                        activeStatus == "已完结" -> s.contains("完结") || s.contains("全") || s.contains("0集")
-                        else -> true
+                    when (resolveMediaStatus(item).state) {
+                        MediaReleaseState.FINISHED -> activeStatus == "已完结"
+                        MediaReleaseState.SERIALIZING, MediaReleaseState.UPDATING -> activeStatus == "连载中"
+                        else -> false
                     }
                 }
             }
@@ -1382,6 +1459,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fetchLibrary(reset = false)
     }
 
+    private fun mergeDetailMetadata(summary: SourceItem, detail: DetailResult): DetailResult {
+        val detailed = detail.item
+        return detail.copy(
+            item = detailed.copy(
+                title = detailed.title.ifBlank { summary.title },
+                year = detailed.year.ifBlank { summary.year },
+                kind = detailed.kind.ifBlank { summary.kind },
+                tags = (detailed.tags + summary.tags).filter { it.isNotBlank() }.distinct(),
+                status = detailed.status.ifBlank { summary.status },
+                score = detailed.score.ifBlank { summary.score },
+                cover = detailed.cover.ifBlank { summary.cover },
+                description = detailed.description.ifBlank { summary.description },
+                sourceKey = detailed.sourceKey.ifBlank { summary.sourceKey },
+                sourceTitle = detailed.sourceTitle.ifBlank { summary.sourceTitle },
+                sourceCount = maxOf(detailed.sourceCount, summary.sourceCount)
+            )
+        )
+    }
+
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
         playerReturnView = view
         pendingEpisodeName = preferredEpisodeName
@@ -1389,6 +1485,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentPlayResult = null
         isPlayLoading = true
         playError = null
+        relatedItems = emptyList()
         view = "player"
 
         viewModelScope.launch {
@@ -1417,15 +1514,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             // Detail cache-first (30 min TTL) — cached hit shows episodes in <5ms
             val detailCacheKey = "$primarySourceKey:${playableItem.id}"
-            val detailResult = ResultCache.getDetail(detailCacheKey)
+            val cachedDetail = ResultCache.getDetail(detailCacheKey)
+            val detailResult = cachedDetail
+                ?.let { mergeDetailMetadata(playableItem, it) }
                 ?: run {
                     val fresh = withContext(Dispatchers.IO) {
                         if (adapter != null) {
                             try { adapter.detail(playableItem.id) } catch (_: Exception) { null }
                         } else null
                     } ?: DetailResult(playableItem, emptyList())
-                    if (fresh.episodes.isNotEmpty()) ResultCache.putDetail(detailCacheKey, fresh)
-                    fresh
+                    val merged = mergeDetailMetadata(playableItem, fresh)
+                    if (merged.episodes.isNotEmpty()) ResultCache.putDetail(detailCacheKey, merged)
+                    merged
                 }
 
             // Fallback for expired/broken source URL from history or favorites
@@ -1440,7 +1540,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 val altItems = alt.search(playableItem.title, 1)
                                 val match = altItems.firstOrNull { SourceManager.normalizeTitle(it.title) == targetTitle }
                                 if (match != null) {
-                                    val d = alt.detail(match.id)
+                                    val d = mergeDetailMetadata(match, alt.detail(match.id))
                                     if (d.episodes.isNotEmpty()) d else null
                                 } else null
                             } catch (_: Exception) { null }
@@ -1452,11 +1552,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
+            // Keep the fast cache-first render, then revalidate metadata and
+            // episode count in the background so a recently completed/updated
+            // series does not remain stale for the full detail-cache TTL.
+            if (cachedDetail != null && adapter != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val refreshed = try {
+                        mergeDetailMetadata(playableItem, adapter.detail(playableItem.id))
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (refreshed != null && refreshed.episodes.isNotEmpty()) {
+                        ResultCache.putDetail(detailCacheKey, refreshed)
+                        withContext(Dispatchers.Main) {
+                            val current = activeDetail
+                            if (
+                                activeAlternativeIndex == 0 &&
+                                current?.item?.id == playableItem.id &&
+                                current.item.sourceKey == primarySourceKey
+                            ) {
+                                val selectedName = current.episodes.getOrNull(currentEpisodeIndex)?.name
+                                activeDetail = refreshed
+                                currentEpisodeIndex = refreshed.episodes.indexOfFirst {
+                                    selectedName != null && it.name.equals(selectedName, ignoreCase = true)
+                                }.takeIf { it >= 0 } ?: currentEpisodeIndex.coerceIn(refreshed.episodes.indices)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recommendations are computed only from already-loaded metadata.
+            // No discovery network request is allowed on the player path.
+            val discoveryRecommendations = buildDiscoveryRecommendations(
+                finalDetailResult.item,
+                remoteDiscoveryPool()
+            )
+
             // Show player immediately — don't wait for alt sources
             withContext(Dispatchers.Main) {
                 loading = false
                 activeDetail = finalDetailResult
                 activeAlternativeIndex = 0
+                relatedItems = discoveryRecommendations
                 currentEpisodeIndex = finalDetailResult.episodes.indexOfFirst { ep ->
                     pendingEpisodeName?.let { preferred ->
                         ep.name.equals(preferred, ignoreCase = true) ||
@@ -1470,6 +1608,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     isPlayLoading = false
                     notice = "该作品暂无可用选集"
+                }
+            }
+
+            // Source-owned recommendations remain the most specific signal.
+            // If unavailable, keep the deterministic tag/year/score matches
+            // already derived from the remote rank/week metadata.
+            if (adapter != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    // Let the first play resolve use the source's single
+                    // QuickJS executor before the optional recommendation
+                    // request joins its queue.
+                    delay(1_200L)
+                    val recommendations = try {
+                        adapter.related(playableItem.id)
+                            .filter {
+                                SourceManager.normalizeTitle(it.title) !=
+                                    SourceManager.normalizeTitle(playableItem.title)
+                            }
+                            .distinctBy { SourceManager.normalizeTitle(it.title) }
+                            .take(20)
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    withContext(Dispatchers.Main) {
+                        val current = activeDetail
+                        if (current?.item?.id == playableItem.id && recommendations.isNotEmpty()) {
+                            relatedItems = recommendations
+                        }
+                    }
                 }
             }
 
@@ -1509,7 +1676,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     if (matched != null) {
                                         val altDetailKey = "${alt.key}:${matched.id}"
                                         val altDetail = ResultCache.getDetail(altDetailKey)
-                                            ?: alt.detail(matched.id).also {
+                                            ?.let { mergeDetailMetadata(matched, it) }
+                                            ?: mergeDetailMetadata(matched, alt.detail(matched.id)).also {
                                                 ResultCache.putDetail(altDetailKey, it)
                                             }
                                         if (altDetail.episodes.isNotEmpty()) alt.config.key to altDetail else null
@@ -1833,9 +2001,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playOfflineVideo(item: com.juying.app.source.DownloadedItemInfo) {
-        val localPath = item.videoFile.absolutePath
+        val localPath = Uri.fromFile(item.videoFile).toString()
         currentPlayResult = PlayResult(
             url = localPath,
+            type = if (item.videoFile.extension.equals("m3u8", ignoreCase = true)) "hls" else "mp4",
             headers = emptyMap(),
             referer = ""
         )
@@ -2246,12 +2415,22 @@ fun JuyingApp(vm: MainViewModel) {
                                     color = AppColors.cyan,
                                     fontWeight = FontWeight.Bold
                                 )
-                                Text(
-                                    info.notes.ifBlank { "修复问题并提升使用体验" },
-                                    color = AppColors.muted,
-                                    maxLines = 8,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 280.dp),
+                                    color = AppColors.panel2,
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(
+                                        info.notes.ifBlank { "修复问题并提升使用体验" },
+                                        color = AppColors.muted,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .verticalScroll(rememberScrollState())
+                                            .padding(12.dp)
+                                    )
+                                }
                                 vm.updateDownloadProgress?.let { progress ->
                                     Box(
                                         modifier = Modifier
@@ -2673,8 +2852,10 @@ fun LibraryView(vm: MainViewModel) {
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                contentPadding = PaddingValues(8.dp)
+                columns = GridCells.Adaptive(minSize = 120.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 gridItemsIndexed(
                     items = vm.items,
@@ -2697,7 +2878,7 @@ fun LibraryView(vm: MainViewModel) {
                 }
 
                 if (vm.libraryLoadingMore) {
-                    item(span = { GridItemSpan(3) }, key = "footer_loading_more") {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "footer_loading_more") {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             contentAlignment = Alignment.Center
@@ -2710,7 +2891,7 @@ fun LibraryView(vm: MainViewModel) {
                         }
                     }
                 } else if (vm.libraryLoadError != null) {
-                    item(span = { GridItemSpan(3) }, key = "footer_load_error") {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "footer_load_error") {
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -2741,7 +2922,14 @@ fun PlayerViewScreen(vm: MainViewModel) {
 
     val currentEpisode = detail.episodes.getOrNull(vm.currentEpisodeIndex)
     val isFav = vm.isFavorite(detail.item)
-    val totalSources = vm.alternativeDetails.size.coerceAtLeast(1)
+    val totalSources = 1 + vm.alternativeDetails.size
+    val mediaStatus = resolveMediaStatus(detail.item, detail.episodes.size)
+    val genreSummary = resolveAnimeGenres(detail.item)
+        .joinToString(" ")
+        .ifBlank { detail.item.kind.ifBlank { "动漫" } }
+    val episodeSummary = mediaStatus.episodeText.ifBlank {
+        if (detail.episodes.isNotEmpty()) "${detail.episodes.size}集" else "集数未知"
+    }
 
     val chunkSize = 30
     val episodeChunks = remember(detail.episodes) { detail.episodes.chunked(chunkSize) }
@@ -2841,7 +3029,14 @@ fun PlayerViewScreen(vm: MainViewModel) {
         }
 
         // ── Tab Content Area ──
-        if (activeTab == "details") {
+        if (activeTab == "details" && expandedDescription) {
+            MediaInfoOverlay(
+                detail = detail,
+                status = mediaStatus,
+                genres = genreSummary,
+                onDismiss = { expandedDescription = false }
+            )
+        } else if (activeTab == "details") {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                 // Title and Brief
                 item {
@@ -2861,9 +3056,9 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             overflow = TextOverflow.Ellipsis
                         )
                         TextButton(
-                            onClick = { expandedDescription = !expandedDescription }
+                            onClick = { expandedDescription = true }
                         ) {
-                            Text(if (expandedDescription) "简介 \u2303" else "简介 >", color = AppColors.cyan, fontSize = 13.sp)
+                            Text("简介 >", color = AppColors.cyan, fontSize = 13.sp)
                         }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -2873,9 +3068,12 @@ fun PlayerViewScreen(vm: MainViewModel) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "${detail.item.kind.ifEmpty { "动漫" }}  |  ${detail.item.year.ifEmpty { "2026" }}  |  ${detail.item.sourceTitle}",
+                            "$genreSummary  |  ${detail.item.year.ifBlank { "年份未知" }}  |  $episodeSummary",
                             color = AppColors.muted,
-                            fontSize = 12.sp
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
                         if (totalSources > 1) {
                             Spacer(Modifier.width(8.dp))
@@ -2893,20 +3091,6 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                }
-
-                // Synopsis description
-                if (detail.item.description.isNotEmpty()) {
-                    item {
-                        Text(
-                            detail.item.description,
-                            color = AppColors.muted.copy(alpha = 0.85f),
-                            fontSize = 12.sp,
-                            maxLines = if (expandedDescription) Int.MAX_VALUE else 3,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(Modifier.height(14.dp))
-                    }
                 }
 
                 // Action Buttons Row (换源 | 缓存番剧 | 追番 | 分享)
@@ -3135,6 +3319,40 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         }
                     }
                 }
+
+                if (vm.relatedItems.isNotEmpty()) {
+                    item {
+                        Spacer(Modifier.height(18.dp))
+                        Text(
+                            "相关推荐",
+                            color = AppColors.text,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp
+                        )
+                        Text(
+                            "由当前数据源提供",
+                            color = AppColors.muted,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                        )
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            contentPadding = PaddingValues(bottom = 20.dp)
+                        ) {
+                            lazyItemsIndexed(
+                                items = vm.relatedItems,
+                                key = { index, item -> "related:${item.sourceKey}:${item.id}:$index" }
+                            ) { _, item ->
+                                MovieCard(
+                                    item = item,
+                                    modifier = Modifier.width(104.dp)
+                                ) {
+                                    vm.openMovie(item)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } else {
             // Standalone Comments Tab Screen
@@ -3197,6 +3415,109 @@ fun PlayerViewScreen(vm: MainViewModel) {
             }
         }
         }
+    }
+}
+
+@Composable
+private fun MediaInfoOverlay(
+    detail: DetailResult,
+    status: MediaStatusSummary,
+    genres: String,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = AppColors.bg,
+        tonalElevation = 8.dp,
+        shadowElevation = 8.dp
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 16.dp, bottom = 28.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        detail.item.title,
+                        color = AppColors.text,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Surface(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(38.dp),
+                        shape = CircleShape,
+                        color = AppColors.cyan
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "收起简介",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+            }
+
+            if (detail.item.score.isNotBlank()) {
+                item { MediaInfoLine("评分", detail.item.score) }
+            }
+            item { MediaInfoLine("年份", detail.item.year.ifBlank { "未知" }) }
+            item { MediaInfoLine("状态", status.displayText.substringBefore(" | ")) }
+            item {
+                MediaInfoLine(
+                    "集数",
+                    status.episodeText.ifBlank {
+                        detail.episodes.size.takeIf { it > 0 }?.let { "${it}集" } ?: "未知"
+                    }
+                )
+            }
+            item { MediaInfoLine("类型", genres.ifBlank { detail.item.kind.ifBlank { "动漫" } }) }
+            item {
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "简介",
+                    color = AppColors.text,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    detail.item.description.ifBlank { "暂无简介" },
+                    color = AppColors.muted,
+                    fontSize = 15.sp,
+                    lineHeight = 23.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaInfoLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            "$label：",
+            color = AppColors.muted,
+            fontSize = 15.sp,
+            modifier = Modifier.width(56.dp)
+        )
+        Text(
+            value,
+            color = AppColors.muted,
+            fontSize = 15.sp,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -3626,15 +3947,8 @@ fun ProfileView(vm: MainViewModel) {
             Spacer(Modifier.height(16.dp))
         }
 
-        // Custom Source Importer
-        item {
-            CustomSourceImportCard(vm)
-        }
-
-        // Source Debug Log Viewer
-        item {
-            SourceDebugLogCard(vm)
-        }
+        // Advanced custom-source import and diagnostics stay implemented
+        // below but are intentionally hidden from the Android user interface.
     }
 }
 
@@ -4139,7 +4453,9 @@ fun SettingsScreen(vm: MainViewModel) {
             Spacer(Modifier.height(16.dp))
         }
 
-        // Account Nickname Settings
+        // Account editing implementations are retained for a future account
+        // re-enable, but hidden together with the currently disabled account UI.
+        if (!TEMP_ACCOUNT_AUTH_DISABLED) {
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = AppColors.panel),
@@ -4174,6 +4490,7 @@ fun SettingsScreen(vm: MainViewModel) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+        }
         }
 
         // Account Avatar Settings
@@ -4220,7 +4537,7 @@ fun SettingsScreen(vm: MainViewModel) {
             Spacer(Modifier.height(16.dp))
         }
 
-        // Change Email Settings
+        if (!TEMP_ACCOUNT_AUTH_DISABLED) {
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = AppColors.panel),
@@ -4290,8 +4607,9 @@ fun SettingsScreen(vm: MainViewModel) {
             }
             Spacer(Modifier.height(16.dp))
         }
+        }
 
-        // Change Password Settings
+        if (!TEMP_ACCOUNT_AUTH_DISABLED) {
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = AppColors.panel),
@@ -4378,31 +4696,55 @@ fun SettingsScreen(vm: MainViewModel) {
                 }
             }
         }
+        }
     }
 }
 
 @Composable
 fun WeeklyScheduleScreen(vm: MainViewModel) {
     val days = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
-    val calDay = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
+    val tokyoTimeZone = remember { java.util.TimeZone.getTimeZone("Asia/Tokyo") }
+    val calDay = Calendar.getInstance(tokyoTimeZone).get(Calendar.DAY_OF_WEEK)
     val defaultIndex = if (calDay == Calendar.SUNDAY) 6 else (calDay - 2).coerceIn(0, 6)
     var selectedDayIndex by remember { mutableStateOf(defaultIndex) }
 
     val pool = vm.allPoolItems()
-    val dayItems = remember(selectedDayIndex, pool) {
-        if (pool.isEmpty()) emptyList()
-        else {
-            val chunkSize = maxOf(1, pool.size / 7)
-            val chunked = pool.chunked(chunkSize)
-            chunked.getOrElse(selectedDayIndex) { pool.take(6) }
-        }
+    val localScheduleEntries = remember(pool) { buildScheduleEntries(pool) }
+    val scheduleEntries = vm.lanercSchedule.ifEmpty { localScheduleEntries }
+    val usingRemoteSchedule = vm.lanercSchedule.isNotEmpty()
+    val dayItems = remember(selectedDayIndex, scheduleEntries) {
+        scheduleEntries.filter { it.weekdayIndex == selectedDayIndex }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(8.dp))
-            Text("番剧连载周表", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Column(Modifier.weight(1f)) {
+                Text("番剧连载周表", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (usingRemoteSchedule) {
+                        "真实整周排期 · ${discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)}"
+                    } else {
+                        "远程排期不可用，展示来源明确提供的排期"
+                    },
+                    color = AppColors.muted,
+                    fontSize = 11.sp
+                )
+            }
+            IconButton(
+                onClick = {
+                    vm.refreshLanercDiscovery(force = true)
+                    vm.loadHome()
+                },
+                enabled = !vm.lanercDiscoveryLoading
+            ) {
+                if (vm.lanercDiscoveryLoading) {
+                    LoadingSpinner(Modifier.size(20.dp))
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = "刷新周表", tint = AppColors.cyan)
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
 
@@ -4418,9 +4760,13 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
                     onClick = { selectedDayIndex = idx },
                     text = {
                         Text(
-                            text = if (idx == defaultIndex) "$dayName(今天)" else dayName,
+                            text = buildString {
+                                append(if (idx == defaultIndex) "$dayName·今天" else dayName)
+                                append('\n')
+                                append(weekDateLabel(idx, defaultIndex, tokyoTimeZone))
+                            },
                             fontWeight = if (selectedDayIndex == idx) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 13.sp
+                            fontSize = 11.sp
                         )
                     }
                 )
@@ -4430,38 +4776,43 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
 
         if (dayItems.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("暂无当天连载更新计划", color = AppColors.muted, fontSize = 14.sp)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("暂无当天更新计划", color = AppColors.muted, fontSize = 14.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        vm.lanercDiscoveryError ?: "来源未提供星期信息时不会推测排期",
+                        color = AppColors.muted,
+                        fontSize = 11.sp
+                    )
+                }
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(dayItems.size) { index ->
-                    val item = dayItems[index]
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 5.dp)
-                            .clickable { vm.openMovie(item) },
-                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AsyncImage(
-                                model = coverRequest(LocalContext.current, item.cover),
-                                contentDescription = null,
-                                modifier = Modifier.size(60.dp, 84.dp).clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(Modifier.width(14.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Spacer(Modifier.height(4.dp))
-                                Text("更新至第 ${index + 12} 集 · 周${days[selectedDayIndex]} 23:30", color = AppColors.cyan, fontSize = 12.sp)
-                                Spacer(Modifier.height(2.dp))
-                                Text("分类: ${item.kind.ifEmpty { "日漫/热血" }} | 来源: ${item.sourceTitle.ifEmpty { item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
-                            }
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 120.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                gridItems(
+                    items = dayItems,
+                    key = { "${it.item.sourceKey}:${it.item.id}:${it.weekdayIndex}" }
+                ) { entry ->
+                    Column {
+                        MovieCard(entry.item, Modifier.fillMaxWidth()) {
+                            vm.openMovie(entry.item)
                         }
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            listOfNotNull(
+                                entry.airTime?.let { "$it 更新" },
+                                entry.episodeText.takeIf { it.isNotBlank() }
+                            ).joinToString(" · ").ifBlank { "更新时间未知" },
+                            color = AppColors.cyan,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -4469,27 +4820,66 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
     }
 }
 
+private fun weekDateLabel(
+    weekdayIndex: Int,
+    currentWeekdayIndex: Int,
+    timeZone: java.util.TimeZone
+): String {
+    val calendar = Calendar.getInstance(timeZone)
+    calendar.add(Calendar.DAY_OF_YEAR, weekdayIndex - currentWeekdayIndex)
+    return java.text.SimpleDateFormat("MM-dd", java.util.Locale.CHINA).apply {
+        this.timeZone = timeZone
+    }.format(calendar.time)
+}
+
+private fun discoveryUpdatedLabel(timestamp: Long): String {
+    if (timestamp <= 0L) return "等待同步"
+    return java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+        .format(java.util.Date(timestamp)) + " 同步"
+}
+
 @Composable
 fun LeaderboardScreen(vm: MainViewModel) {
-    val tabs = listOf("TV番剧", "剧场番剧", "国漫")
+    val tabs = remember { RankingKind.values().toList() }
     var selectedTabIdx by remember { mutableStateOf(0) }
 
     val pool = vm.allPoolItems()
-    val filteredItems = remember(selectedTabIdx, pool) {
-        val targetKind = when (selectedTabIdx) {
-            0 -> "TV"
-            1 -> "剧场"
-            else -> "国漫"
-        }
-        val matches = pool.filter { it.kind.contains(targetKind) || (selectedTabIdx == 0 && !it.kind.contains("国漫") && !it.kind.contains("剧场")) }
-        if (matches.isNotEmpty()) matches else pool
+    val remoteRankingEntries = vm.lanercRankings[tabs[selectedTabIdx]].orEmpty()
+    val localRankingEntries = remember(selectedTabIdx, vm.discoverySections, pool) {
+        buildRankingEntries(vm.discoverySections, pool, tabs[selectedTabIdx])
     }
+    val rankingEntries = remoteRankingEntries.ifEmpty { localRankingEntries }
+    val usingRemoteRanking = remoteRankingEntries.isNotEmpty()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(8.dp))
-            Text("热门作品排行榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Column(Modifier.weight(1f)) {
+                Text("作品排行榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (usingRemoteRanking) {
+                        "远程真实评分/季度推荐 · ${discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)}"
+                    } else {
+                        "远程榜单不可用，保留来源榜单顺序"
+                    },
+                    color = AppColors.muted,
+                    fontSize = 11.sp
+                )
+            }
+            IconButton(
+                onClick = {
+                    vm.refreshLanercDiscovery(force = true)
+                    vm.loadHome()
+                },
+                enabled = !vm.lanercDiscoveryLoading
+            ) {
+                if (vm.lanercDiscoveryLoading) {
+                    LoadingSpinner(Modifier.size(20.dp))
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = "刷新排行榜", tint = AppColors.cyan)
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
 
@@ -4498,24 +4888,47 @@ fun LeaderboardScreen(vm: MainViewModel) {
             containerColor = AppColors.panel,
             contentColor = AppColors.cyan
         ) {
-            tabs.forEachIndexed { idx, title ->
+            tabs.forEachIndexed { idx, kind ->
                 Tab(
                     selected = selectedTabIdx == idx,
                     onClick = { selectedTabIdx = idx },
-                    text = { Text(title, fontWeight = if (selectedTabIdx == idx) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp) }
+                    text = { Text(kind.label, fontWeight = if (selectedTabIdx == idx) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp) }
                 )
             }
         }
         Spacer(Modifier.height(12.dp))
 
-        if (filteredItems.isEmpty()) {
+        if (rankingEntries.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("暂无排行榜数据", color = AppColors.muted, fontSize = 14.sp)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("暂无可验证的榜单数据", color = AppColors.muted, fontSize = 14.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        vm.lanercDiscoveryError ?: "当前来源没有提供该榜单或评分",
+                        color = AppColors.muted,
+                        fontSize = 11.sp
+                    )
+                }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(filteredItems.size) { rankIdx ->
-                    val item = filteredItems[rankIdx]
+                if (rankingEntries.size >= 3) {
+                    item(key = "ranking_podium") {
+                        RankingPodium(rankingEntries.take(3)) { vm.openMovie(it) }
+                        Text(
+                            "完整榜单",
+                            color = AppColors.text,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+                val listEntries = if (rankingEntries.size >= 3) rankingEntries.drop(3) else rankingEntries
+                items(listEntries.size) { listIndex ->
+                    val entry = listEntries[listIndex]
+                    val item = entry.item
+                    val rankIdx = if (rankingEntries.size >= 3) listIndex + 3 else listIndex
                     val rankNum = rankIdx + 1
                     val badgeColor = when (rankNum) {
                         1 -> Color(0xFFFFD700)
@@ -4529,7 +4942,6 @@ fun LeaderboardScreen(vm: MainViewModel) {
                         3 -> "🥉"
                         else -> "$rankNum"
                     }
-                    val heatVal = (99 - rankIdx).coerceAtLeast(80) / 10.0
 
                     Card(
                         modifier = Modifier
@@ -4562,12 +4974,92 @@ fun LeaderboardScreen(vm: MainViewModel) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.height(3.dp))
-                                Text("🔥 热度: ${heatVal}分 · 播放 18.${(9 - rankIdx).coerceAtLeast(1)}万", color = AppColors.orange, fontSize = 12.sp)
+                                if (item.score.isNotBlank()) {
+                                    Text("★ ${item.score}", color = AppColors.orange, fontSize = 12.sp)
+                                }
                                 Spacer(Modifier.height(2.dp))
-                                Text("${item.year} · ${item.kind.ifEmpty { "热血" }} | 来源: ${item.sourceTitle.ifEmpty { item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
+                                Text(
+                                    listOf(item.year, item.kind).filter { it.isNotBlank() }.joinToString(" · ")
+                                        .ifBlank { "作品信息待补充" },
+                                    color = AppColors.muted,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    "${entry.sourceSection} · 来源榜第${entry.sourcePosition}位",
+                                    color = AppColors.cyan,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RankingPodium(
+    entries: List<SourceRankingEntry>,
+    onOpen: (SourceItem) -> Unit
+) {
+    val slotOrder = listOf(1, 0, 2)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(AppColors.panel)
+            .padding(horizontal = 6.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.Bottom
+    ) {
+        slotOrder.forEach { entryIndex ->
+            val entry = entries[entryIndex]
+            val rank = entryIndex + 1
+            val badgeColor = when (rank) {
+                1 -> Color(0xFFFFD54F)
+                2 -> Color(0xFFB0BEC5)
+                else -> Color(0xFFCD7F32)
+            }
+            val cardWidth = if (rank == 1) 92.dp else 76.dp
+            val cardHeight = if (rank == 1) 128.dp else 106.dp
+            Column(
+                modifier = Modifier
+                    .width(if (rank == 1) 104.dp else 88.dp)
+                    .clickable { onOpen(entry.item) },
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Surface(shape = CircleShape, color = badgeColor.copy(alpha = 0.2f)) {
+                    Text(
+                        "#$rank",
+                        color = badgeColor,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                AsyncImage(
+                    model = coverRequest(LocalContext.current, entry.item.cover),
+                    contentDescription = entry.item.title,
+                    modifier = Modifier.size(cardWidth, cardHeight).clip(RoundedCornerShape(9.dp)),
+                    contentScale = ContentScale.Crop
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    entry.item.title,
+                    color = AppColors.text,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (entry.item.score.isNotBlank()) {
+                    Text("★ ${entry.item.score}", color = AppColors.orange, fontSize = 11.sp)
                 }
             }
         }
@@ -4729,7 +5221,7 @@ fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) 
                                 color = AppColors.cyan.copy(alpha = 0.25f)
                             ) {
                                 Text(
-                                    "🔥 热门推荐",
+                                    "精选内容",
                                     color = AppColors.cyan,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
@@ -4802,45 +5294,55 @@ fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) 
 private val standardAnimeGenres = listOf(
     "热血", "奇幻", "战斗", "穿越", "后宫", "恋爱", "校园", "日常",
     "治愈", "搞笑", "悬疑", "科幻", "冒险", "魔法", "机战", "推理",
-    "运动", "音乐", "偶像", "职场", "历史", "美食", "萌系", "百合", "泡面番"
+    "运动", "音乐", "偶像", "职场", "历史", "美食", "萌系", "百合", "泡面番",
+    "美少女", "少女", "少年", "家庭", "恐怖", "神魔", "动作", "喜剧", "爱情",
+    "战争", "犯罪", "灾难", "儿童", "教育"
 )
 
+private fun resolveAnimeGenres(item: SourceItem): List<String> {
+    val orderedMatches = buildList {
+        val rawValues = item.tags + item.kind
+            .split(Regex("[,，、/|·\\s]+"))
+            .filter { it.isNotBlank() }
+        rawValues.forEach { raw ->
+            val exact = standardAnimeGenres.firstOrNull { raw == it }
+            if (exact != null) {
+                if (exact !in this) add(exact)
+            } else {
+                standardAnimeGenres.forEach { genre ->
+                    if (raw.contains(genre) && genre !in this) add(genre)
+                }
+            }
+        }
+        if (isEmpty()) {
+            val fallbackScope = "${item.kind} ${item.description} ${item.title}"
+            val candidates = standardAnimeGenres.filter { fallbackScope.contains(it) }
+            candidates
+                .filter { genre -> candidates.none { other -> other != genre && other.contains(genre) } }
+                .forEach { genre ->
+                    if (genre !in this) add(genre)
+                }
+            }
+    }
+    return orderedMatches.distinct()
+}
+
 private fun resolveCardGenre(item: SourceItem): String {
-    val scope = "${item.tags.joinToString(" ")} ${item.kind} ${item.description} ${item.title}"
-    val matches = standardAnimeGenres.filter { scope.contains(it) }
+    val matches = resolveAnimeGenres(item)
     if (matches.isNotEmpty()) {
-        return matches.distinct().take(2).joinToString(" · ")
+        val shown = matches.take(4).joinToString(" ")
+        return if (matches.size > 4) "$shown ..." else shown
     }
     val cleanKind = item.kind.replace(Regex("(全部|首页|推荐|热门|最新|分类)"), "").trim()
     return when {
         cleanKind.isNotBlank() -> cleanKind
         item.year.isNotBlank() -> "${item.year} 动漫"
-        else -> "热血 · 奇幻"
+        else -> "动漫"
     }
 }
 
 private fun resolveCardStatus(item: SourceItem): String {
-    val rawStatus = item.status.trim()
-    val combined = "$rawStatus ${item.tags.joinToString(" ")}".trim()
-
-    val isFinished = combined.contains("完结") || combined.contains("全集")
-    val epMatch = Regex("(更新至)?(第?\\d+[集话])|([全共]?\\d+[集话])|(\\d+[集话])").find(combined)?.value ?: ""
-
-    return if (isFinished) {
-        val detail = when {
-            epMatch.isNotBlank() -> if (epMatch.startsWith("共") || epMatch.startsWith("全")) epMatch else "共$epMatch"
-            rawStatus.isNotBlank() && !rawStatus.contains("完结") -> rawStatus
-            else -> "全集"
-        }
-        "已完结 | $detail"
-    } else {
-        val detail = when {
-            epMatch.isNotBlank() -> if (epMatch.startsWith("更新")) epMatch else "更新至$epMatch"
-            rawStatus.isNotBlank() && rawStatus != "连载中" -> rawStatus
-            else -> "更新中"
-        }
-        "连载中 | $detail"
-    }
+    return resolveMediaStatus(item).displayText
 }
 
 @Composable
