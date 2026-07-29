@@ -67,6 +67,8 @@ class AppUpdateManager(private val context: Context) {
                         cloudManifestUrl(TENCENT_COS_PUBLIC_BASE)
                     ) +
                     listOf(
+                        "https://raw.githubusercontent.com/ssy20031224/juying/main/public/api/android/update.json",
+                        "https://cdn.jsdelivr.net/gh/ssy20031224/juying@main/public/api/android/update.json",
                         "https://www.lanerc.app/api/android/update.json",
                         "https://lanerc.app/api/android/update.json"
                     )

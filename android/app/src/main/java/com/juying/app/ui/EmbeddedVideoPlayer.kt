@@ -1017,19 +1017,17 @@ fun EmbeddedVideoPlayer(
 
                     val width = size.width.coerceAtLeast(1)
                     val holdLeft = longPress.position.x < width * 0.5f
-                    val wasPlaying = exoPlayer.playWhenReady
                     speedBeforeHold = currentSpeed
 
                     if (holdLeft) {
-                        // 左侧长按：3X << 3倍速快退（控制 Seek 频率并挂起播放器防止爆栈卡死）
+                        // 左侧长按：3X << 3倍速快退（保持播放器开启状态，避免出现暂停指示）
                         triggerHud("seek", -1, "3X <<", 0L)
                         rewindJob?.cancel()
-                        exoPlayer.playWhenReady = false
                         rewindJob = playerScope.launch {
                             while (true) {
-                                delay(450L)
+                                delay(380L)
                                 if (exoPlayer.playbackState != Player.STATE_BUFFERING) {
-                                    val target = (exoPlayer.currentPosition - 3_500L).coerceAtLeast(0L)
+                                    val target = (exoPlayer.currentPosition - 3_000L).coerceAtLeast(0L)
                                     exoPlayer.seekTo(target)
                                 }
                                 gestureHudText = "3X <<"
@@ -1044,12 +1042,11 @@ fun EmbeddedVideoPlayer(
                     // 等待松手（或手势被取消）
                     waitForUpOrCancellation()
 
-                    // 松手恢复：停止快退、恢复长按前的倍速与播放状态
+                    // 松手恢复：停止快退、更新拖拽时间戳防止控制栏弹出
+                    lastDragTime = System.currentTimeMillis()
                     rewindJob?.cancel()
                     rewindJob = null
-                    if (holdLeft) {
-                        exoPlayer.playWhenReady = wasPlaying
-                    } else if (currentSpeed != speedBeforeHold) {
+                    if (!holdLeft && currentSpeed != speedBeforeHold) {
                         currentSpeed = speedBeforeHold
                     }
                     triggerHud("speed", 0, "", 1L)
@@ -1064,7 +1061,35 @@ fun EmbeddedVideoPlayer(
             ) {
                 Text("视频加载失败", color = AppColors.orange, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(8.dp))
-                Text("请尝试点击「换源」切换到其他数据源", color = AppColors.muted, fontSize = 13.sp)
+                Text("请尝试点击「重新加载」或切换数据源", color = AppColors.muted, fontSize = 13.sp)
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        onClick = {
+                            playError = false
+                            if (onSelectEpisode != null && currentEpisodeIndex in episodes.indices) {
+                                onSelectEpisode(currentEpisodeIndex)
+                            } else {
+                                exoPlayer.seekTo(0L)
+                                exoPlayer.prepare()
+                                exoPlayer.playWhenReady = true
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Black)
+                        Spacer(Modifier.width(4.dp))
+                        Text("重新加载", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (onNextEpisode != null) {
+                        OutlinedButton(
+                            onClick = { onNextEpisode() },
+                            border = androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.6f))
+                        ) {
+                            Text("下一集", color = AppColors.cyan, fontSize = 13.sp)
+                        }
+                    }
+                }
             }
         } else {
             AndroidView(
@@ -1154,7 +1179,9 @@ fun EmbeddedVideoPlayer(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    HudIcon(gestureHudType, gestureHudValue)
+                    if (!gestureHudText.contains("3X")) {
+                        HudIcon(gestureHudType, gestureHudValue)
+                    }
                     Text(gestureHudText, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 }
             }

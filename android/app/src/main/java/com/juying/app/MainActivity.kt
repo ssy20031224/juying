@@ -1325,7 +1325,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Incremental append logic (增量添加展示):
             val existingKeys = currentExisting.map { SourceManager.normalizeTitle(it.title) }.toSet()
             val trulyNewItems = filtered.filter { SourceManager.normalizeTitle(it.title) !in existingKeys }
-
             val finalUpdatedList = if (reset) {
                 when {
                     filtered.isNotEmpty() -> filtered
@@ -1386,6 +1385,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
         playerReturnView = view
         pendingEpisodeName = preferredEpisodeName
+        activeDetail = DetailResult(item, emptyList())
+        currentPlayResult = null
+        isPlayLoading = true
+        playError = null
+        view = "player"
+
         viewModelScope.launch {
             // Older/merged home cards may contain "sourceA,sourceB". The item id
             // belongs to the first source, so resolve a real adapter identity.
@@ -1406,7 +1411,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 loading = true
                 alternativeDetails = emptyList()
-                currentPlayResult = null
                 notice = "正在解析「${playableItem.title}」剧集列表..."
             }
             val adapter = sourceManager.getAdapter(primarySourceKey)
@@ -1461,10 +1465,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } ?: false
                 }.takeIf { it >= 0 } ?: 0
                 pendingEpisodeName = null
-                view = "player"
                 if (finalDetailResult.episodes.isNotEmpty()) {
                     selectEpisode(currentEpisodeIndex)
                 } else {
+                    isPlayLoading = false
                     notice = "该作品暂无可用选集"
                 }
             }
@@ -1526,7 +1530,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectEpisode(index: Int) {
+    fun selectEpisode(index: Int, forceFresh: Boolean = false) {
         val detail = currentActiveDetail() ?: return
         val episodes = detail.episodes
         if (index !in episodes.indices) return
@@ -1546,7 +1550,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             // Play URL cache-first (10 min TTL) — cached hit is instant (<1ms)
             val playCacheKey = "$sourceKey:${ep.flagStr.take(200)}"
-            val cachedPlay = ResultCache.getPlay(playCacheKey)
+            val cachedPlay = if (!forceFresh) ResultCache.getPlay(playCacheKey) else null
             if (cachedPlay != null) {
                 val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                 withContext(Dispatchers.Main) {
