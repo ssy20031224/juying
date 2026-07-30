@@ -6,6 +6,13 @@ enum class RankingKind(val label: String) {
     SCORE("评分")
 }
 
+enum class AnimeRankingCategory(val label: String) {
+    JAPANESE_TV("日漫TV番剧"),
+    JAPANESE_MOVIE("日漫剧场版"),
+    CHINESE_TV("国漫动画"),
+    CHINESE_MOVIE("国漫剧场版")
+}
+
 data class SourceRankingEntry(
     val item: SourceItem,
     val sourceSection: String,
@@ -138,6 +145,72 @@ fun buildRankingEntries(
         }
     }
     return result
+}
+
+/**
+ * Splits source-backed ranking/recommendation order into anime catalog
+ * categories. The function never manufactures a popularity score: ranked
+ * entries keep their upstream order, followed by source section order.
+ */
+fun buildAnimeCategoryRanking(
+    rankedEntries: List<SourceRankingEntry>,
+    sections: List<HomeSection>,
+    category: AnimeRankingCategory
+): List<SourceRankingEntry> {
+    val result = ArrayList<SourceRankingEntry>()
+    val seen = HashSet<String>()
+
+    fun append(entry: SourceRankingEntry) {
+        val key = normalizeDiscoveryTitle(entry.item.title)
+        if (
+            key.isNotEmpty() &&
+            matchesAnimeRankingCategory(entry.item, entry.sourceSection, category) &&
+            seen.add(key)
+        ) {
+            result += entry
+        }
+    }
+
+    rankedEntries.forEach(::append)
+    sections.forEach { section ->
+        section.items.forEachIndexed { index, item ->
+            append(
+                SourceRankingEntry(
+                    item = item,
+                    sourceSection = section.title,
+                    sourcePosition = index + 1
+                )
+            )
+        }
+    }
+    return result
+}
+
+internal fun matchesAnimeRankingCategory(
+    item: SourceItem,
+    sectionTitle: String,
+    category: AnimeRankingCategory
+): Boolean {
+    val evidence = listOf(
+        sectionTitle,
+        item.kind,
+        item.tags.joinToString(" "),
+        item.sourceTitle
+    ).joinToString(" ").lowercase()
+    val chinese = listOf("国漫", "国产动漫", "国产动画", "国创", "中国动漫", "中国动画")
+        .any(evidence::contains)
+    val japanese = listOf("日漫", "日本动漫", "日本动画", "番剧", "新番", "anime")
+        .any(evidence::contains) ||
+        (!chinese && sectionTitle.contains(Regex("月新番|季度")))
+    val theatrical = listOf("剧场版", "动画电影", "动漫电影", "movie")
+        .any(evidence::contains)
+
+    return when (category) {
+        AnimeRankingCategory.JAPANESE_TV -> japanese && !theatrical
+        AnimeRankingCategory.JAPANESE_MOVIE -> japanese && theatrical
+        AnimeRankingCategory.CHINESE_TV -> chinese && !theatrical
+        AnimeRankingCategory.CHINESE_MOVIE -> chinese && theatrical
+    }
 }
 
 /**

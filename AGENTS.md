@@ -341,5 +341,6 @@ COMMENTS_POSTING_ENABLED=false
 - Android 只在 `LanercDiscoveryRepository` 中原生实现经过审计的只读 `/app/rank`、`/app/week` 数据契约，不下载或执行远程 JS。该 Repository 必须继续使用独立网络客户端和独立内存 TTL，不得引用 `ResultCache`、`SourceAdapter.play()`、QuickJS executor 或播放器状态。
 - 远程榜单/周表失败必须保持本地来源回退；不能让发现数据异常转换成详情解析或播放失败。
 - 季度推荐以 `Asia/Shanghai` 为唯一时间基准，只能选择当前年份的当前季度与同年上一季度；禁止提前展示未来季度或回退到上一年份季度。远程缺失当前季度时，只能用当前年份片库与实时周表的交集补建，并排除已明确归属同年上一季度的标题。
+- 首页季度新番榜、首页季度排期、底部周表和底部排行榜是四个不同页面：周表只表示本周更新；排行榜固定区分日漫TV、日漫剧场版、国漫、国漫剧场版。禁止再把季度页签塞回底部周表或通用排行榜。
 - 卡片模型可以保留 `MediaStatus.UNKNOWN`，但前端不得展示“状态待确认”；显示层只能回退到明确集数、来源状态、年份或中性的“已收录”，不得把未知状态猜成连载或完结。
 - 更新面板显示 `update.json` 的发布者自定义标题和完整说明；发布工作流中的手动输入、可选 `.github/android-release-*.{txt,md}`、annotated tag 和默认文案按优先级生成同一份清单/Release 内容。

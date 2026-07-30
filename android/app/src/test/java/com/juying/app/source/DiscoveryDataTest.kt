@@ -88,4 +88,40 @@ class DiscoveryDataTest {
         assertEquals(7, seasonMonthFromLabel("2026年7月新番"))
         assertEquals(10, seasonMonthFromLabel("十月新番"))
     }
+
+    @Test
+    fun `anime ranking categories distinguish region and theatrical format`() {
+        val japaneseTv = SourceItem(title = "日漫TV", kind = "日漫 TV")
+        val japaneseMovie = SourceItem(title = "日漫电影", tags = listOf("日漫", "剧场版"))
+        val chineseTv = SourceItem(title = "国漫TV", kind = "国产动画")
+        val chineseMovie = SourceItem(title = "国漫电影", tags = listOf("国漫", "动画电影"))
+        val sections = listOf(
+            HomeSection(
+                title = "来源热门",
+                key = "hot",
+                items = listOf(japaneseTv, japaneseMovie, chineseTv, chineseMovie)
+            )
+        )
+
+        AnimeRankingCategory.entries.forEach { category ->
+            val result = buildAnimeCategoryRanking(emptyList(), sections, category)
+            assertEquals(1, result.size)
+        }
+        assertEquals(
+            "日漫TV",
+            buildAnimeCategoryRanking(
+                emptyList(),
+                sections,
+                AnimeRankingCategory.JAPANESE_TV
+            ).single().item.title
+        )
+        assertEquals(
+            "国漫电影",
+            buildAnimeCategoryRanking(
+                emptyList(),
+                sections,
+                AnimeRankingCategory.CHINESE_MOVIE
+            ).single().item.title
+        )
+    }
 }
