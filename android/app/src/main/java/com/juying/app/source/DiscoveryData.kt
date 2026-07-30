@@ -12,12 +12,54 @@ data class SourceRankingEntry(
     val sourcePosition: Int
 )
 
+data class AnimeSeason(
+    val year: Int,
+    val month: Int
+) {
+    val label: String
+        get() = "${year}年${month}月新番"
+}
+
+data class SeasonalRecommendation(
+    val season: AnimeSeason,
+    val entries: List<SourceRankingEntry>
+)
+
 data class ScheduleEntry(
     val item: SourceItem,
     val weekdayIndex: Int,
     val airTime: String?,
     val episodeText: String
 )
+
+/**
+ * Returns the current and immediately previous Japanese anime cour that have
+ * already started in the same Beijing-calendar year. Future quarters and the
+ * previous year's October cour are deliberately excluded.
+ */
+fun beijingSeasonWindow(nowMillis: Long = System.currentTimeMillis()): List<AnimeSeason> {
+    val calendar = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Shanghai"))
+    calendar.timeInMillis = nowMillis
+    val year = calendar.get(java.util.Calendar.YEAR)
+    val currentMonth = calendar.get(java.util.Calendar.MONTH) + 1
+    val currentSeasonMonth = listOf(1, 4, 7, 10).last { it <= currentMonth }
+    return listOf(currentSeasonMonth, currentSeasonMonth - 3)
+        .filter { it >= 1 }
+        .map { AnimeSeason(year, it) }
+}
+
+internal fun seasonMonthFromLabel(value: String): Int? {
+    val normalized = value
+        .replace("一月", "1月")
+        .replace("四月", "4月")
+        .replace("七月", "7月")
+        .replace("十月", "10月")
+    return Regex("(?<!\\d)(1|4|7|10)\\s*月")
+        .find(normalized)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+}
 
 private val weekdayTokens = mapOf(
     "一" to 0, "1" to 0, "月" to 0,

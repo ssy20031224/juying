@@ -3,6 +3,8 @@ package com.juying.app.source
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Calendar
+import java.util.TimeZone
 
 class DiscoveryDataTest {
     @Test
@@ -49,5 +51,41 @@ class DiscoveryDataTest {
 
         assertEquals(listOf("高分", "低分"), result.map { it.item.title })
         assertTrue(result.all { it.item.score.isNotBlank() })
+    }
+
+    @Test
+    fun `beijing july window contains current year july and april only`() {
+        val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai")).apply {
+            clear()
+            set(2026, Calendar.JULY, 30, 12, 0, 0)
+        }
+
+        val seasons = beijingSeasonWindow(calendar.timeInMillis)
+
+        assertEquals(
+            listOf(AnimeSeason(2026, 7), AnimeSeason(2026, 4)),
+            seasons
+        )
+        assertTrue(seasons.none { it.month == 10 || it.year != 2026 })
+    }
+
+    @Test
+    fun `beijing january window never imports previous year october`() {
+        val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai")).apply {
+            clear()
+            set(2026, Calendar.JANUARY, 10, 12, 0, 0)
+        }
+
+        assertEquals(
+            listOf(AnimeSeason(2026, 1)),
+            beijingSeasonWindow(calendar.timeInMillis)
+        )
+    }
+
+    @Test
+    fun `season label parser supports chinese and numeric month names`() {
+        assertEquals(4, seasonMonthFromLabel("四月新番"))
+        assertEquals(7, seasonMonthFromLabel("2026年7月新番"))
+        assertEquals(10, seasonMonthFromLabel("十月新番"))
     }
 }

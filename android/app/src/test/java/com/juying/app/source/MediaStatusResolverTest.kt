@@ -40,6 +40,14 @@ class MediaStatusResolverTest {
     }
 
     @Test
+    fun weeklyPipeShorthandIsUpdating() {
+        val result = resolveMediaStatus(SourceItem(status = "15｜周六17:45更"))
+
+        assertEquals(MediaReleaseState.UPDATING, result.state)
+        assertEquals("更新至15集", result.episodeText)
+    }
+
+    @Test
     fun serializingUsesLoadedDetailCount() {
         val result = resolveMediaStatus(
             SourceItem(status = "连载中"),

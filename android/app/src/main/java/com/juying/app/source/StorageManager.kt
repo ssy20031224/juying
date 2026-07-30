@@ -29,11 +29,14 @@ class StorageManager(context: Context) {
         } catch (_: Exception) { emptyList() }
     }
 
-    fun addHistory(item: SourceItem, episodeName: String, playUrl: String) {
+    fun addHistory(item: SourceItem, episodeName: String) {
         val list = getHistory().toMutableList()
         val key = itemKey(item)
         list.removeAll { itemKey(it.item) == key }
-        list.add(0, HistoryItem(item, episodeName, playUrl))
+        // History only needs the stable work/episode identity. Never persist a
+        // temporary or signed playback URL; it may expire and must be resolved
+        // again when the user reopens the record.
+        list.add(0, HistoryItem(item, episodeName, playUrl = ""))
         if (list.size > 50) list.removeAt(list.size - 1)
         prefs.edit().putString("watch_history", gson.toJson(list)).apply()
     }

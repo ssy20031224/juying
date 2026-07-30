@@ -23,6 +23,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -32,6 +33,7 @@ import androidx.media3.ui.PlayerView
 import com.juying.app.AppColors
 import com.juying.app.source.PlayResult
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerDialog(
     title: String,

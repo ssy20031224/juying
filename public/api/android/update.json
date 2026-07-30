@@ -1,10 +1,10 @@
 {
-  "versionCode": 10216,
-  "versionName": "1.2.16",
-  "title": "🎉 聚影 1.2.16 版本更新",
-  "notes": "更新内容：修复了一些已知问题。",
+  "versionCode": 10217,
+  "versionName": "1.2.17",
+  "title": "🎉 聚影 1.2.17 版本更新",
+  "notes": "修复本地历史、收藏、离线播放及播放器解析、后台恢复和手势冲突。\n 优化横屏双栏播放器、剧集状态识别和卡片信息展示。\n修正排行榜布局、评分与刷新，按北京时间推荐当年当前及上一季度新番。",
   "apkUrls": [
-    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.16.bin"
+    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.17.bin"
   ],
   "sha256": ""
 }

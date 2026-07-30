@@ -71,7 +71,9 @@ fun resolveMediaStatus(item: SourceItem, episodeCount: Int? = null): MediaStatus
 
     val updating = listOf(
         "更新中", "更新至", "更新到", "更至", "更新第", "已更新", "每周更新"
-    ).any { combined.contains(it, ignoreCase = true) }
+    ).any { combined.contains(it, ignoreCase = true) } ||
+        Regex("^\\s*\\d+(?:\\.\\d+)?\\s*[|｜].*(?:周|更)")
+            .containsMatchIn(rawStatus)
 
     val finishedCount = Regex("全\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]")
         .find(combined)?.groupValues?.getOrNull(1)
@@ -84,6 +86,8 @@ fun resolveMediaStatus(item: SourceItem, episodeCount: Int? = null): MediaStatus
         "(?:更新至|更新到|更至|更新第|已更新至?)\\s*第?\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]"
     ).find(combined)?.groupValues?.getOrNull(1)
         ?: Regex("第?\\s*(\\d+(?:\\.\\d+)?)\\s*[集话期]")
+            .find(rawStatus)?.groupValues?.getOrNull(1)
+        ?: Regex("^\\s*(\\d+(?:\\.\\d+)?)\\s*[|｜]")
             .find(rawStatus)?.groupValues?.getOrNull(1)
 
     val reliableEpisodeCount = episodeCount?.takeIf { it > 0 }?.toString()

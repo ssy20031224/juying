@@ -9,10 +9,8 @@ import android.media.AudioManager
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import android.view.SurfaceView
 import android.view.TextureView
-import android.view.OrientationEventListener
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -77,6 +75,7 @@ import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.Size as Media3Size
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.Contrast
@@ -339,6 +338,7 @@ private fun HudIcon(type: String, value: Int) {
 }
 
 @OptIn(ExperimentalLayoutApi::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun EmbeddedVideoPlayer(
     url: String,
@@ -354,7 +354,8 @@ fun EmbeddedVideoPlayer(
     onNextEpisode: (() -> Unit)? = null,
     onPrevEpisode: (() -> Unit)? = null,
     onBack: () -> Unit,
-    onError: () -> Unit = {}
+    onError: () -> Unit = {},
+    onFullscreenChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -386,6 +387,7 @@ fun EmbeddedVideoPlayer(
     var sliderPosition by remember { mutableStateOf(0f) }
     var lastDragTime by remember { mutableStateOf(0L) }
     var resumeAfterSliderSeek by remember { mutableStateOf(true) }
+    var dragGestureActive by remember { mutableStateOf(false) }
 
     var isFullscreen by remember { mutableStateOf(false) }
     var isLocked by remember { mutableStateOf(false) }
@@ -424,6 +426,7 @@ fun EmbeddedVideoPlayer(
     // 长按手势状态：记录长按前的倍速（松手恢复），以及左侧快退回放的协程
     var speedBeforeHold by remember { mutableStateOf(1.0f) }
     var rewindJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var holdGestureActive by remember { mutableStateOf(false) }
 
     val playerScope = rememberCoroutineScope()
     var gestureHudType by remember { mutableStateOf("") }
@@ -445,12 +448,24 @@ fun EmbeddedVideoPlayer(
             }
         }
     }
+    val stopHoldGesture = {
+        rewindJob?.cancel()
+        rewindJob = null
+        if (holdGestureActive) {
+            holdGestureActive = false
+            if (currentSpeed != speedBeforeHold) {
+                currentSpeed = speedBeforeHold
+            }
+            gestureHudText = ""
+        }
+    }
 
     // Unified fullscreen window handling: orientation + system bars + display cutout.
     // SHORT_EDGES lets the window extend into the cutout area on punch-hole devices,
     // otherwise the system letterboxes the player and control bars can be pushed off-screen.
-    val applyFullscreen = { targetFullscreen: Boolean ->
+    val applyFullscreen: (Boolean) -> Unit = { targetFullscreen ->
         isFullscreen = targetFullscreen
+        onFullscreenChanged(targetFullscreen)
         activity?.let { act ->
             val window = act.window
             val controller = WindowCompat.getInsetsController(window, window.decorView)
@@ -464,7 +479,9 @@ fun EmbeddedVideoPlayer(
                     window.attributes = lp
                 }
             } else {
-                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                // Give orientation control back to the user/system. A natural
+                // landscape rotation uses the app's split player layout.
+                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 controller.show(WindowInsetsCompat.Type.systemBars())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     val lp = window.attributes
@@ -487,35 +504,6 @@ fun EmbeddedVideoPlayer(
     if (isFullscreen) {
         BackHandler {
             toggleFullscreen()
-        }
-    }
-
-    // System orientation sensor detection ("若系统层面未开启方向锁定!")
-    DisposableEffect(context, isLocked) {
-        val listener = object : OrientationEventListener(context) {
-            override fun onOrientationChanged(orientation: Int) {
-                if (orientation == ORIENTATION_UNKNOWN || isLocked) return
-                val autoRotateOn = try {
-                    Settings.System.getInt(context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1
-                } catch (_: Exception) { false }
-
-                if (!autoRotateOn) return
-
-                val isLandscape = (orientation in 60..120) || (orientation in 240..300)
-                val isPortrait = (orientation in 0..30) || (orientation in 330..359) || (orientation in 150..210)
-
-                if (isLandscape && !isFullscreen) {
-                    applyFullscreen(true)
-                } else if (isPortrait && isFullscreen) {
-                    applyFullscreen(false)
-                }
-            }
-        }
-        if (listener.canDetectOrientation()) {
-            listener.enable()
-        }
-        onDispose {
-            listener.disable()
         }
     }
 
@@ -771,6 +759,18 @@ fun EmbeddedVideoPlayer(
         exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
     }
 
+    val togglePlayback = {
+        if (exoPlayer.playWhenReady || exoPlayer.isPlaying) {
+            exoPlayer.pause()
+        } else {
+            if (exoPlayer.playbackState == Player.STATE_ENDED) {
+                exoPlayer.seekTo(0L)
+                exoPlayer.prepare()
+            }
+            exoPlayer.play()
+        }
+    }
+
     LaunchedEffect(selectedQuality) {
         val selectedVariant = qualities.firstOrNull { it.name == selectedQuality }
         if (selectedVariant != null) {
@@ -892,13 +892,8 @@ fun EmbeddedVideoPlayer(
     }
     DisposableEffect(exoPlayer) {
         PipController.onTogglePlayPause = {
-            if (exoPlayer.isPlaying) {
-                exoPlayer.pause()
-                PipController.isPlaying = false
-            } else {
-                exoPlayer.play()
-                PipController.isPlaying = true
-            }
+            togglePlayback()
+            PipController.isPlaying = exoPlayer.playWhenReady
         }
         PipController.onNextEpisode = onNextEpisode
         PipController.onPrevEpisode = onPrevEpisode
@@ -907,13 +902,23 @@ fun EmbeddedVideoPlayer(
         }
     }
 
-    // 退到后台/锁屏（ON_STOP）时自动暂停，避免后台继续播放导致解锁后
-    // 进度不同步、播放/暂停按钮状态颠倒；画中画模式下不入栈 ON_STOP，保持播放。
+    // 退到后台/锁屏（ON_STOP）时无条件结束临时长按动作并暂停。
+    // isPlaying may already be false because audio focus/surface was lost,
+    // while playWhenReady or temporary 3x speed is still active.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, exoPlayer) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP && !PipController.inPipMode && exoPlayer.isPlaying) {
-                exoPlayer.pause()
+            if (event == Lifecycle.Event.ON_STOP) {
+                val activityInPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    activity?.isInPictureInPictureMode == true
+                } else false
+                if (!PipController.inPipMode && !activityInPip) {
+                    stopHoldGesture()
+                    dragGestureActive = false
+                    exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
+                    exoPlayer.pause()
+                    controlsVisible = true
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -950,6 +955,8 @@ fun EmbeddedVideoPlayer(
 
                 detectDragGestures(
                     onDragStart = { offset ->
+                        dragGestureActive = true
+                        stopHoldGesture()
                         startX = offset.x
                         startY = offset.y
                         totalX = 0f
@@ -996,6 +1003,7 @@ fun EmbeddedVideoPlayer(
                     },
                     onDragEnd = {
                         lastDragTime = System.currentTimeMillis()
+                        dragGestureActive = false
                         if (isLocked || startedOnControls || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
@@ -1003,6 +1011,10 @@ fun EmbeddedVideoPlayer(
                         val targetPosition = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
                         exoPlayer.seekTo(targetPosition)
                         exoPlayer.playWhenReady = resumeAfterGestureSeek
+                    },
+                    onDragCancel = {
+                        lastDragTime = System.currentTimeMillis()
+                        dragGestureActive = false
                     }
                 )
             }
@@ -1020,43 +1032,51 @@ fun EmbeddedVideoPlayer(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val longPress = awaitLongPressOrCancellation(down.id)
-                    if (longPress == null || isLocked) return@awaitEachGesture
+                    if (!PlayerInteractionPolicy.canStartHoldGesture(
+                            longPressDetected = longPress != null,
+                            controlsLocked = isLocked,
+                            dragGestureActive = dragGestureActive
+                        )
+                    ) {
+                        return@awaitEachGesture
+                    }
 
                     val width = size.width.coerceAtLeast(1)
-                    val holdLeft = longPress.position.x < width * 0.5f
+                    val holdLeft = longPress!!.position.x < width * 0.5f
                     speedBeforeHold = currentSpeed
+                    holdGestureActive = true
 
-                    if (holdLeft) {
-                        // 左侧长按：3X << 3倍速快退（保持播放器开启状态，避免出现暂停指示）
-                        triggerHud("seek", -1, "3X <<", 0L)
-                        rewindJob?.cancel()
-                        rewindJob = playerScope.launch {
-                            while (true) {
-                                delay(380L)
-                                if (exoPlayer.playbackState != Player.STATE_BUFFERING) {
-                                    val target = (exoPlayer.currentPosition - 3_000L).coerceAtLeast(0L)
-                                    exoPlayer.seekTo(target)
+                    try {
+                        if (holdLeft) {
+                            // 左侧长按：3X << 3倍速快退（保持播放器开启状态，避免出现暂停指示）
+                            triggerHud("seek", -1, "3X <<", 0L)
+                            rewindJob?.cancel()
+                            rewindJob = playerScope.launch {
+                                while (true) {
+                                    delay(380L)
+                                    if (exoPlayer.playbackState != Player.STATE_BUFFERING) {
+                                        val target = (exoPlayer.currentPosition - 3_000L).coerceAtLeast(0L)
+                                        exoPlayer.seekTo(target)
+                                    }
+                                    gestureHudText = "3X <<"
                                 }
-                                gestureHudText = "3X <<"
                             }
+                        } else {
+                            // 右侧长按：3X >> 3倍速快进
+                            currentSpeed = maxSpeed
+                            triggerHud("speed", 1, "${maxSpeed.toInt()}X >>", 0L)
                         }
-                    } else {
-                        // 右侧长按：3X >> 3倍速快进
-                        currentSpeed = maxSpeed
-                        triggerHud("speed", 1, "${maxSpeed.toInt()}X >>", 0L)
-                    }
 
-                    // 等待松手（或手势被取消）
-                    waitForUpOrCancellation()
-
-                    // 松手恢复：停止快退、更新拖拽时间戳防止控制栏弹出
-                    lastDragTime = System.currentTimeMillis()
-                    rewindJob?.cancel()
-                    rewindJob = null
-                    if (!holdLeft && currentSpeed != speedBeforeHold) {
-                        currentSpeed = speedBeforeHold
+                        // 等待松手（或手势被取消）
+                        waitForUpOrCancellation()
+                    } finally {
+                        // Cancellation also reaches this path (orientation,
+                        // lock screen, background), so temporary speed/rewind
+                        // can never leak into the resumed player.
+                        lastDragTime = System.currentTimeMillis()
+                        stopHoldGesture()
+                        triggerHud("speed", 0, "", 1L)
                     }
-                    triggerHud("speed", 0, "", 1L)
                 }
             }
     ) {
@@ -1335,7 +1355,7 @@ fun EmbeddedVideoPlayer(
                             )
                         }
                         IconButton(
-                            onClick = { if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play() },
+                            onClick = togglePlayback,
                             modifier = Modifier
                                 .size(62.dp)
                                 .background(Color.Black.copy(alpha = 0.55f), CircleShape)
@@ -1445,7 +1465,7 @@ fun EmbeddedVideoPlayer(
                                 // Play / Pause
                                 IconButton(
                                     onClick = {
-                                        if (exoPlayer.playWhenReady) exoPlayer.pause() else exoPlayer.play()
+                                        togglePlayback()
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {

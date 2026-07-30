@@ -27,10 +27,15 @@ private const val DOUBAN_REFERER_SUFFIX =
 data class LanercDiscoverySnapshot(
     val rankings: Map<RankingKind, List<SourceRankingEntry>>,
     val schedule: List<ScheduleEntry>,
+    val seasons: List<SeasonalRecommendation> = emptyList(),
     val fetchedAt: Long
 ) {
     val recommendationPool: List<SourceItem>
-        get() = (rankings.values.flatten().map { it.item } + schedule.map { it.item })
+        get() = (
+            seasons.flatMap { it.entries }.map { it.item } +
+                rankings.values.flatten().map { it.item } +
+                schedule.map { it.item }
+            )
             .distinctBy { normalizeDiscoveryTitle(it.title) }
 }
 
@@ -71,8 +76,14 @@ class LanercDiscoveryRepository {
                 ?.takeIf(List<ScheduleEntry>::isNotEmpty)
                 ?: previous?.schedule
                 ?: emptyList()
+            val seasons = runCatching {
+                fetchSeasonalRecommendations(rankings, schedule, now)
+            }.getOrNull()
+                ?.takeIf(List<SeasonalRecommendation>::isNotEmpty)
+                ?: previous?.seasons
+                ?: emptyList()
 
-            if (rankings.isEmpty() && schedule.isEmpty()) {
+            if (rankings.isEmpty() && schedule.isEmpty() && seasons.isEmpty()) {
                 throw rankingResult.exceptionOrNull()
                     ?: scheduleResult.exceptionOrNull()
                     ?: IllegalStateException("远程榜单和周表均未返回数据")
@@ -81,6 +92,7 @@ class LanercDiscoveryRepository {
             LanercDiscoverySnapshot(
                 rankings = rankings,
                 schedule = schedule,
+                seasons = seasons,
                 fetchedAt = now
             ).also { cached = it }
         }
@@ -142,7 +154,152 @@ class LanercDiscoveryRepository {
         )
     }
 
-    private fun rankItem(vod: JsonObject): SourceItem {
+    private fun fetchSeasonalRecommendations(
+        rankings: Map<RankingKind, List<SourceRankingEntry>>,
+        schedule: List<ScheduleEntry>,
+        nowMillis: Long
+    ): List<SeasonalRecommendation> {
+        val targetSeasons = beijingSeasonWindow(nowMillis)
+        val currentYear = targetSeasons.firstOrNull()?.year ?: return emptyList()
+        val explicitEntries = rankings.values
+            .flatten()
+            .asSequence()
+            .filterNot { it.sourceSection.contains("真实评分") }
+            .filter { it.item.year.toIntOrNull() == currentYear }
+            .distinctBy { normalizeDiscoveryTitle(it.item.title) }
+            .groupBy { seasonMonthFromLabel(it.sourceSection) }
+
+        val catalog = fetchCurrentYearCatalog(currentYear)
+        val catalogByTitle = catalog.associateBy { normalizeDiscoveryTitle(it.title) }
+        val explicitTitles = explicitEntries.values
+            .flatten()
+            .mapTo(HashSet()) { normalizeDiscoveryTitle(it.item.title) }
+        val hotOrder = runCatching { fetchHomeHotOrder() }
+            .getOrDefault(emptyList())
+            .mapIndexed { index, title -> normalizeDiscoveryTitle(title) to index }
+            .toMap()
+
+        return targetSeasons.mapNotNull { season ->
+            val explicit = explicitEntries[season.month].orEmpty()
+            val entries = if (explicit.isNotEmpty()) {
+                explicit.mapIndexed { index, entry ->
+                    entry.copy(
+                        item = entry.item.copy(
+                            status = entry.item.status.ifBlank { season.label }
+                        ),
+                        sourceSection = season.label,
+                        sourcePosition = index + 1
+                    )
+                }
+            } else if (season == targetSeasons.first()) {
+                // The audited rank endpoint can lag one cour behind (for
+                // example it still exposes April on July 30). Derive only the
+                // current cour from titles that are both in the current-year
+                // catalog and the live weekly schedule, then exclude every
+                // title explicitly assigned to an earlier cour.
+                schedule.asSequence()
+                    .mapNotNull seasonalItem@ { scheduled ->
+                        val titleKey = normalizeDiscoveryTitle(scheduled.item.title)
+                        val catalogItem = catalogByTitle[titleKey] ?: return@seasonalItem null
+                        if (titleKey in explicitTitles) return@seasonalItem null
+                        val merged = catalogItem.copy(
+                            year = currentYear.toString(),
+                            kind = scheduled.item.kind.ifBlank { catalogItem.kind },
+                            tags = (scheduled.item.tags + catalogItem.tags).distinct(),
+                            status = scheduled.item.status.ifBlank { catalogItem.status },
+                            score = scheduled.item.score.ifBlank { catalogItem.score },
+                            cover = scheduled.item.cover.ifBlank { catalogItem.cover },
+                            description = scheduled.item.description.ifBlank { catalogItem.description }
+                        )
+                        merged to scheduled
+                    }
+                    .sortedWith(
+                        compareBy<Pair<SourceItem, ScheduleEntry>> {
+                            hotOrder[normalizeDiscoveryTitle(it.first.title)] ?: Int.MAX_VALUE
+                        }
+                            .thenByDescending { it.first.score.toDoubleOrNull() ?: 0.0 }
+                            .thenBy { it.second.weekdayIndex }
+                            .thenBy { it.second.airTime ?: "99:99" }
+                    )
+                    .distinctBy { normalizeDiscoveryTitle(it.first.title) }
+                    .mapIndexed { index, (item, _) ->
+                        SourceRankingEntry(
+                            item = item,
+                            sourceSection = season.label,
+                            sourcePosition = index + 1
+                        )
+                    }
+                    .toList()
+            } else {
+                emptyList()
+            }
+            entries.takeIf(List<SourceRankingEntry>::isNotEmpty)
+                ?.let { SeasonalRecommendation(season, it) }
+        }
+    }
+
+    private fun fetchCurrentYearCatalog(year: Int): List<SourceItem> {
+        val result = mutableListOf<SourceItem>()
+        val seen = HashSet<String>()
+        for (page in 1..8) {
+            val payload = runCatching {
+                fetchDecodedJson(
+                    "app/vod/filter?page=$page&class_id=20&vod_class=&year=$year&sort_by="
+                )
+            }.getOrNull() ?: break
+            val pageItems = payload.getAsJsonArray("filter_vods")
+                ?.mapNotNull { it.takeIf(JsonElement::isJsonObject)?.asJsonObject }
+                .orEmpty()
+            if (pageItems.isEmpty()) break
+            var newItems = 0
+            pageItems.forEach { vod ->
+                val item = rankItem(
+                    vod = vod,
+                    fallbackYear = year.toString(),
+                    fallbackStatus = currentCatalogStatus(vod)
+                )
+                val key = normalizeDiscoveryTitle(item.title)
+                if (key.isNotEmpty() && seen.add(key)) {
+                    result += item
+                    newItems++
+                }
+            }
+            if (newItems == 0) break
+        }
+        return result
+    }
+
+    private fun fetchHomeHotOrder(): List<String> {
+        val payload = fetchDecodedJson("app/home")
+        return payload.getAsJsonArray("hot_list")
+            ?.mapNotNull { element ->
+                element.takeIf(JsonElement::isJsonObject)
+                    ?.asJsonObject
+                    ?.string("vod_name")
+                    ?.takeIf(String::isNotBlank)
+            }
+            .orEmpty()
+    }
+
+    private fun currentCatalogStatus(vod: JsonObject): String {
+        val remarks = vod.string("vod_remarks")
+        val total = vod.int("vod_total").coerceAtLeast(0)
+        return when {
+            remarks.contains("完结") || remarks.contains("全集") -> remarks
+            listOf("未开播", "待播", "预告", "定档").any {
+                remarks.contains(it, ignoreCase = true)
+            } -> "未开播 $remarks".trim()
+            remarks.isNotBlank() -> remarks
+            total > 0 -> "更新中 更新至${total}集"
+            else -> ""
+        }
+    }
+
+    private fun rankItem(
+        vod: JsonObject,
+        fallbackYear: String = "",
+        fallbackStatus: String = ""
+    ): SourceItem {
         val tags = splitTags(vod.string("vod_class"))
         val score = vod.numberString("vod_score")
             .takeUnless { it == "0" || it == "0.0" }
@@ -150,9 +307,10 @@ class LanercDiscoveryRepository {
         return SourceItem(
             id = vod.idString("id"),
             title = vod.string("vod_name"),
-            year = vod.string("vod_year"),
+            year = vod.string("vod_year").ifBlank { fallbackYear },
             kind = tags.joinToString(" "),
             tags = tags,
+            status = vod.string("vod_remarks").ifBlank { fallbackStatus },
             score = score,
             cover = cover(vod.string("vod_pic")),
             description = vod.string("vod_blurb").ifBlank { vod.string("vod_sub") },

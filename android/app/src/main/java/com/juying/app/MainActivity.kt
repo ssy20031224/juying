@@ -70,6 +70,7 @@ import coil.request.ImageRequest
 import com.juying.app.source.*
 import com.juying.app.ui.EmbeddedVideoPlayer
 import com.juying.app.ui.PipController
+import com.juying.app.ui.PlayerInteractionPolicy
 import com.juying.app.update.AppUpdateInfo
 import com.juying.app.update.AppUpdateManager
 import com.juying.app.update.UpdateCheckResult
@@ -78,6 +79,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -190,6 +192,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var cachedHomePool: List<SourceItem> = emptyList()
     // Cancels the previous search when a new one starts
     private var searchJob: Job? = null
+    // Exactly one episode URL may be resolving at a time. Cancelling the
+    // previous request prevents a late result from replacing a newer episode.
+    private var playResolveJob: Job? = null
+    private var playResolveGeneration = 0
 
     var view by mutableStateOf("home") // home, library, player, profile
     var query by mutableStateOf("")
@@ -202,11 +208,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var lanercSchedule by mutableStateOf<List<ScheduleEntry>>(emptyList())
         private set
+    var lanercSeasons by mutableStateOf<List<SeasonalRecommendation>>(emptyList())
+        private set
     var lanercDiscoveryLoading by mutableStateOf(false)
         private set
     var lanercDiscoveryUpdatedAt by mutableStateOf(0L)
         private set
     var lanercDiscoveryError by mutableStateOf<String?>(null)
+        private set
+    var lanercDiscoveryMessage by mutableStateOf("")
         private set
 
     // Player & Detail State
@@ -536,23 +546,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun remoteDiscoveryPool(): List<SourceItem> =
-        (lanercRankings.values.flatten().map { it.item } + lanercSchedule.map { it.item })
+        (
+            lanercSeasons.flatMap { it.entries }.map { it.item } +
+                lanercRankings.values.flatten().map { it.item } +
+                lanercSchedule.map { it.item }
+            )
             .distinctBy { SourceManager.normalizeTitle(it.title) }
 
     fun refreshLanercDiscovery(force: Boolean = true) {
-        if (lanercDiscoveryLoading) return
+        if (lanercDiscoveryLoading) {
+            if (force) lanercDiscoveryMessage = "正在刷新，请稍候…"
+            return
+        }
         viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
             lanercDiscoveryLoading = true
+            if (force) lanercDiscoveryMessage = "正在刷新季度新番数据…"
             val result = runCatching { lanercDiscoveryRepository.load(force) }
             result.onSuccess { snapshot ->
                 lanercRankings = snapshot.rankings
                 lanercSchedule = snapshot.schedule
+                lanercSeasons = snapshot.seasons
                 lanercDiscoveryUpdatedAt = snapshot.fetchedAt
                 lanercDiscoveryError = null
+                if (force) {
+                    val seasonLabels = snapshot.seasons.joinToString("、") { it.season.label }
+                    lanercDiscoveryMessage = if (seasonLabels.isBlank()) {
+                        "刷新成功"
+                    } else {
+                        "刷新成功 · $seasonLabels"
+                    }
+                }
             }.onFailure { error ->
                 lanercDiscoveryError = error.message ?: "榜单/周表加载失败"
+                if (force) lanercDiscoveryMessage = "刷新失败，请稍后重试"
             }
+            val remainingSpinnerMs = 500L - (System.currentTimeMillis() - startedAt)
+            if (remainingSpinnerMs > 0L) delay(remainingSpinnerMs)
             lanercDiscoveryLoading = false
+            if (force) {
+                val displayedMessage = lanercDiscoveryMessage
+                delay(2_000L)
+                if (lanercDiscoveryMessage == displayedMessage) {
+                    lanercDiscoveryMessage = ""
+                }
+            }
         }
     }
 
@@ -1479,6 +1517,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
+        playResolveJob?.cancel()
+        playResolveJob = null
+        playResolveGeneration++
         playerReturnView = view
         pendingEpisodeName = preferredEpisodeName
         activeDetail = DetailResult(item, emptyList())
@@ -1607,7 +1648,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     selectEpisode(currentEpisodeIndex)
                 } else {
                     isPlayLoading = false
-                    notice = "该作品暂无可用选集"
+                    playError = "当前来源没有返回可播放剧集"
+                    notice = "该作品暂无可用选集，请尝试换源或稍后重试"
                 }
             }
 
@@ -1699,16 +1741,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectEpisode(index: Int, forceFresh: Boolean = false) {
-        val detail = currentActiveDetail() ?: return
+        val detail = currentActiveDetail()
+        if (detail == null) {
+            finishPlayResolutionWithError("作品详情已失效，请返回后重新打开")
+            return
+        }
         val episodes = detail.episodes
-        if (index !in episodes.indices) return
+        if (index !in episodes.indices) {
+            finishPlayResolutionWithError(
+                if (episodes.isEmpty()) "当前来源没有返回可播放剧集，请尝试换源"
+                else "所选剧集已失效，请重新选择"
+            )
+            return
+        }
 
         currentEpisodeIndex = index
         val ep = episodes[index]
         val sourceKey = detail.item.sourceKey
-        val adapter = sourceManager.getAdapter(sourceKey) ?: return
+        val adapter = sourceManager.getAdapter(sourceKey)
+        if (adapter == null) {
+            finishPlayResolutionWithError("数据源「${detail.item.sourceTitle.ifBlank { sourceKey }}」当前不可用")
+            return
+        }
 
-        viewModelScope.launch {
+        playResolveJob?.cancel()
+        val generation = ++playResolveGeneration
+        currentPlayResult = null
+        playResolveJob = viewModelScope.launch {
             val resolveStartedAt = System.nanoTime()
             withContext(Dispatchers.Main) {
                 isPlayLoading = true
@@ -1722,13 +1781,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (cachedPlay != null) {
                 val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                 withContext(Dispatchers.Main) {
+                    if (generation != playResolveGeneration) return@withContext
                     isPlayLoading = false
                     currentPlayResult = cachedPlay
-                    if (accountUser != null) {
-                        storageManager.addHistory(detail.item, ep.name, cachedPlay.url)
-                        reloadStorageData()
-                        syncAccountData()
-                    }
+                    recordLocalPlayback(detail.item, ep.name)
                     notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 }
@@ -1737,28 +1793,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val playResult = withContext(Dispatchers.IO) {
-                try { adapter.play(ep.flagStr) } catch (e: Exception) {
-                    android.util.Log.e("MainViewModel", "play failed: ${e.message}")
-                    null
+            val playResult = try {
+                withContext(Dispatchers.IO) {
+                    withTimeout(20_000L) { adapter.play(ep.flagStr) }
                 }
+            } catch (_: TimeoutCancellationException) {
+                null
+            } catch (_: CancellationException) {
+                return@launch
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "play failed: ${e.message}")
+                null
             }
 
             withContext(Dispatchers.Main) {
+                if (generation != playResolveGeneration) return@withContext
                 isPlayLoading = false
                 if (playResult != null && playResult.url.isNotEmpty()) {
                     val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                     ResultCache.putPlay(playCacheKey, playResult)  // Cache for instant replay
                     currentPlayResult = playResult
-                    if (accountUser != null) {
-                        storageManager.addHistory(detail.item, ep.name, playResult.url)
-                        reloadStorageData()
-                        syncAccountData()
-                    }
+                    recordLocalPlayback(detail.item, ep.name)
                     notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 } else {
-                    playError = "播放地址解析失败"
+                    playError = "播放地址解析失败或解析超时"
                     notice = "播放地址解析失败 (${detail.item.sourceTitle})，试试「换源播放」"
                     if (alternativeDetails.isNotEmpty()) {
                         switchSource()
@@ -1766,9 +1825,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // Pre-fetch adjacent episodes in background
-            prefetchAdjacentEpisodes(episodes, index, sourceKey, adapter)
+            // Only warm adjacent episodes after this exact request succeeded.
+            // Failed/stale resolution must not queue more work on the same
+            // source executor while fallback source switching is in progress.
+            if (
+                generation == playResolveGeneration &&
+                playResult != null &&
+                playResult.url.isNotBlank()
+            ) {
+                prefetchAdjacentEpisodes(episodes, index, sourceKey, adapter)
+            }
         }
+    }
+
+    private fun recordLocalPlayback(item: SourceItem, episodeName: String) {
+        storageManager.addHistory(item, episodeName)
+        reloadStorageData()
+        if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
+            syncAccountData()
+        }
+    }
+
+    private fun finishPlayResolutionWithError(message: String) {
+        playResolveJob?.cancel()
+        playResolveJob = null
+        playResolveGeneration++
+        currentPlayResult = null
+        isPlayLoading = false
+        playError = message
+        notice = message
     }
 
     /**
@@ -1842,7 +1927,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playError = null
         activeAlternativeIndex = index
 
-        val newDetail = currentActiveDetail() ?: return
+        val newDetail = currentActiveDetail()
+        if (newDetail == null || newDetail.episodes.isEmpty()) {
+            finishPlayResolutionWithError("该数据源没有返回可播放剧集，请选择其他来源")
+            return
+        }
 
         // Select the closest episode number
         val currentEpNum = currentEpisodeIndex + 1
@@ -2022,23 +2111,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         activeDetail = dummyDetail
         currentEpisodeIndex = 0
+        recordLocalPlayback(dummyDetail.item, item.episodeName)
         playerReturnView = view
         view = "player"
         notice = "正在播放离线缓存：${item.title} ${item.episodeName}"
     }
 
     fun toggleFavorite(item: SourceItem) {
-        if (accountUser == null) {
+        if (!PlayerInteractionPolicy.canUseLocalLibrary(
+                accountFeaturesDisabled = TEMP_ACCOUNT_AUTH_DISABLED,
+                accountAvailable = accountUser != null
+            )
+        ) {
             accountMessage = "请先登录后使用收藏"
             return
         }
         storageManager.toggleFavorite(item)
         reloadStorageData()
-        syncAccountData()
+        if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
+            syncAccountData()
+        }
     }
 
     fun isFavorite(item: SourceItem): Boolean {
-        return accountUser != null && storageManager.isFavorite(item)
+        return PlayerInteractionPolicy.canUseLocalLibrary(
+            accountFeaturesDisabled = TEMP_ACCOUNT_AUTH_DISABLED,
+            accountAvailable = accountUser != null
+        ) &&
+            storageManager.isFavorite(item)
     }
 
     fun clearHistory() {
@@ -2047,6 +2147,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        playResolveJob?.cancel()
         sourceManager.close()
     }
 }
@@ -2487,6 +2588,13 @@ fun HomeView(vm: MainViewModel) {
     val avatars = listOf("👤", "🦊", "🐲", "🐱")
     val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
     var selectedCategory by remember { mutableStateOf("精选") }
+    val homeSeasons = vm.lanercSeasons.map { it.season }
+        .ifEmpty { beijingSeasonWindow() }
+    val homeSeasonSummary = homeSeasons.firstOrNull()?.year
+        ?.let { year ->
+            "$year · ${homeSeasons.joinToString(" / ") { "${it.month}月" }}"
+        }
+        .orEmpty()
 
     val featuredItems = remember(vm.homeSections.firstOrNull()?.items?.firstOrNull()?.id) {
         vm.homeSections.flatMap { it.items }.distinctBy { SourceManager.normalizeTitle(it.title) }.take(5)
@@ -2732,7 +2840,7 @@ fun HomeView(vm: MainViewModel) {
                             Surface(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(46.dp)
+                                    .height(58.dp)
                                     .clickable { vm.view = "leaderboard" },
                                 shape = RoundedCornerShape(12.dp),
                                 color = AppColors.panel
@@ -2744,14 +2852,17 @@ fun HomeView(vm: MainViewModel) {
                                 ) {
                                     Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("热度排行榜", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Column {
+                                        Text("季度新番榜", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                        Text(homeSeasonSummary, color = AppColors.muted, fontSize = 10.sp)
+                                    }
                                 }
                             }
 
                             Surface(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(46.dp)
+                                    .height(58.dp)
                                     .clickable { vm.view = "schedule" },
                                 shape = RoundedCornerShape(12.dp),
                                 color = AppColors.panel
@@ -2763,7 +2874,10 @@ fun HomeView(vm: MainViewModel) {
                                 ) {
                                     Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("番剧排期表", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Column {
+                                        Text("季度排期表", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                        Text(homeSeasonSummary, color = AppColors.muted, fontSize = 10.sp)
+                                    }
                                 }
                             }
                         }
@@ -2919,6 +3033,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
     var selectedChunkIndex by remember { mutableStateOf(0) }
     var activeTab by remember { mutableStateOf("details") }
     var showAllEpisodesModal by remember { mutableStateOf(false) }
+    var playerFullscreen by remember { mutableStateOf(false) }
 
     val currentEpisode = detail.episodes.getOrNull(vm.currentEpisodeIndex)
     val isFav = vm.isFavorite(detail.item)
@@ -2947,8 +3062,19 @@ fun PlayerViewScreen(vm: MainViewModel) {
     // 若按宽度推导 16:9 高度（宽×9/16），在不同尺寸/比例的机型上会超出屏幕高度，
     // 导致顶部栏和进度条下方控制行被裁切（见用户反馈的横屏截屏）。
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val showLandscapeSidePanel = PlayerInteractionPolicy.showLandscapeSidePanel(
+        isLandscape = isLandscape,
+        explicitFullscreen = playerFullscreen
+    )
 
-    Column(Modifier.fillMaxSize()) {
+    Row(Modifier.fillMaxSize()) {
+        Column(
+            modifier = if (showLandscapeSidePanel) {
+                Modifier.weight(2f).fillMaxHeight()
+            } else {
+                Modifier.fillMaxSize()
+            }
+        ) {
         // ── Video Player Area ──
         Box(
             modifier = (if (isLandscape) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9f))
@@ -2964,13 +3090,18 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     qualities = playResult.qualities,
                     title = detail.item.title,
                     episodeName = currentEpisode?.name.orEmpty(),
+                    episodes = detail.episodes,
+                    currentEpisodeIndex = vm.currentEpisodeIndex,
+                    onSelectEpisode = { vm.selectEpisode(it) },
                     onBack = { vm.goBackFromPlayer() },
                     onNextEpisode = if (vm.currentEpisodeIndex < detail.episodes.size - 1) {
                         { vm.selectEpisode(vm.currentEpisodeIndex + 1) }
                     } else null,
                     onPrevEpisode = if (vm.currentEpisodeIndex > 0) {
                         { vm.selectEpisode(vm.currentEpisodeIndex - 1) }
-                    } else null
+                    } else null,
+                    onError = { vm.invalidateCurrentPlayCache() },
+                    onFullscreenChanged = { playerFullscreen = it }
                 )
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -2988,7 +3119,11 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         } else {
                             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted, modifier = Modifier.size(48.dp))
                             Spacer(Modifier.height(6.dp))
-                            Text("等待解析播放地址", color = AppColors.muted, fontSize = 13.sp)
+                            Text("尚未获取播放地址", color = AppColors.muted, fontSize = 13.sp)
+                            Spacer(Modifier.height(6.dp))
+                            TextButton(onClick = { vm.retryPlay() }) {
+                                Text("重新解析", color = AppColors.cyan)
+                            }
                         }
                     }
                 }
@@ -3414,6 +3549,176 @@ fun PlayerViewScreen(vm: MainViewModel) {
                 }
             }
         }
+        }
+        }
+        if (showLandscapeSidePanel) {
+            LandscapePlayerSidePanel(
+                vm = vm,
+                detail = detail,
+                mediaStatus = mediaStatus,
+                genreSummary = genreSummary,
+                modifier = Modifier.weight(1f).fillMaxHeight()
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LandscapePlayerSidePanel(
+    vm: MainViewModel,
+    detail: DetailResult,
+    mediaStatus: MediaStatusSummary,
+    genreSummary: String,
+    modifier: Modifier = Modifier
+) {
+    var selectedTab by remember(detail.item.sourceKey, detail.item.id) {
+        mutableStateOf("episodes")
+    }
+    val isFavorite = vm.isFavorite(detail.item)
+
+    Column(
+        modifier = modifier
+            .background(AppColors.bg)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(
+            detail.item.title,
+            color = AppColors.text,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            "$genreSummary · ${detail.item.year.ifBlank { "年份未知" }} · " +
+                mediaStatus.episodeText.ifBlank { "共${detail.episodes.size}集" },
+            color = AppColors.muted,
+            fontSize = 11.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 3.dp, bottom = 6.dp)
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(
+                selected = selectedTab == "episodes",
+                onClick = { selectedTab = "episodes" },
+                label = { Text("选集 ${detail.episodes.size}", fontSize = 11.sp) }
+            )
+            FilterChip(
+                selected = selectedTab == "info",
+                onClick = { selectedTab = "info" },
+                label = { Text("简介/来源", fontSize = 11.sp) }
+            )
+        }
+
+        if (selectedTab == "episodes") {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 8.dp)
+            ) {
+                gridItemsIndexed(detail.episodes) { index, episode ->
+                    val selected = index == vm.currentEpisodeIndex
+                    Surface(
+                        onClick = { vm.selectEpisode(index) },
+                        modifier = Modifier.padding(3.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (selected) {
+                            AppColors.cyan.copy(alpha = 0.22f)
+                        } else {
+                            AppColors.panel2
+                        },
+                        border = if (selected) {
+                            androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan)
+                        } else null
+                    ) {
+                        Text(
+                            episode.name,
+                            color = if (selected) AppColors.cyan else AppColors.text,
+                            fontSize = 11.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 12.dp)
+            ) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(onClick = { vm.toggleFavorite(detail.item) }) {
+                            Icon(
+                                if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = null,
+                                tint = if (isFavorite) AppColors.rose else AppColors.text,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (isFavorite) "已收藏" else "收藏", fontSize = 11.sp)
+                        }
+                        TextButton(
+                            onClick = { vm.switchSource() },
+                            enabled = vm.availableSourceLabels.size > 1
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("换源", fontSize = 11.sp)
+                        }
+                    }
+                }
+                if (vm.availableSourceLabels.size > 1) {
+                    item {
+                        Text("播放来源", color = AppColors.muted, fontSize = 11.sp)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            vm.availableSourceLabels.forEachIndexed { index, label ->
+                                FilterChip(
+                                    selected = index == vm.activeAlternativeIndex,
+                                    onClick = { vm.selectSource(index) },
+                                    label = {
+                                        Text(
+                                            label,
+                                            fontSize = 10.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+                item {
+                    MediaInfoLine("状态", mediaStatus.displayText.substringBefore(" | "))
+                    if (detail.item.score.isNotBlank()) {
+                        MediaInfoLine("评分", detail.item.score)
+                    }
+                    MediaInfoLine("类型", genreSummary)
+                    Spacer(Modifier.height(8.dp))
+                    Text("简介", color = AppColors.text, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        detail.item.description.ifBlank { "暂无简介" },
+                        color = AppColors.muted,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.padding(top = 5.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -4703,17 +5008,43 @@ fun SettingsScreen(vm: MainViewModel) {
 @Composable
 fun WeeklyScheduleScreen(vm: MainViewModel) {
     val days = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
-    val tokyoTimeZone = remember { java.util.TimeZone.getTimeZone("Asia/Tokyo") }
-    val calDay = Calendar.getInstance(tokyoTimeZone).get(Calendar.DAY_OF_WEEK)
+    val beijingTimeZone = remember { java.util.TimeZone.getTimeZone("Asia/Shanghai") }
+    val calDay = Calendar.getInstance(beijingTimeZone).get(Calendar.DAY_OF_WEEK)
     val defaultIndex = if (calDay == Calendar.SUNDAY) 6 else (calDay - 2).coerceIn(0, 6)
     var selectedDayIndex by remember { mutableStateOf(defaultIndex) }
+    var selectedSeasonIndex by remember { mutableStateOf(0) }
+    val seasons = vm.lanercSeasons
+    LaunchedEffect(seasons.size) {
+        selectedSeasonIndex = selectedSeasonIndex.coerceIn(0, (seasons.lastIndex).coerceAtLeast(0))
+    }
+    val selectedSeason = seasons.getOrNull(selectedSeasonIndex)
+    val selectedSeasonItems = remember(selectedSeason) {
+        selectedSeason?.entries
+            ?.associateBy { normalizeDiscoveryTitle(it.item.title) }
+            .orEmpty()
+    }
 
     val pool = vm.allPoolItems()
     val localScheduleEntries = remember(pool) { buildScheduleEntries(pool) }
     val scheduleEntries = vm.lanercSchedule.ifEmpty { localScheduleEntries }
     val usingRemoteSchedule = vm.lanercSchedule.isNotEmpty()
-    val dayItems = remember(selectedDayIndex, scheduleEntries) {
-        scheduleEntries.filter { it.weekdayIndex == selectedDayIndex }
+    val dayItems = remember(selectedDayIndex, scheduleEntries, selectedSeasonItems) {
+        scheduleEntries.mapNotNull { entry ->
+            val seasonItem = selectedSeasonItems[normalizeDiscoveryTitle(entry.item.title)]
+            if (selectedSeason != null && seasonItem == null) return@mapNotNull null
+            val mergedEntry = if (seasonItem == null) {
+                entry
+            } else {
+                entry.copy(
+                    item = seasonItem.item.copy(
+                        status = entry.item.status.ifBlank { seasonItem.item.status },
+                        score = entry.item.score.ifBlank { seasonItem.item.score },
+                        cover = entry.item.cover.ifBlank { seasonItem.item.cover }
+                    )
+                )
+            }
+            mergedEntry.takeIf { it.weekdayIndex == selectedDayIndex }
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -4723,8 +5054,11 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
             Column(Modifier.weight(1f)) {
                 Text("番剧连载周表", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    if (usingRemoteSchedule) {
-                        "真实整周排期 · ${discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)}"
+                    if (vm.lanercDiscoveryMessage.isNotBlank()) {
+                        vm.lanercDiscoveryMessage
+                    } else if (usingRemoteSchedule) {
+                        "${selectedSeason?.season?.label ?: "当前季度"}真实排期 · " +
+                            discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)
                     } else {
                         "远程排期不可用，展示来源明确提供的排期"
                     },
@@ -4735,7 +5069,6 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
             IconButton(
                 onClick = {
                     vm.refreshLanercDiscovery(force = true)
-                    vm.loadHome()
                 },
                 enabled = !vm.lanercDiscoveryLoading
             ) {
@@ -4747,6 +5080,37 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
             }
         }
         Spacer(Modifier.height(12.dp))
+
+        if (seasons.isNotEmpty()) {
+            ScrollableTabRow(
+                selectedTabIndex = selectedSeasonIndex,
+                containerColor = AppColors.panel,
+                contentColor = AppColors.orange,
+                edgePadding = 0.dp
+            ) {
+                seasons.forEachIndexed { index, season ->
+                    Tab(
+                        selected = selectedSeasonIndex == index,
+                        onClick = {
+                            selectedSeasonIndex = index
+                            selectedDayIndex = defaultIndex
+                        },
+                        text = {
+                            Text(
+                                season.season.label,
+                                fontSize = 12.sp,
+                                fontWeight = if (selectedSeasonIndex == index) {
+                                    FontWeight.Bold
+                                } else {
+                                    FontWeight.Normal
+                                }
+                            )
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
 
         ScrollableTabRow(
             selectedTabIndex = selectedDayIndex,
@@ -4763,7 +5127,7 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
                             text = buildString {
                                 append(if (idx == defaultIndex) "$dayName·今天" else dayName)
                                 append('\n')
-                                append(weekDateLabel(idx, defaultIndex, tokyoTimeZone))
+                                append(weekDateLabel(idx, defaultIndex, beijingTimeZone))
                             },
                             fontWeight = if (selectedDayIndex == idx) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 11.sp
@@ -4780,7 +5144,8 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
                     Text("暂无当天更新计划", color = AppColors.muted, fontSize = 14.sp)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        vm.lanercDiscoveryError ?: "来源未提供星期信息时不会推测排期",
+                        vm.lanercDiscoveryError
+                            ?: "${selectedSeason?.season?.label ?: "当前季度"}当天没有来源明确的更新排期",
                         color = AppColors.muted,
                         fontSize = 11.sp
                     )
@@ -4834,19 +5199,24 @@ private fun weekDateLabel(
 
 private fun discoveryUpdatedLabel(timestamp: Long): String {
     if (timestamp <= 0L) return "等待同步"
-    return java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
-        .format(java.util.Date(timestamp)) + " 同步"
+    return java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.CHINA).apply {
+        timeZone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+    }.format(java.util.Date(timestamp)) + " 同步"
 }
 
 @Composable
 fun LeaderboardScreen(vm: MainViewModel) {
-    val tabs = remember { RankingKind.values().toList() }
-    var selectedTabIdx by remember { mutableStateOf(0) }
+    var selectedSeasonIndex by remember { mutableStateOf(0) }
+    val seasons = vm.lanercSeasons
+    LaunchedEffect(seasons.size) {
+        selectedSeasonIndex = selectedSeasonIndex.coerceIn(0, (seasons.lastIndex).coerceAtLeast(0))
+    }
+    val selectedSeason = seasons.getOrNull(selectedSeasonIndex)
 
     val pool = vm.allPoolItems()
-    val remoteRankingEntries = vm.lanercRankings[tabs[selectedTabIdx]].orEmpty()
-    val localRankingEntries = remember(selectedTabIdx, vm.discoverySections, pool) {
-        buildRankingEntries(vm.discoverySections, pool, tabs[selectedTabIdx])
+    val remoteRankingEntries = selectedSeason?.entries.orEmpty()
+    val localRankingEntries = remember(vm.discoverySections, pool) {
+        buildRankingEntries(vm.discoverySections, pool, RankingKind.HOT)
     }
     val rankingEntries = remoteRankingEntries.ifEmpty { localRankingEntries }
     val usingRemoteRanking = remoteRankingEntries.isNotEmpty()
@@ -4856,10 +5226,13 @@ fun LeaderboardScreen(vm: MainViewModel) {
             Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
-                Text("作品排行榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("季度新番热度榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    if (usingRemoteRanking) {
-                        "远程真实评分/季度推荐 · ${discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)}"
+                    if (vm.lanercDiscoveryMessage.isNotBlank()) {
+                        vm.lanercDiscoveryMessage
+                    } else if (usingRemoteRanking) {
+                        "${selectedSeason?.season?.label} · 当前年份 · " +
+                            discoveryUpdatedLabel(vm.lanercDiscoveryUpdatedAt)
                     } else {
                         "远程榜单不可用，保留来源榜单顺序"
                     },
@@ -4870,7 +5243,6 @@ fun LeaderboardScreen(vm: MainViewModel) {
             IconButton(
                 onClick = {
                     vm.refreshLanercDiscovery(force = true)
-                    vm.loadHome()
                 },
                 enabled = !vm.lanercDiscoveryLoading
             ) {
@@ -4883,20 +5255,32 @@ fun LeaderboardScreen(vm: MainViewModel) {
         }
         Spacer(Modifier.height(12.dp))
 
-        TabRow(
-            selectedTabIndex = selectedTabIdx,
-            containerColor = AppColors.panel,
-            contentColor = AppColors.cyan
-        ) {
-            tabs.forEachIndexed { idx, kind ->
-                Tab(
-                    selected = selectedTabIdx == idx,
-                    onClick = { selectedTabIdx = idx },
-                    text = { Text(kind.label, fontWeight = if (selectedTabIdx == idx) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp) }
-                )
+        if (seasons.isNotEmpty()) {
+            TabRow(
+                selectedTabIndex = selectedSeasonIndex,
+                containerColor = AppColors.panel,
+                contentColor = AppColors.cyan
+            ) {
+                seasons.forEachIndexed { index, season ->
+                    Tab(
+                        selected = selectedSeasonIndex == index,
+                        onClick = { selectedSeasonIndex = index },
+                        text = {
+                            Text(
+                                season.season.label,
+                                fontWeight = if (selectedSeasonIndex == index) {
+                                    FontWeight.Bold
+                                } else {
+                                    FontWeight.Normal
+                                },
+                                fontSize = 13.sp
+                            )
+                        }
+                    )
+                }
             }
+            Spacer(Modifier.height(12.dp))
         }
-        Spacer(Modifier.height(12.dp))
 
         if (rankingEntries.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -4974,9 +5358,12 @@ fun LeaderboardScreen(vm: MainViewModel) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.height(3.dp))
-                                if (item.score.isNotBlank()) {
-                                    Text("★ ${item.score}", color = AppColors.orange, fontSize = 12.sp)
-                                }
+                                val validScore = item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
+                                Text(
+                                    validScore?.let { "★ ${item.score}" } ?: "☆ 暂无评分",
+                                    color = if (validScore != null) AppColors.orange else AppColors.muted,
+                                    fontSize = 12.sp
+                                )
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     listOf(item.year, item.kind).filter { it.isNotBlank() }.joinToString(" · ")
@@ -5013,8 +5400,8 @@ private fun RankingPodium(
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(AppColors.panel)
-            .padding(horizontal = 6.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+            .padding(horizontal = 4.dp, vertical = 22.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.Bottom
     ) {
         slotOrder.forEach { entryIndex ->
@@ -5029,7 +5416,9 @@ private fun RankingPodium(
             val cardHeight = if (rank == 1) 128.dp else 106.dp
             Column(
                 modifier = Modifier
-                    .width(if (rank == 1) 104.dp else 88.dp)
+                    .weight(1f)
+                    .padding(horizontal = 2.dp)
+                    .offset(y = if (rank == 1) (-8).dp else 0.dp)
                     .clickable { onOpen(entry.item) },
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -5056,11 +5445,17 @@ private fun RankingPodium(
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 34.dp)
                 )
-                if (entry.item.score.isNotBlank()) {
-                    Text("★ ${entry.item.score}", color = AppColors.orange, fontSize = 11.sp)
-                }
+                val validScore = entry.item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
+                Text(
+                    validScore?.let { "★ ${entry.item.score}" } ?: "☆ 暂无评分",
+                    color = if (validScore != null) AppColors.orange else AppColors.muted,
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
             }
         }
     }
@@ -5342,7 +5737,12 @@ private fun resolveCardGenre(item: SourceItem): String {
 }
 
 private fun resolveCardStatus(item: SourceItem): String {
-    return resolveMediaStatus(item).displayText
+    val summary = resolveMediaStatus(item)
+    if (summary.state != MediaReleaseState.UNKNOWN) return summary.displayText
+    return summary.episodeText
+        .ifBlank { item.status.trim().take(24) }
+        .ifBlank { item.year.takeIf(String::isNotBlank)?.let { "${it}年作品" }.orEmpty() }
+        .ifBlank { "已收录" }
 }
 
 @Composable
