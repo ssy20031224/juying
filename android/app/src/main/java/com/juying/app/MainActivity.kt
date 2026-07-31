@@ -1,4 +1,7 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.material.ExperimentalMaterialApi::class
+)
 
 package com.juying.app
 
@@ -44,17 +47,24 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.DismissDirection
+import androidx.compose.material.DismissValue
+import androidx.compose.material.SwipeToDismiss
+import androidx.compose.material.rememberDismissState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -86,6 +96,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import java.io.File
@@ -192,6 +203,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var cachedHomePool: List<SourceItem> = emptyList()
     // Cancels the previous search when a new one starts
     private var searchJob: Job? = null
+    // Cancels the previous detail/source discovery when another card opens.
+    // Without this guard a late empty response can erase a newer title's
+    // episodes and source chips.
+    private var detailLoadJob: Job? = null
+    private var detailLoadGeneration = 0
     // Exactly one episode URL may be resolving at a time. Cancelling the
     // previous request prevents a late result from replacing a newer episode.
     private var playResolveJob: Job? = null
@@ -218,6 +234,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var lanercDiscoveryMessage by mutableStateOf("")
         private set
+    var animeCategoryRankings by mutableStateOf<Map<AnimeRankingCategory, List<SourceRankingEntry>>>(
+        emptyMap()
+    )
+        private set
+    var animeCategoryRankingLoading by mutableStateOf<Set<AnimeRankingCategory>>(emptySet())
+        private set
+    private val animeCategoryRankingJobs = mutableMapOf<AnimeRankingCategory, Job>()
 
     // Player & Detail State
     var activeDetail by mutableStateOf<DetailResult?>(null)
@@ -242,6 +265,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // History and Favorites
     var historyList by mutableStateOf<List<HistoryItem>>(emptyList())
     var favoritesList by mutableStateOf<List<SourceItem>>(emptyList())
+    var searchHistory by mutableStateOf(storageManager.getSearchHistory())
+        private set
     var commentNick by mutableStateOf(storageManager.getCommentNick())
     var commentDraft by mutableStateOf("")
     var comments by mutableStateOf<List<CloudComment>>(emptyList())
@@ -250,6 +275,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var accountUser by mutableStateOf<AccountUser?>(null)
     var accountBusy by mutableStateOf(false)
     var accountMessage by mutableStateOf("")
+
+    private var lastHistoryProgressWriteAt = 0L
+    private var lastHistoryProgressKey = ""
+    private var lastHistoryProgressPercent = -1
 
     // Theme & Account Settings State
     var themeMode by mutableStateOf(storageManager.getThemeMode())
@@ -599,6 +628,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     lanercDiscoveryMessage = ""
                 }
             }
+        }
+    }
+
+    fun loadAnimeCategoryRanking(
+        category: AnimeRankingCategory,
+        force: Boolean = false
+    ) {
+        if (!force && animeCategoryRankings[category].orEmpty().isNotEmpty()) return
+        animeCategoryRankingJobs.remove(category)?.cancel()
+        animeCategoryRankingJobs[category] = viewModelScope.launch {
+            animeCategoryRankingLoading = animeCategoryRankingLoading + category
+            val keywords = when (category) {
+                AnimeRankingCategory.JAPANESE_TV -> listOf("日本新番", "日漫")
+                AnimeRankingCategory.JAPANESE_MOVIE -> listOf("动漫剧场版", "日本动画电影")
+                AnimeRankingCategory.CHINESE_TV -> listOf("国漫", "国产动画")
+                AnimeRankingCategory.CHINESE_MOVIE -> listOf("国漫剧场版", "国产动画电影")
+            }
+            val categoryLabel = category.label
+            val fetched = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    sourceManager.allAdapters().map { adapter ->
+                        async {
+                            keywords.firstNotNullOfOrNull { keyword ->
+                                runCatching { adapter.search(keyword, 1) }
+                                    .getOrNull()
+                                    ?.takeIf(List<SourceItem>::isNotEmpty)
+                                    ?.mapIndexed { index, item ->
+                                        SourceRankingEntry(
+                                            item = item,
+                                            sourceSection = "$categoryLabel · ${adapter.title}",
+                                            sourcePosition = index + 1
+                                        )
+                                    }
+                            }.orEmpty()
+                        }
+                    }.awaitAll().flatten()
+                }
+            }
+                .filter {
+                    matchesAnimeRankingCategory(it.item, it.sourceSection, category)
+                }
+                .distinctBy { normalizeDiscoveryTitle(it.item.title) }
+            animeCategoryRankings = animeCategoryRankings + (category to fetched)
+            animeCategoryRankingLoading = animeCategoryRankingLoading - category
+            animeCategoryRankingJobs.remove(category)
         }
     }
 
@@ -1095,8 +1169,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val q = keyword.trim()
         if (q.isBlank()) return
         query = q
+        storageManager.addSearchHistory(q)
+        searchHistory = storageManager.getSearchHistory()
         view = "search_result"
         search(q)
+    }
+
+    fun openSearch() {
+        searchHistory = storageManager.getSearchHistory()
+        view = "search"
+    }
+
+    fun removeSearchHistory(query: String) {
+        storageManager.removeSearchHistory(query)
+        searchHistory = storageManager.getSearchHistory()
+    }
+
+    fun clearSearchHistory() {
+        storageManager.clearSearchHistory()
+        searchHistory = emptyList()
     }
 
     fun clearSearch() {
@@ -1524,7 +1615,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * A merged/home/search card can carry a stale source-local id even though
+     * its title is valid. Try the supplied id first, then recover the exact
+     * title inside the same source before declaring that the source has no
+     * episodes.
+     */
+    private fun fetchUsableDetail(adapter: SourceAdapter, summary: SourceItem): DetailResult {
+        val direct = runCatching {
+            mergeDetailMetadata(summary, adapter.detail(summary.id))
+        }.getOrNull()
+        if (direct != null && direct.episodes.isNotEmpty()) return direct
+
+        val targetTitle = SourceManager.normalizeTitle(summary.title)
+        val recovered = runCatching {
+            adapter.search(summary.title, 1)
+                .firstOrNull {
+                    SourceManager.normalizeTitle(it.title) == targetTitle
+                }
+                ?.let { match ->
+                    mergeDetailMetadata(match, adapter.detail(match.id))
+                }
+        }.getOrNull()
+        return recovered?.takeIf { it.episodes.isNotEmpty() }
+            ?: direct
+            ?: DetailResult(summary, emptyList())
+    }
+
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
+        detailLoadJob?.cancel()
+        val detailGeneration = ++detailLoadGeneration
         playResolveJob?.cancel()
         playResolveJob = null
         playResolveGeneration++
@@ -1537,7 +1657,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         relatedItems = emptyList()
         view = "player"
 
-        viewModelScope.launch {
+        detailLoadJob = viewModelScope.launch {
             // Older/merged home cards may contain "sourceA,sourceB". The item id
             // belongs to the first source, so resolve a real adapter identity.
             val primarySourceKey = item.sourceKey
@@ -1555,10 +1675,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else item
 
             withContext(Dispatchers.Main) {
+                if (detailGeneration != detailLoadGeneration) return@withContext
                 loading = true
                 alternativeDetails = emptyList()
                 notice = "正在解析「${playableItem.title}」剧集列表..."
             }
+            if (detailGeneration != detailLoadGeneration) return@launch
             val adapter = sourceManager.getAdapter(primarySourceKey)
 
             // Detail cache-first (30 min TTL) — cached hit shows episodes in <5ms
@@ -1569,7 +1691,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ?: run {
                     val fresh = withContext(Dispatchers.IO) {
                         if (adapter != null) {
-                            try { adapter.detail(playableItem.id) } catch (_: Exception) { null }
+                            fetchUsableDetail(adapter, playableItem)
                         } else null
                     } ?: DetailResult(playableItem, emptyList())
                     val merged = mergeDetailMetadata(playableItem, fresh)
@@ -1582,38 +1704,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (finalDetailResult.episodes.isEmpty()) {
                 val fallback = withContext(Dispatchers.IO) {
                     val targetTitle = SourceManager.normalizeTitle(playableItem.title)
-                    sourceManager.allAdapters().firstNotNullOfOrNull { alt ->
-                        if (alt.key == primarySourceKey) null
-                        else {
-                            try {
-                                val altItems = alt.search(playableItem.title, 1)
-                                val match = altItems.firstOrNull { SourceManager.normalizeTitle(it.title) == targetTitle }
-                                if (match != null) {
-                                    val d = mergeDetailMetadata(match, alt.detail(match.id))
-                                    if (d.episodes.isNotEmpty()) d else null
-                                } else null
-                            } catch (_: Exception) { null }
-                        }
+                    coroutineScope {
+                        sourceManager.allAdapters()
+                            .filter { it.key != primarySourceKey }
+                            .map { alt ->
+                                async {
+                                    withTimeoutOrNull(12_000L) {
+                                        runCatching {
+                                            val match = alt.search(playableItem.title, 1)
+                                                .firstOrNull {
+                                                    SourceManager.normalizeTitle(it.title) == targetTitle
+                                                }
+                                            match?.let { fetchUsableDetail(alt, it) }
+                                                ?.takeIf { it.episodes.isNotEmpty() }
+                                        }.getOrNull()
+                                    }
+                                }
+                            }
+                            .awaitAll()
+                            .firstOrNull { it != null }
                     }
                 }
                 if (fallback != null) {
                     finalDetailResult = fallback
                 }
             }
+            if (detailGeneration != detailLoadGeneration) return@launch
 
             // Keep the fast cache-first render, then revalidate metadata and
             // episode count in the background so a recently completed/updated
             // series does not remain stale for the full detail-cache TTL.
             if (cachedDetail != null && adapter != null) {
-                viewModelScope.launch(Dispatchers.IO) {
+                launch(Dispatchers.IO) {
                     val refreshed = try {
-                        mergeDetailMetadata(playableItem, adapter.detail(playableItem.id))
+                        fetchUsableDetail(adapter, playableItem)
                     } catch (_: Exception) {
                         null
                     }
                     if (refreshed != null && refreshed.episodes.isNotEmpty()) {
                         ResultCache.putDetail(detailCacheKey, refreshed)
                         withContext(Dispatchers.Main) {
+                            if (detailGeneration != detailLoadGeneration) return@withContext
                             val current = activeDetail
                             if (
                                 activeAlternativeIndex == 0 &&
@@ -1640,6 +1771,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             // Show player immediately — don't wait for alt sources
             withContext(Dispatchers.Main) {
+                if (detailGeneration != detailLoadGeneration) return@withContext
                 loading = false
                 activeDetail = finalDetailResult
                 activeAlternativeIndex = 0
@@ -1660,12 +1792,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     notice = "该作品暂无可用选集，请尝试换源或稍后重试"
                 }
             }
+            if (detailGeneration != detailLoadGeneration) return@launch
 
             // Source-owned recommendations remain the most specific signal.
             // If unavailable, keep the deterministic tag/year/score matches
             // already derived from the remote rank/week metadata.
             if (adapter != null) {
-                viewModelScope.launch(Dispatchers.IO) {
+                launch(Dispatchers.IO) {
                     // Let the first play resolve use the source's single
                     // QuickJS executor before the optional recommendation
                     // request joins its queue.
@@ -1682,6 +1815,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         emptyList()
                     }
                     withContext(Dispatchers.Main) {
+                        if (detailGeneration != detailLoadGeneration) return@withContext
                         val current = activeDetail
                         if (current?.item?.id == playableItem.id && recommendations.isNotEmpty()) {
                             relatedItems = recommendations
@@ -1693,7 +1827,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Pre-fetch episode 2 play URL in background (ep 1 is being fetched by selectEpisode above)
             val ep1 = detailResult.episodes.getOrNull(1)
             if (ep1 != null && adapter != null) {
-                viewModelScope.launch(Dispatchers.IO) {
+                launch(Dispatchers.IO) {
                     val prefetchKey = "$primarySourceKey:${ep1.flagStr.take(200)}"
                     if (ResultCache.getPlay(prefetchKey) == null) {
                         try {
@@ -1707,10 +1841,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Fetch alternative sources in background concurrently
             val itemTitle = playableItem.title
             val primaryKey = primarySourceKey
-            viewModelScope.launch(Dispatchers.IO) {
+            launch(Dispatchers.IO) {
                 val altList = try {
                     coroutineScope {
-                        val others = sourceManager.allAdapters().filter { it.key != primaryKey }
+                        val activeResolvedKey = finalDetailResult.item.sourceKey
+                        val others = sourceManager.allAdapters().filter {
+                            it.key != primaryKey && it.key != activeResolvedKey
+                        }
                         others.map { alt ->
                             async {
                                 try {
@@ -1727,9 +1864,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         val altDetailKey = "${alt.key}:${matched.id}"
                                         val altDetail = ResultCache.getDetail(altDetailKey)
                                             ?.let { mergeDetailMetadata(matched, it) }
-                                            ?: mergeDetailMetadata(matched, alt.detail(matched.id)).also {
-                                                ResultCache.putDetail(altDetailKey, it)
-                                            }
+                                            ?: fetchUsableDetail(alt, matched)
+                                                .also {
+                                                    if (it.episodes.isNotEmpty()) {
+                                                        ResultCache.putDetail(altDetailKey, it)
+                                                    }
+                                                }
                                         if (altDetail.episodes.isNotEmpty()) alt.config.key to altDetail else null
                                     } else null
                                 } catch (_: Exception) { null }
@@ -1739,6 +1879,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (_: Exception) { emptyList() }
 
                 withContext(Dispatchers.Main) {
+                    if (detailGeneration != detailLoadGeneration) return@withContext
                     alternativeDetails = altList
                     if (altList.isNotEmpty()) {
                         notice = "已找到 ${altList.size + 1} 个可用数据源"
@@ -1852,6 +1993,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
             syncAccountData()
         }
+    }
+
+    fun updatePlaybackProgress(
+        item: SourceItem,
+        episodeName: String,
+        positionMs: Long,
+        durationMs: Long
+    ) {
+        if (positionMs < 0L || durationMs <= 0L) return
+        val now = System.currentTimeMillis()
+        val percent = ((positionMs.coerceAtMost(durationMs) * 100L) / durationMs)
+            .toInt()
+            .coerceIn(0, 100)
+        val key = "${item.sourceKey.substringBefore(',')}:${item.id}:$episodeName"
+        if (
+            key == lastHistoryProgressKey &&
+            percent == lastHistoryProgressPercent &&
+            now - lastHistoryProgressWriteAt < 15_000L
+        ) {
+            return
+        }
+        if (key == lastHistoryProgressKey && now - lastHistoryProgressWriteAt < 5_000L) return
+        lastHistoryProgressKey = key
+        lastHistoryProgressPercent = percent
+        lastHistoryProgressWriteAt = now
+        storageManager.addHistory(item, episodeName, positionMs, durationMs)
+        historyList = storageManager.getHistory()
     }
 
     private fun finishPlayResolutionWithError(message: String) {
@@ -2134,19 +2302,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             accountMessage = "请先登录后使用收藏"
             return
         }
-        storageManager.toggleFavorite(item)
-        reloadStorageData()
+        val nowFavorite = storageManager.toggleFavorite(item)
+        favoritesList = storageManager.getFavorites()
+        notice = if (nowFavorite) "已追番" else "已取消追番"
         if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
             syncAccountData()
         }
     }
 
     fun isFavorite(item: SourceItem): Boolean {
-        return PlayerInteractionPolicy.canUseLocalLibrary(
+        if (!PlayerInteractionPolicy.canUseLocalLibrary(
             accountFeaturesDisabled = TEMP_ACCOUNT_AUTH_DISABLED,
             accountAvailable = accountUser != null
-        ) &&
-            storageManager.isFavorite(item)
+        )) return false
+        val targetSource = item.sourceKey.substringBefore(',').trim()
+        val targetTitle = SourceManager.normalizeTitle(item.title)
+        return favoritesList.any { favorite ->
+            val sameIdentity =
+                favorite.sourceKey.substringBefore(',').trim() == targetSource &&
+                    favorite.id == item.id &&
+                    item.id.isNotBlank()
+            val sameTitle =
+                targetTitle.isNotBlank() &&
+                    SourceManager.normalizeTitle(favorite.title) == targetTitle
+            sameIdentity || sameTitle
+        }
+    }
+
+    fun removeHistory(item: SourceItem) {
+        storageManager.removeHistory(item)
+        historyList = storageManager.getHistory()
+        notice = "已删除该条观看记录"
     }
 
     fun clearHistory() {
@@ -2155,6 +2341,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        animeCategoryRankingJobs.values.forEach { it.cancel() }
+        detailLoadJob?.cancel()
         playResolveJob?.cancel()
         sourceManager.close()
     }
@@ -2388,7 +2576,7 @@ fun JuyingApp(vm: MainViewModel) {
         when {
             vm.view == "player" -> vm.goBackFromPlayer()
             vm.view.startsWith("profile_") || vm.view == "settings" -> vm.view = "profile"
-            vm.view == "search_result" -> vm.view = "home"
+            vm.view == "search" || vm.view == "search_result" -> vm.view = "home"
             vm.view != "home" -> vm.view = "home"
             else -> activity?.finish()
         }
@@ -2453,6 +2641,8 @@ fun JuyingApp(vm: MainViewModel) {
                         vm.view != "player" &&
                         !vm.view.startsWith("profile_") &&
                         !vm.view.startsWith("seasonal_") &&
+                        vm.view != "search" &&
+                        vm.view != "search_result" &&
                         vm.view != "settings"
                     ) {
                         NavigationBar(containerColor = AppColors.panel) {
@@ -2493,6 +2683,7 @@ fun JuyingApp(vm: MainViewModel) {
                 Box(Modifier.fillMaxSize().padding(padding).background(AppColors.bg)) {
                     when (vm.view) {
                         "home" -> HomeView(vm)
+                        "search" -> SearchLandingScreen(vm)
                         "search_result" -> SearchResultScreen(vm)
                         "library" -> LibraryView(vm)
                         "schedule" -> WeeklyScheduleScreen(vm)
@@ -2641,7 +2832,8 @@ fun HomeView(vm: MainViewModel) {
             Surface(
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp),
+                    .height(40.dp)
+                    .clickable { vm.openSearch() },
                 shape = RoundedCornerShape(20.dp),
                 color = Color.White.copy(alpha = 0.08f),
                 border = androidx.compose.foundation.BorderStroke(
@@ -2664,15 +2856,12 @@ fun HomeView(vm: MainViewModel) {
                     Spacer(Modifier.width(6.dp))
                     BasicTextField(
                         value = vm.query,
-                        onValueChange = {
-                            vm.query = it
-                            if (it.isBlank()) vm.clearSearch()
-                        },
+                        onValueChange = {},
                         modifier = Modifier.weight(1f),
+                        readOnly = true,
                         singleLine = true,
                         textStyle = TextStyle(color = AppColors.text, fontSize = 14.sp),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = { vm.executeSearch(vm.query) }),
                         cursorBrush = SolidColor(AppColors.cyan),
                         decorationBox = @Composable { innerTextField ->
                             Box(contentAlignment = Alignment.CenterStart) {
@@ -2684,16 +2873,14 @@ fun HomeView(vm: MainViewModel) {
                         }
                     )
                     if (vm.query.isNotEmpty()) {
-                        IconButton(onClick = { vm.clearSearch() }, modifier = Modifier.size(24.dp)) {
+                        IconButton(onClick = { vm.openSearch() }, modifier = Modifier.size(24.dp)) {
                             Icon(Icons.Default.Close, "清除", tint = AppColors.muted, modifier = Modifier.size(15.dp))
                         }
                         Spacer(Modifier.width(2.dp))
                     }
                     val arrowTint = if (vm.query.isNotBlank()) AppColors.cyan else AppColors.muted.copy(alpha = 0.5f)
                     IconButton(
-                        onClick = {
-                            if (vm.query.isNotBlank()) vm.executeSearch(vm.query)
-                        },
+                        onClick = { vm.openSearch() },
                         modifier = Modifier.size(28.dp)
                     ) {
                         Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -3116,7 +3303,15 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         { vm.selectEpisode(vm.currentEpisodeIndex - 1) }
                     } else null,
                     onError = { vm.invalidateCurrentPlayCache() },
-                    onFullscreenChanged = { playerFullscreen = it }
+                    onFullscreenChanged = { playerFullscreen = it },
+                    onPlaybackProgress = { positionMs, durationMs ->
+                        vm.updatePlaybackProgress(
+                            item = detail.item,
+                            episodeName = currentEpisode?.name.orEmpty(),
+                            positionMs = positionMs,
+                            durationMs = durationMs
+                        )
+                    }
                 )
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -4305,6 +4500,17 @@ fun ProfileEntryCard(title: String, subtitle: String, icon: androidx.compose.ui.
 
 @Composable
 fun HistoryScreen(vm: MainViewModel) {
+    val periodOrder = listOf("近一周", "近一月", "近半年", "更早")
+    val groupedHistory = remember(vm.historyList) {
+        val now = System.currentTimeMillis()
+        periodOrder.mapNotNull { period ->
+            vm.historyList
+                .filter { historyPeriodLabel(it.timestamp, now) == period }
+                .takeIf { it.isNotEmpty() }
+                ?.let { period to it }
+        }
+    }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -4328,32 +4534,122 @@ fun HistoryScreen(vm: MainViewModel) {
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(vm.historyList) { history ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable { vm.openMovie(history.item, history.episodeName) },
-                        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AsyncImage(
-                                model = coverRequest(LocalContext.current, history.item.cover),
-                                contentDescription = null,
-                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(history.item.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Spacer(Modifier.height(2.dp))
-                                Text("看到：${history.episodeName}", color = AppColors.cyan, fontSize = 13.sp)
-                                Text("数据源：${history.item.sourceTitle.ifEmpty { history.item.sourceKey }}", color = AppColors.muted, fontSize = 11.sp)
-                            }
+                groupedHistory.forEach { (period, histories) ->
+                    item(key = "history_group_$period") {
+                        Text(
+                            period,
+                            color = AppColors.text,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 10.dp, bottom = 5.dp)
+                        )
+                    }
+                    items(
+                        items = histories,
+                        key = {
+                            "${it.item.sourceKey}:${it.item.id}:${it.timestamp}"
                         }
+                    ) { history ->
+                        val dismissState = rememberDismissState(
+                            confirmStateChange = { value ->
+                                if (value == DismissValue.DismissedToStart) {
+                                    vm.removeHistory(history.item)
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        )
+                        val progress = historyProgressPercent(history.positionMs, history.durationMs)
+                        SwipeToDismiss(
+                            state = dismissState,
+                            directions = setOf(DismissDirection.EndToStart),
+                            background = {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(vertical = 4.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(AppColors.rose.copy(alpha = 0.18f))
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = Alignment.CenterEnd
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("删除", color = AppColors.rose, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.width(6.dp))
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = null,
+                                            tint = AppColors.rose
+                                        )
+                                    }
+                                }
+                            },
+                            dismissContent = {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .clickable { vm.openMovie(history.item, history.episodeName) },
+                                colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+                            ) {
+                                Column {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        AsyncImage(
+                                            model = coverRequest(LocalContext.current, history.item.cover),
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(58.dp, 80.dp)
+                                                .clip(RoundedCornerShape(7.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        Spacer(Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                history.item.title,
+                                                color = AppColors.text,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                "观看：${history.episodeName}",
+                                                color = AppColors.cyan,
+                                                fontSize = 13.sp
+                                            )
+                                            Text(
+                                                "观看到 $progress%",
+                                                color = AppColors.text,
+                                                fontSize = 12.sp
+                                            )
+                                            Text(
+                                                "北京时间 ${formatHistoryTimestamp(history.timestamp)}",
+                                                color = AppColors.muted,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .background(AppColors.cyan.copy(alpha = 0.16f))
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxHeight()
+                                                .fillMaxWidth(progress / 100f)
+                                                .background(Color(0xFF7DD3FC))
+                                        )
+                                    }
+                                }
+                            }
+                            }
+                        )
                     }
                 }
             }
@@ -4363,6 +4659,20 @@ fun HistoryScreen(vm: MainViewModel) {
 
 @Composable
 fun FavoritesScreen(vm: MainViewModel) {
+    val historyByTitle = remember(vm.historyList) {
+        vm.historyList.associateBy { SourceManager.normalizeTitle(it.item.title) }
+    }
+    val favoriteGroups = remember(vm.favoritesList, historyByTitle) {
+        val now = System.currentTimeMillis()
+        val order = listOf("近一周追番", "近一月追番", "近半年追番", "更早追番", "尚未观看")
+        val grouped = vm.favoritesList.groupBy { favorite ->
+            val watched = historyByTitle[SourceManager.normalizeTitle(favorite.title)]
+                ?: return@groupBy "尚未观看"
+            "${historyPeriodLabel(watched.timestamp, now)}追番"
+        }
+        order.mapNotNull { label -> grouped[label]?.takeIf(List<SourceItem>::isNotEmpty)?.let { label to it } }
+    }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -4381,32 +4691,90 @@ fun FavoritesScreen(vm: MainViewModel) {
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(vm.favoritesList) { favorite ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable { vm.openMovie(favorite) },
-                        colors = CardDefaults.cardColors(containerColor = AppColors.panel)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                favoriteGroups.forEach { (group, favorites) ->
+                    item(key = "favorite_group_$group") {
+                        Text(
+                            group,
+                            color = AppColors.text,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 10.dp, bottom = 5.dp)
+                        )
+                    }
+                    items(
+                        items = favorites,
+                        key = { "${it.sourceKey}:${it.id}:${SourceManager.normalizeTitle(it.title)}" }
+                    ) { favorite ->
+                        val watched = historyByTitle[SourceManager.normalizeTitle(favorite.title)]
+                        val progress = watched?.let {
+                            historyProgressPercent(it.positionMs, it.durationMs)
+                        } ?: 0
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    vm.openMovie(favorite, watched?.episodeName)
+                                },
+                            colors = CardDefaults.cardColors(containerColor = AppColors.panel)
                         ) {
-                            AsyncImage(
-                                model = coverRequest(LocalContext.current, favorite.cover),
-                                contentDescription = null,
-                                modifier = Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(6.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(favorite.title, color = AppColors.text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Spacer(Modifier.height(2.dp))
-                                Text("${favorite.year} · ${favorite.kind}", color = AppColors.muted, fontSize = 12.sp)
-                            }
-                            IconButton(onClick = { vm.toggleFavorite(favorite) }) {
-                                Icon(Icons.Default.Favorite, contentDescription = "取消收藏", tint = AppColors.rose)
+                            Column {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    AsyncImage(
+                                        model = coverRequest(LocalContext.current, favorite.cover),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(58.dp, 80.dp).clip(RoundedCornerShape(7.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            favorite.title,
+                                            color = AppColors.text,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(Modifier.height(3.dp))
+                                        Text(
+                                            watched?.let { "上次观看 ${it.episodeName} · $progress%" }
+                                                ?: "尚未开始观看",
+                                            color = if (watched == null) AppColors.muted else AppColors.cyan,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            listOf(favorite.year, favorite.kind)
+                                                .filter(String::isNotBlank)
+                                                .joinToString(" · ")
+                                                .ifBlank { "动漫" },
+                                            color = AppColors.muted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(onClick = { vm.toggleFavorite(favorite) }) {
+                                        Icon(Icons.Default.Favorite, contentDescription = "取消追番", tint = AppColors.rose)
+                                    }
+                                }
+                                if (watched != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .background(AppColors.cyan.copy(alpha = 0.16f))
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxHeight()
+                                                .fillMaxWidth(progress / 100f)
+                                                .background(Color(0xFF7DD3FC))
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -4579,10 +4947,209 @@ fun OfflineCacheScreen(vm: MainViewModel) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SearchLandingScreen(vm: MainViewModel) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var hotPage by remember { mutableStateOf(0) }
+    val hotPool = remember(vm.lanercRankings, vm.homeSections, vm.lanercSeasons) {
+        (
+            vm.lanercRankings[RankingKind.HOT].orEmpty().map { it.item } +
+                vm.lanercRankings[RankingKind.POPULARITY].orEmpty().map { it.item } +
+                vm.lanercSeasons.flatMap { it.entries }.map { it.item } +
+                vm.homeSections.flatMap { it.items }
+            )
+            .filter { it.title.isNotBlank() }
+            .distinctBy { SourceManager.normalizeTitle(it.title) }
+    }
+    val hotPageCount = ((hotPool.size + 7) / 8).coerceAtLeast(1)
+    val hotSuggestions = remember(hotPool, hotPage) {
+        hotPool.drop((hotPage % hotPageCount) * 8).take(8)
+            .ifEmpty { hotPool.take(8) }
+    }
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppColors.bg)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = {
+                keyboardController?.hide()
+                vm.view = "home"
+            }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text)
+            }
+            Surface(
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = AppColors.panel,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    AppColors.cyan.copy(alpha = 0.28f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = AppColors.text,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    BasicTextField(
+                        value = vm.query,
+                        onValueChange = { vm.query = it.take(80) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester),
+                        singleLine = true,
+                        textStyle = TextStyle(color = AppColors.text, fontSize = 15.sp),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                if (vm.query.isNotBlank()) {
+                                    keyboardController?.hide()
+                                    vm.executeSearch(vm.query)
+                                }
+                            }
+                        ),
+                        cursorBrush = SolidColor(AppColors.cyan),
+                        decorationBox = { innerTextField ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (vm.query.isBlank()) {
+                                    Text("搜索动漫、番剧或视频名称", color = AppColors.muted, fontSize = 13.sp)
+                                }
+                                innerTextField()
+                            }
+                        }
+                    )
+                    if (vm.query.isNotBlank()) {
+                        IconButton(
+                            onClick = { vm.query = "" },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "清空", tint = AppColors.muted)
+                        }
+                    }
+                }
+            }
+            TextButton(
+                onClick = {
+                    if (vm.query.isNotBlank()) {
+                        keyboardController?.hide()
+                        vm.executeSearch(vm.query)
+                    }
+                }
+            ) {
+                Text("搜索", color = if (vm.query.isBlank()) AppColors.muted else AppColors.cyan)
+            }
+        }
+
+        Spacer(Modifier.height(28.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("历史搜索", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            if (vm.searchHistory.isNotEmpty()) {
+                IconButton(onClick = { vm.clearSearchHistory() }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "清空历史搜索", tint = AppColors.muted)
+                }
+            }
+        }
+        if (vm.searchHistory.isEmpty()) {
+            Text("暂无搜索记录", color = AppColors.muted, fontSize = 12.sp)
+        } else {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                vm.searchHistory.take(12).forEach { history ->
+                    InputChip(
+                        selected = false,
+                        onClick = {
+                            keyboardController?.hide()
+                            vm.executeSearch(history)
+                        },
+                        label = {
+                            Text(history, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "删除$history",
+                                tint = AppColors.muted,
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clickable { vm.removeSearchHistory(history) }
+                            )
+                        }
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("热门搜索", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            TextButton(onClick = { hotPage = (hotPage + 1) % hotPageCount }) {
+                Icon(Icons.Default.Refresh, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("换一批", color = AppColors.cyan, fontSize = 12.sp)
+            }
+        }
+        if (hotSuggestions.isEmpty()) {
+            Text("热门内容正在同步", color = AppColors.muted, fontSize = 12.sp)
+        } else {
+            hotSuggestions.chunked(2).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    row.forEach { item ->
+                        Text(
+                            item.title,
+                            color = AppColors.text,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    keyboardController?.hide()
+                                    vm.executeSearch(item.title)
+                                }
+                                .padding(vertical = 10.dp)
+                        )
+                    }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun SearchResultScreen(vm: MainViewModel) {
     androidx.activity.compose.BackHandler {
-        vm.view = "home"
+        vm.view = "search"
         vm.isSearchActive = false
     }
 
@@ -4592,10 +5159,10 @@ fun SearchResultScreen(vm: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = {
-                vm.view = "home"
+                vm.view = "search"
                 vm.isSearchActive = false
             }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text)
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回搜索", tint = AppColors.text)
             }
             Spacer(Modifier.width(4.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -5308,9 +5875,19 @@ fun LeaderboardScreen(vm: MainViewModel) {
     val categories = AnimeRankingCategory.entries
     var selectedCategoryIndex by remember { mutableStateOf(0) }
     val selectedCategory = categories[selectedCategoryIndex]
+    LaunchedEffect(selectedCategory) {
+        vm.loadAnimeCategoryRanking(selectedCategory)
+    }
     val pool = vm.allPoolItems()
-    val sourceRankedEntries = remember(vm.lanercRankings, vm.discoverySections, pool) {
+    val sourceRankedEntries = remember(
+        vm.animeCategoryRankings,
+        vm.lanercRankings,
+        vm.discoverySections,
+        pool,
+        selectedCategory
+    ) {
         (
+            vm.animeCategoryRankings[selectedCategory].orEmpty() +
             vm.lanercRankings[RankingKind.HOT].orEmpty() +
                 vm.lanercRankings[RankingKind.POPULARITY].orEmpty() +
                 buildRankingEntries(vm.discoverySections, pool, RankingKind.HOT) +
@@ -5351,10 +5928,17 @@ fun LeaderboardScreen(vm: MainViewModel) {
                 onClick = {
                     vm.refreshLanercDiscovery(force = true)
                     vm.loadHome()
+                    vm.loadAnimeCategoryRanking(selectedCategory, force = true)
                 },
-                enabled = !vm.lanercDiscoveryLoading && !vm.loading
+                enabled = !vm.lanercDiscoveryLoading &&
+                    !vm.loading &&
+                    selectedCategory !in vm.animeCategoryRankingLoading
             ) {
-                if (vm.lanercDiscoveryLoading || vm.loading) {
+                if (
+                    vm.lanercDiscoveryLoading ||
+                    vm.loading ||
+                    selectedCategory in vm.animeCategoryRankingLoading
+                ) {
                     LoadingSpinner(Modifier.size(20.dp))
                 } else {
                     Icon(Icons.Default.Refresh, contentDescription = "刷新分类排行榜", tint = AppColors.cyan)
@@ -5389,7 +5973,22 @@ fun LeaderboardScreen(vm: MainViewModel) {
         }
         Spacer(Modifier.height(12.dp))
 
-        if (rankingEntries.isEmpty()) {
+        if (
+            rankingEntries.isEmpty() &&
+            selectedCategory in vm.animeCategoryRankingLoading
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    LoadingSpinner(Modifier.size(30.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "正在从启用的视频源获取${selectedCategory.label}…",
+                        color = AppColors.muted,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        } else if (rankingEntries.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("${selectedCategory.label}暂无榜单内容", color = AppColors.muted, fontSize = 14.sp)

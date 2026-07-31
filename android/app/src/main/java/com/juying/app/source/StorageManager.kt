@@ -8,7 +8,9 @@ data class HistoryItem(
     val item: SourceItem,
     val episodeName: String,
     val playUrl: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L
 )
 
 class StorageManager(context: Context) {
@@ -29,20 +31,71 @@ class StorageManager(context: Context) {
         } catch (_: Exception) { emptyList() }
     }
 
-    fun addHistory(item: SourceItem, episodeName: String) {
+    fun addHistory(
+        item: SourceItem,
+        episodeName: String,
+        positionMs: Long = 0L,
+        durationMs: Long = 0L
+    ) {
         val list = getHistory().toMutableList()
         val key = itemKey(item)
+        val previous = list.firstOrNull { itemKey(it.item) == key }
         list.removeAll { itemKey(it.item) == key }
         // History only needs the stable work/episode identity. Never persist a
         // temporary or signed playback URL; it may expire and must be resolved
         // again when the user reopens the record.
-        list.add(0, HistoryItem(item, episodeName, playUrl = ""))
+        val keepPreviousProgress = previous?.episodeName == episodeName && positionMs <= 0L
+        list.add(
+            0,
+            HistoryItem(
+                item = item,
+                episodeName = episodeName,
+                playUrl = "",
+                positionMs = if (keepPreviousProgress) previous?.positionMs ?: 0L else positionMs.coerceAtLeast(0L),
+                durationMs = if (keepPreviousProgress) previous?.durationMs ?: 0L else durationMs.coerceAtLeast(0L)
+            )
+        )
         if (list.size > 50) list.removeAt(list.size - 1)
         prefs.edit().putString("watch_history", gson.toJson(list)).apply()
     }
 
+    fun removeHistory(item: SourceItem) {
+        val key = itemKey(item)
+        val updated = getHistory().filterNot { itemKey(it.item) == key }
+        prefs.edit().putString("watch_history", gson.toJson(updated)).apply()
+    }
+
     fun clearHistory() {
         prefs.edit().remove("watch_history").apply()
+    }
+
+    fun getSearchHistory(): List<String> {
+        val json = prefs.getString("search_history", "[]") ?: "[]"
+        return try {
+            gson.fromJson(json, object : TypeToken<List<String>>() {}.type) ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun addSearchHistory(query: String) {
+        val normalized = query.trim()
+        if (normalized.isBlank()) return
+        val updated = getSearchHistory()
+            .filterNot { it.equals(normalized, ignoreCase = true) }
+            .toMutableList()
+            .apply { add(0, normalized) }
+            .take(20)
+        prefs.edit().putString("search_history", gson.toJson(updated)).apply()
+    }
+
+    fun removeSearchHistory(query: String) {
+        val updated = getSearchHistory().filterNot { it.equals(query, ignoreCase = true) }
+        prefs.edit().putString("search_history", gson.toJson(updated)).apply()
+    }
+
+    fun clearSearchHistory() {
+        prefs.edit().remove("search_history").apply()
     }
 
     // 评论昵称：每台设备稳定一个，用于云端评论署名

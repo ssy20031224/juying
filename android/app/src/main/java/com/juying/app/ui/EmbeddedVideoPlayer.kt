@@ -79,7 +79,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.effect.Contrast
-import androidx.media3.effect.RgbAdjustment
+import androidx.media3.effect.HslAdjustment
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -355,7 +355,8 @@ fun EmbeddedVideoPlayer(
     onPrevEpisode: (() -> Unit)? = null,
     onBack: () -> Unit,
     onError: () -> Unit = {},
-    onFullscreenChanged: (Boolean) -> Unit = {}
+    onFullscreenChanged: (Boolean) -> Unit = {},
+    onPlaybackProgress: (Long, Long) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -435,6 +436,7 @@ fun EmbeddedVideoPlayer(
     var gestureHudJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var scanlineProgress by remember { mutableStateOf(0f) }
     var isScanlineActive by remember { mutableStateOf(false) }
+    val latestProgressCallback by rememberUpdatedState(onPlaybackProgress)
 
     val triggerHud = { type: String, value: Int, text: String, durationMs: Long ->
         gestureHudType = type
@@ -738,6 +740,9 @@ fun EmbeddedVideoPlayer(
             if (!isSeeking) {
                 currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                 duration = exoPlayer.duration.coerceAtLeast(0L)
+                if (duration > 0L) {
+                    latestProgressCallback(currentPosition, duration)
+                }
             }
             delay(500)
         }
@@ -819,16 +824,18 @@ fun EmbeddedVideoPlayer(
     LaunchedEffect(qualityEnhancement) {
         exoPlayer.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
-        // 真实的硬件画质增强：通过 Media3 视频效果管线提升对比度并轻微提亮（GPU 处理）
+        // Cross-device Android has no standard vendor-neutral NPU video
+        // super-resolution API. Apply a real GPU edge-enhancement pass plus
+        // restrained contrast/saturation instead of falsely labelling a color
+        // filter as "AI 4K".
         try {
             if (qualityEnhancement) {
                 exoPlayer.setVideoEffects(
                     listOf(
-                        Contrast(0.18f),
-                        RgbAdjustment.Builder()
-                            .setRedScale(1.03f)
-                            .setGreenScale(1.03f)
-                            .setBlueScale(1.03f)
+                        GpuSharpenEffect(0.12f),
+                        Contrast(0.08f),
+                        HslAdjustment.Builder()
+                            .adjustSaturation(4f)
                             .build()
                         )
                     )
@@ -841,7 +848,7 @@ fun EmbeddedVideoPlayer(
                 effectsWereEnabled = false
             }
         } catch (e: Exception) {
-            Toast.makeText(context, "当前设备不支持硬件画质增强", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "当前设备不支持GPU锐化增强", Toast.LENGTH_SHORT).show()
             qualityEnhancement = false
             return@LaunchedEffect
         }
@@ -952,6 +959,7 @@ fun EmbeddedVideoPlayer(
                 var volumeAcc = 0f
                 var startedOnControls = false
                 var resumeAfterGestureSeek = false
+                var dragAxis = PlayerInteractionPolicy.DragAxis.UNDECIDED
 
                 detectDragGestures(
                     onDragStart = { offset ->
@@ -962,6 +970,7 @@ fun EmbeddedVideoPlayer(
                         totalX = 0f
                         totalY = 0f
                         volumeAcc = 0f
+                        dragAxis = PlayerInteractionPolicy.DragAxis.UNDECIDED
                         startedOnControls = controlsVisible && startY > size.height * 0.70f
                         resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
@@ -971,8 +980,13 @@ fun EmbeddedVideoPlayer(
                         if (isLocked || startedOnControls) return@detectDragGestures
 
                         val width = size.width.coerceAtLeast(1)
+                        dragAxis = PlayerInteractionPolicy.lockDragAxis(
+                            current = dragAxis,
+                            totalX = totalX,
+                            totalY = totalY
+                        )
 
-                        if (kotlin.math.abs(totalY) > kotlin.math.abs(totalX)) {
+                        if (dragAxis == PlayerInteractionPolicy.DragAxis.VERTICAL) {
                             val delta = (-amount.y / 700f).coerceIn(-0.08f, 0.08f)
                             if (startX < width * 0.5f) {
                                 adjustScreenBrightness(activity, delta)
@@ -994,7 +1008,7 @@ fun EmbeddedVideoPlayer(
                                     }
                                 }
                             }
-                        } else if (kotlin.math.abs(totalX) > 15f) {
+                        } else if (dragAxis == PlayerInteractionPolicy.DragAxis.HORIZONTAL) {
                             val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                             val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
                             val targetMs = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, duration.coerceAtLeast(0L))
@@ -1004,7 +1018,11 @@ fun EmbeddedVideoPlayer(
                     onDragEnd = {
                         lastDragTime = System.currentTimeMillis()
                         dragGestureActive = false
-                        if (isLocked || startedOnControls || kotlin.math.abs(totalX) < kotlin.math.abs(totalY)) return@detectDragGestures
+                        if (
+                            isLocked ||
+                            startedOnControls ||
+                            dragAxis != PlayerInteractionPolicy.DragAxis.HORIZONTAL
+                        ) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                         val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
@@ -1182,7 +1200,7 @@ fun EmbeddedVideoPlayer(
                         .padding(top = 48.dp)
                 ) {
                     Text(
-                        "硬件画质增强对比中",
+                        "GPU锐化增强对比中",
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
@@ -1708,9 +1726,13 @@ fun EmbeddedVideoPlayer(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("硬件画质增强", color = AppColors.text)
+                                Text("GPU实时画质增强", color = AppColors.text)
                                 Text(
-                                    if (lowRamDevice) "低内存设备已限制为最高 2x" else "开启后 GPU 提升对比度与亮度",
+                                    if (lowRamDevice) {
+                                        "GPU边缘锐化与色彩增强；低内存设备最高2x"
+                                    } else {
+                                        "GPU边缘锐化+色彩增强；非虚假的AI 4K超分"
+                                    },
                                     color = AppColors.muted,
                                     fontSize = 11.sp
                                 )
@@ -1720,6 +1742,12 @@ fun EmbeddedVideoPlayer(
                                 onCheckedChange = { qualityEnhancement = it }
                             )
                         }
+                        Text(
+                            "说明：腾讯/优酷等AI超分依赖私有模型、NPU及厂商SDK；Android没有统一接口，未接入受支持模型前不会冒充4K超分。",
+                            color = AppColors.muted,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
                     }
                 },
                 confirmButton = {

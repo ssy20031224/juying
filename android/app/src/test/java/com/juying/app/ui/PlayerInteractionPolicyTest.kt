@@ -45,4 +45,21 @@ class PlayerInteractionPolicyTest {
             )
         )
     }
+
+    @Test
+    fun verticalBrightnessOrVolumeDragCannotTurnIntoSeek() {
+        val vertical = PlayerInteractionPolicy.lockDragAxis(
+            current = PlayerInteractionPolicy.DragAxis.UNDECIDED,
+            totalX = 4f,
+            totalY = 18f
+        )
+        assertTrue(vertical == PlayerInteractionPolicy.DragAxis.VERTICAL)
+        assertTrue(
+            PlayerInteractionPolicy.lockDragAxis(
+                current = vertical,
+                totalX = 80f,
+                totalY = 20f
+            ) == PlayerInteractionPolicy.DragAxis.VERTICAL
+        )
+    }
 }

@@ -124,4 +124,23 @@ class DiscoveryDataTest {
             ).single().item.title
         )
     }
+
+    @Test
+    fun `category search context can classify sparse theatrical metadata`() {
+        val sparseMovie = SourceItem(title = "只有标题的动画电影", kind = "动漫")
+        val entry = SourceRankingEntry(
+            item = sparseMovie,
+            sourceSection = "国漫剧场版 · 测试源",
+            sourcePosition = 1
+        )
+
+        assertEquals(
+            listOf("只有标题的动画电影"),
+            buildAnimeCategoryRanking(
+                rankedEntries = listOf(entry),
+                sections = emptyList(),
+                category = AnimeRankingCategory.CHINESE_MOVIE
+            ).map { it.item.title }
+        )
+    }
 }

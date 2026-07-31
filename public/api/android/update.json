@@ -1,10 +1,10 @@
 {
-  "versionCode": 10218,
-  "versionName": "1.2.18",
-  "title": "🎉 聚影 1.2.18 版本更新",
+  "versionCode": 10219,
+  "versionName": "1.2.19",
+  "title": "juying 1.2.19 版本更新",
   "notes": "修复了一些已知问题",
   "apkUrls": [
-    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.18.bin"
+    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/android/juying-1.2.19.bin"
   ],
   "sha256": ""
 }

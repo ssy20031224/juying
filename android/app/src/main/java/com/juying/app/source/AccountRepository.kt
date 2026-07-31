@@ -144,9 +144,12 @@ class AccountRepository(context: Context) {
                     "episodeName" to it.episodeName,
                     "mediaSnapshot" to gson.toJson(it.item),
                     "sourceKey" to it.item.sourceKey.substringBefore(',').trim(),
-                    "positionMs" to 0,
-                    "durationMs" to 0,
-                    "completed" to false,
+                    "positionMs" to it.positionMs,
+                    "durationMs" to it.durationMs,
+                    "completed" to (
+                        it.durationMs > 0L &&
+                            it.positionMs >= (it.durationMs * 95L / 100L)
+                        ),
                 )
             }
             val payload = gson.toJson(
@@ -223,7 +226,14 @@ class AccountRepository(context: Context) {
         ).mapNotNull { row ->
             val snapshot = row["mediaSnapshot"]?.toString() ?: return@mapNotNull null
             val item = runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull() ?: return@mapNotNull null
-            HistoryItem(item, row["episodeName"]?.toString().orEmpty(), "", System.currentTimeMillis())
+            HistoryItem(
+                item = item,
+                episodeName = row["episodeName"]?.toString().orEmpty(),
+                playUrl = "",
+                timestamp = (row["updatedAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
+                positionMs = (row["positionMs"] as? Number)?.toLong() ?: 0L,
+                durationMs = (row["durationMs"] as? Number)?.toLong() ?: 0L
+            )
         }
         return AccountSyncResult(remoteFavorites, remoteHistory)
     }
