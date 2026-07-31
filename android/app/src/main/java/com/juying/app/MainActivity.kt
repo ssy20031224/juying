@@ -279,6 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastHistoryProgressWriteAt = 0L
     private var lastHistoryProgressKey = ""
     private var lastHistoryProgressPercent = -1
+    private val placeholderRecoveryKeys = mutableSetOf<String>()
 
     // Theme & Account Settings State
     var themeMode by mutableStateOf(storageManager.getThemeMode())
@@ -1927,7 +1928,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Play URL cache-first (10 min TTL) — cached hit is instant (<1ms)
             val playCacheKey = "$sourceKey:${ep.flagStr.take(200)}"
             val cachedPlay = if (!forceFresh) ResultCache.getPlay(playCacheKey) else null
-            if (cachedPlay != null) {
+            if (cachedPlay != null && isLikelyTranscodingPlaceholderUrl(cachedPlay.url)) {
+                ResultCache.invalidatePlay(playCacheKey)
+            }
+            if (cachedPlay != null && !isLikelyTranscodingPlaceholderUrl(cachedPlay.url)) {
                 val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                 withContext(Dispatchers.Main) {
                     if (generation != playResolveGeneration) return@withContext
@@ -1958,7 +1962,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.Main) {
                 if (generation != playResolveGeneration) return@withContext
                 isPlayLoading = false
-                if (playResult != null && playResult.url.isNotEmpty()) {
+                if (
+                    playResult != null &&
+                    playResult.url.isNotEmpty() &&
+                    !isLikelyTranscodingPlaceholderUrl(playResult.url)
+                ) {
                     val elapsedMs = (System.nanoTime() - resolveStartedAt) / 1_000_000L
                     ResultCache.putPlay(playCacheKey, playResult)  // Cache for instant replay
                     currentPlayResult = playResult
@@ -1966,8 +1974,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     notice = "已解析 ${ep.name}（${elapsedMs}ms）"
                     notice = "正在播放 ${ep.name}"
                 } else {
-                    playError = "播放地址解析失败或解析超时"
-                    notice = "播放地址解析失败 (${detail.item.sourceTitle})，试试「换源播放」"
+                    val transcoding = playResult?.url?.let(::isLikelyTranscodingPlaceholderUrl) == true
+                    playError = if (transcoding) "当前播放源仍在转码，正在尝试其他来源"
+                        else "播放地址解析失败或解析超时"
+                    notice = if (transcoding) "已拦截转码占位视频，正在换源"
+                        else "播放地址解析失败 (${detail.item.sourceTitle})，试试「换源播放」"
                     if (alternativeDetails.isNotEmpty()) {
                         switchSource()
                     }
@@ -2044,6 +2055,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ResultCache.invalidatePlay("${detail.item.sourceKey}:${ep.flagStr.take(200)}")
         currentPlayResult = null
         playError = "视频加载失败，已清除旧地址，请点击本集重试"
+    }
+
+    fun recoverFromLikelyTranscodingPlaceholder() {
+        val detail = currentActiveDetail() ?: return
+        val episode = detail.episodes.getOrNull(currentEpisodeIndex) ?: return
+        val recoveryKey = "${detail.item.sourceKey}:${episode.flagStr.take(200)}"
+        if (!placeholderRecoveryKeys.add(recoveryKey)) return
+
+        ResultCache.invalidatePlay(recoveryKey)
+        currentPlayResult = null
+        playError = "检测到播放源返回转码占位视频，正在自动恢复"
+        notice = "当前源仍在转码，正在切换可用来源"
+        viewModelScope.launch {
+            delay(2_500L)
+            if (alternativeDetails.isNotEmpty()) {
+                switchSource()
+            } else {
+                selectEpisode(currentEpisodeIndex, forceFresh = true)
+            }
+        }
     }
 
     /**
@@ -2827,8 +2858,8 @@ fun HomeView(vm: MainViewModel) {
 
             Spacer(Modifier.width(8.dp))
 
-            // Compact Search Bar in Middle
-            // Compact Search Bar in Middle (BasicTextField for zero text clipping)
+            // Keep the whole bar as one click target. A read-only text field
+            // used here previously consumed taps before the Surface.
             Surface(
                 modifier = Modifier
                     .weight(1f)
@@ -2854,37 +2885,16 @@ fun HomeView(vm: MainViewModel) {
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
-                    BasicTextField(
-                        value = vm.query,
-                        onValueChange = {},
+                    Text(
+                        text = vm.query.ifBlank { "今天你想看些什么？" },
                         modifier = Modifier.weight(1f),
-                        readOnly = true,
-                        singleLine = true,
-                        textStyle = TextStyle(color = AppColors.text, fontSize = 14.sp),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        cursorBrush = SolidColor(AppColors.cyan),
-                        decorationBox = @Composable { innerTextField ->
-                            Box(contentAlignment = Alignment.CenterStart) {
-                                if (vm.query.isEmpty()) {
-                                    Text("今天你想看些什么？", color = AppColors.muted, fontSize = 12.sp)
-                                }
-                                innerTextField()
-                            }
-                        }
+                        color = if (vm.query.isBlank()) AppColors.muted else AppColors.text,
+                        fontSize = if (vm.query.isBlank()) 12.sp else 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    if (vm.query.isNotEmpty()) {
-                        IconButton(onClick = { vm.openSearch() }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.Close, "清除", tint = AppColors.muted, modifier = Modifier.size(15.dp))
-                        }
-                        Spacer(Modifier.width(2.dp))
-                    }
                     val arrowTint = if (vm.query.isNotBlank()) AppColors.cyan else AppColors.muted.copy(alpha = 0.5f)
-                    IconButton(
-                        onClick = { vm.openSearch() },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    }
+                    Text("➔", color = arrowTint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -3303,6 +3313,9 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         { vm.selectEpisode(vm.currentEpisodeIndex - 1) }
                     } else null,
                     onError = { vm.invalidateCurrentPlayCache() },
+                    onLikelyTranscodingPlaceholder = {
+                        vm.recoverFromLikelyTranscodingPlaceholder()
+                    },
                     onFullscreenChanged = { playerFullscreen = it },
                     onPlaybackProgress = { positionMs, durationMs ->
                         vm.updatePlaybackProgress(
@@ -4595,15 +4608,16 @@ fun HistoryScreen(vm: MainViewModel) {
                             ) {
                                 Column {
                                     Row(
-                                        modifier = Modifier.padding(12.dp),
+                                        modifier = Modifier.padding(10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         AsyncImage(
                                             model = coverRequest(LocalContext.current, history.item.cover),
                                             contentDescription = null,
                                             modifier = Modifier
-                                                .size(58.dp, 80.dp)
-                                                .clip(RoundedCornerShape(7.dp)),
+                                                .width(148.dp)
+                                                .aspectRatio(16f / 9f)
+                                                .clip(RoundedCornerShape(8.dp)),
                                             contentScale = ContentScale.Crop
                                         )
                                         Spacer(Modifier.width(12.dp))
@@ -4617,17 +4631,13 @@ fun HistoryScreen(vm: MainViewModel) {
                                             )
                                             Spacer(Modifier.height(4.dp))
                                             Text(
-                                                "观看：${history.episodeName}",
+                                                "${history.episodeName} · 观看至 $progress%",
                                                 color = AppColors.cyan,
-                                                fontSize = 13.sp
-                                            )
-                                            Text(
-                                                "观看到 $progress%",
-                                                color = AppColors.text,
                                                 fontSize = 12.sp
                                             )
+                                            Spacer(Modifier.height(5.dp))
                                             Text(
-                                                "北京时间 ${formatHistoryTimestamp(history.timestamp)}",
+                                                "▣  本机  ${formatHistoryTimestamp(history.timestamp)}",
                                                 color = AppColors.muted,
                                                 fontSize = 11.sp
                                             )
@@ -4642,7 +4652,7 @@ fun HistoryScreen(vm: MainViewModel) {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxHeight()
-                                                .fillMaxWidth(progress / 100f)
+                                                .fillMaxWidth(progress.coerceIn(0, 100) / 100f)
                                                 .background(Color(0xFF7DD3FC))
                                         )
                                     }
@@ -4720,13 +4730,16 @@ fun FavoritesScreen(vm: MainViewModel) {
                         ) {
                             Column {
                                 Row(
-                                    modifier = Modifier.padding(12.dp),
+                                    modifier = Modifier.padding(10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
                                         model = coverRequest(LocalContext.current, favorite.cover),
                                         contentDescription = null,
-                                        modifier = Modifier.size(58.dp, 80.dp).clip(RoundedCornerShape(7.dp)),
+                                        modifier = Modifier
+                                            .width(148.dp)
+                                            .aspectRatio(16f / 9f)
+                                            .clip(RoundedCornerShape(8.dp)),
                                         contentScale = ContentScale.Crop
                                     )
                                     Spacer(Modifier.width(12.dp))
@@ -4739,25 +4752,25 @@ fun FavoritesScreen(vm: MainViewModel) {
                                             overflow = TextOverflow.Ellipsis
                                         )
                                         Spacer(Modifier.height(3.dp))
+                                        val favoriteStatus = resolveMediaStatus(favorite)
                                         Text(
-                                            watched?.let { "上次观看 ${it.episodeName} · $progress%" }
-                                                ?: "尚未开始观看",
-                                            color = if (watched == null) AppColors.muted else AppColors.cyan,
+                                            if (favoriteStatus.state == MediaReleaseState.UNKNOWN) {
+                                                "已追番"
+                                            } else {
+                                                favoriteStatus.displayText
+                                            },
+                                            color = AppColors.muted,
                                             fontSize = 12.sp
                                         )
+                                        Spacer(Modifier.height(4.dp))
                                         Text(
-                                            listOf(favorite.year, favorite.kind)
-                                                .filter(String::isNotBlank)
-                                                .joinToString(" · ")
-                                                .ifBlank { "动漫" },
-                                            color = AppColors.muted,
+                                            watched?.let { "◉  看到 ${it.episodeName} · $progress%" }
+                                                ?: "◉  尚未开始观看",
+                                            color = if (watched == null) AppColors.muted else AppColors.cyan,
                                             fontSize = 11.sp,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
-                                    }
-                                    IconButton(onClick = { vm.toggleFavorite(favorite) }) {
-                                        Icon(Icons.Default.Favorite, contentDescription = "取消追番", tint = AppColors.rose)
                                     }
                                 }
                                 if (watched != null) {
@@ -4770,7 +4783,7 @@ fun FavoritesScreen(vm: MainViewModel) {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxHeight()
-                                                .fillMaxWidth(progress / 100f)
+                                                .fillMaxWidth(progress.coerceIn(0, 100) / 100f)
                                                 .background(Color(0xFF7DD3FC))
                                         )
                                     }

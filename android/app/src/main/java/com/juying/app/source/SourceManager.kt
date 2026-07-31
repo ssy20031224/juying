@@ -8,7 +8,27 @@ import com.juying.app.engine.NetworkClient
 import com.juying.app.engine.QuickJsEngine
 import com.juying.app.engine.SourceExports
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.Locale
+
+fun isLikelyTranscodingPlaceholderUrl(url: String): Boolean {
+    val parsed = url.trim().toHttpUrlOrNull() ?: return false
+    val path = parsed.encodedPath.lowercase(Locale.US)
+    return listOf(
+        "transcod",
+        "zhuanma",
+        "%e8%bd%ac%e7%a0%81",
+        "loading",
+        "jiazai",
+        "processing",
+        "zanwu",
+        "wait.mp4",
+        "404.mp4",
+        "tips.mp4",
+        "notice.mp4",
+        "error.mp4"
+    ).any(path::contains)
+}
 
 data class SourceItem(
     val id: String = "",
@@ -465,6 +485,7 @@ class SourceManager(private val context: Context) {
                 .replace(Regex("[\\s\\p{Punct}【】《》「」『』（）\\[\\]（）]"), "")
                 .lowercase()
                 .trim()
+                .replace(Regex("(动态漫画|动态漫|漫画版|动画版)$"), "")
         }
 
         fun mergeSearchItems(items: List<SourceItem>): List<SourceItem> {
@@ -706,6 +727,7 @@ class SourceAdapter(
                 return PlayResult(url = "", type = "auto")
             }
             if (raw.startsWith("http://") || raw.startsWith("https://")) {
+                logResolvedMedia(raw)
                 return PlayResult(url = raw, type = "auto")
             }
             val element = com.google.gson.JsonParser.parseString(raw)
@@ -761,6 +783,7 @@ class SourceAdapter(
                     }
                     ?.distinctBy { it.name to it.url }
                     .orEmpty()
+                logResolvedMedia(url)
                 PlayResult(
                     url = url,
                     type = type,
@@ -775,6 +798,14 @@ class SourceAdapter(
             SourceLogManager.error(key, "播放解析", "播放结果解析异常: ${e.message}", "flag=${flagStr.take(240)}")
             PlayResult(url = "", type = "auto")
         }
+    }
+
+    private fun logResolvedMedia(url: String) {
+        if (url.isBlank()) return
+        val parsed = url.toHttpUrlOrNull()
+        val safeLocation = parsed?.let { "${it.scheme}://${it.host}${it.encodedPath}" }
+            ?: "unparseable-url"
+        Log.i("SourceAdapter", "[$key] play resolved $safeLocation")
     }
 
     private fun parseItems(raw: String): List<SourceItem> {

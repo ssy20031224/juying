@@ -355,6 +355,7 @@ fun EmbeddedVideoPlayer(
     onPrevEpisode: (() -> Unit)? = null,
     onBack: () -> Unit,
     onError: () -> Unit = {},
+    onLikelyTranscodingPlaceholder: () -> Unit = {},
     onFullscreenChanged: (Boolean) -> Unit = {},
     onPlaybackProgress: (Long, Long) -> Unit = { _, _ -> }
 ) {
@@ -389,6 +390,8 @@ fun EmbeddedVideoPlayer(
     var lastDragTime by remember { mutableStateOf(0L) }
     var resumeAfterSliderSeek by remember { mutableStateOf(true) }
     var dragGestureActive by remember { mutableStateOf(false) }
+    var shortPlaceholderReported by remember(url) { mutableStateOf(false) }
+    val latestPlaceholderCallback by rememberUpdatedState(onLikelyTranscodingPlaceholder)
 
     var isFullscreen by remember { mutableStateOf(false) }
     var isLocked by remember { mutableStateOf(false) }
@@ -608,7 +611,21 @@ fun EmbeddedVideoPlayer(
                         "state=$playbackState playWhenReady=$playWhenReady videoGroups=$videoGroups"
                     )
                     if (playbackState == Player.STATE_READY) {
-                        duration = duration.coerceAtLeast(this@apply.duration.coerceAtLeast(0L))
+                        val mediaDuration = this@apply.duration.coerceAtLeast(0L)
+                        duration = duration.coerceAtLeast(mediaDuration)
+                        // Some providers return a short, normally playable
+                        // “正在转码” clip instead of failing the request. Such
+                        // clips do not trigger onPlayerError, so recover at
+                        // the source layer when an episodic stream is only a
+                        // few seconds long.
+                        if (
+                            !shortPlaceholderReported &&
+                            episodes.size > 1 &&
+                            mediaDuration in 1L..20_000L
+                        ) {
+                            shortPlaceholderReported = true
+                            latestPlaceholderCallback()
+                        }
                     }
                 }
 
