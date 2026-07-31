@@ -198,6 +198,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var isAppInitialized = false
     private var playerReturnView = "home"
     private var pendingEpisodeName: String? = null
+    private data class PlayerNavigationState(
+        val activeDetail: DetailResult?,
+        val currentEpisodeIndex: Int,
+        val currentPlayResult: PlayResult?,
+        val isPlayLoading: Boolean,
+        val playError: String?,
+        val relatedItems: List<SourceItem>,
+        val alternativeDetails: List<Pair<String, DetailResult>>,
+        val activeAlternativeIndex: Int,
+        val notice: String
+    )
+    private val playerNavigationStack = ArrayDeque<PlayerNavigationState>()
 
     // Cached pool of home section items — reused by fetchLibrary() to avoid re-fetching
     private var cachedHomePool: List<SourceItem> = emptyList()
@@ -1684,7 +1696,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playResolveJob?.cancel()
         playResolveJob = null
         playResolveGeneration++
-        playerReturnView = view
+        if (view == "player") {
+            if (playerNavigationStack.size >= 20) {
+                playerNavigationStack.removeFirst()
+            }
+            playerNavigationStack.addLast(
+                PlayerNavigationState(
+                    activeDetail = activeDetail,
+                    currentEpisodeIndex = currentEpisodeIndex,
+                    currentPlayResult = currentPlayResult,
+                    isPlayLoading = isPlayLoading,
+                    playError = playError,
+                    relatedItems = relatedItems,
+                    alternativeDetails = alternativeDetails,
+                    activeAlternativeIndex = activeAlternativeIndex,
+                    notice = notice
+                )
+            )
+        } else {
+            playerNavigationStack.clear()
+            playerReturnView = view
+        }
         pendingEpisodeName = preferredEpisodeName
         activeDetail = DetailResult(item, emptyList())
         currentPlayResult = null
@@ -2201,6 +2233,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun goBackFromPlayer() {
+        detailLoadJob?.cancel()
+        detailLoadJob = null
+        detailLoadGeneration++
+        playResolveJob?.cancel()
+        playResolveJob = null
+        playResolveGeneration++
+        val previousPlayer = playerNavigationStack.removeLastOrNull()
+        if (previousPlayer != null) {
+            activeDetail = previousPlayer.activeDetail
+            currentEpisodeIndex = previousPlayer.currentEpisodeIndex
+            currentPlayResult = previousPlayer.currentPlayResult
+            isPlayLoading = previousPlayer.isPlayLoading
+            playError = previousPlayer.playError
+            relatedItems = previousPlayer.relatedItems
+            alternativeDetails = previousPlayer.alternativeDetails
+            activeAlternativeIndex = previousPlayer.activeAlternativeIndex
+            notice = previousPlayer.notice
+            pendingEpisodeName = null
+            view = "player"
+            return
+        }
         val destination = playerReturnView
         view = destination
         when {
@@ -2480,12 +2533,16 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             try { unregisterReceiver(pipActionReceiver) } catch (_: Exception) {}
         }
+        PipController.resetActivityState()
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         // 小窗模式下播放器隐藏顶部栏/进度条等控制层（由 EmbeddedVideoPlayer 读取）
         PipController.inPipMode = isInPictureInPictureMode
+        if (!isInPictureInPictureMode) {
+            PipController.finishPipSession()
+        }
     }
 
     private fun buildPipParams(): android.app.PictureInPictureParams {
@@ -2515,15 +2572,25 @@ class MainActivity : ComponentActivity() {
             .build()
     }
 
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        // 只有播放器在屏且正在播放时才进入画中画；首页等其他页面退出不再触发小窗
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
-            && PipController.playerActive && PipController.isPlaying
+    /**
+     * PiP is deliberately manual-only. Pressing Home or switching apps must
+     * follow the normal background policy (pause), not silently create a new
+     * PiP session because the user used the PiP button earlier.
+     */
+    fun enterPlayerPictureInPicture(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O ||
+            !PipController.playerActive
         ) {
-            try {
-                enterPictureInPictureMode(buildPipParams())
-            } catch (_: Exception) {}
+            return false
+        }
+        PipController.beginManualPipSession()
+        return try {
+            val entered = enterPictureInPictureMode(buildPipParams())
+            if (!entered) PipController.cancelManualPipSession()
+            entered
+        } catch (_: Exception) {
+            PipController.cancelManualPipSession()
+            false
         }
     }
 }
@@ -3312,7 +3379,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val showLandscapeSidePanel = PlayerInteractionPolicy.showLandscapeSidePanel(
         isLandscape = isLandscape,
-        explicitFullscreen = playerFullscreen
+        explicitFullscreen = playerFullscreen,
+        inPictureInPicture = PipController.inPipMode
     )
 
     Row(Modifier.fillMaxSize()) {

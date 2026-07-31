@@ -2,7 +2,6 @@ package com.juying.app.ui
 
 import android.app.Activity
 import android.app.ActivityManager
-import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.ContextWrapper
 import android.media.AudioManager
@@ -15,6 +14,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
+import com.juying.app.MainActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
@@ -911,6 +911,7 @@ fun EmbeddedVideoPlayer(
     SideEffect {
         PipController.playerActive = !playError
         PipController.isPlaying = isPlaying
+        PipController.explicitFullscreen = isFullscreen
         PipController.hasNext = onNextEpisode != null
         PipController.hasPrev = onPrevEpisode != null
     }
@@ -922,7 +923,20 @@ fun EmbeddedVideoPlayer(
         PipController.onNextEpisode = onNextEpisode
         PipController.onPrevEpisode = onPrevEpisode
         onDispose {
-            PipController.clear()
+            PipController.clearPlayerState()
+        }
+    }
+    DisposableEffect(Unit) {
+        PipController.onRestorePresentation = { restoreFullscreen ->
+            applyFullscreen(restoreFullscreen)
+        }
+        onDispose {
+            // Resolving another episode temporarily removes this Composable
+            // from the PiP window. Keep the restoration callback for that
+            // short gap, but never retain it after a normal player exit.
+            if (!PipController.inPipMode) {
+                PipController.onRestorePresentation = null
+            }
         }
     }
 
@@ -936,7 +950,7 @@ fun EmbeddedVideoPlayer(
                 val activityInPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     activity?.isInPictureInPictureMode == true
                 } else false
-                if (!PipController.inPipMode && !activityInPip) {
+                if (PlayerInteractionPolicy.shouldPauseOnStop(activityInPip)) {
                     stopHoldGesture()
                     dragGestureActive = false
                     exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
@@ -953,10 +967,8 @@ fun EmbeddedVideoPlayer(
 
     // Enter Picture-in-Picture helper
     val enterPip = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
-            try {
-                activity.enterPictureInPictureMode(PictureInPictureParams.Builder().build())
-            } catch (e: Exception) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity is MainActivity) {
+            if (!activity.enterPlayerPictureInPicture()) {
                 Toast.makeText(context, "小窗/画中画启动失败", Toast.LENGTH_SHORT).show()
             }
         } else {

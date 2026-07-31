@@ -10,6 +10,19 @@ class PlayerInteractionPolicyTest {
         assertTrue(PlayerInteractionPolicy.showLandscapeSidePanel(true, false))
         assertFalse(PlayerInteractionPolicy.showLandscapeSidePanel(true, true))
         assertFalse(PlayerInteractionPolicy.showLandscapeSidePanel(false, false))
+        assertFalse(
+            PlayerInteractionPolicy.showLandscapeSidePanel(
+                isLandscape = true,
+                explicitFullscreen = false,
+                inPictureInPicture = true
+            )
+        )
+    }
+
+    @Test
+    fun backgroundPausesUnlessTheActivityIsActuallyInPictureInPicture() {
+        assertTrue(PlayerInteractionPolicy.shouldPauseOnStop(false))
+        assertFalse(PlayerInteractionPolicy.shouldPauseOnStop(true))
     }
 
     @Test

@@ -18,20 +18,51 @@ object PipController {
     var isPlaying by mutableStateOf(false)
     /** 当前是否处于画中画模式（小窗内隐藏播放器顶部栏/进度条等控制层） */
     var inPipMode by mutableStateOf(false)
+    /** 进入小窗前是否为用户主动开启的全屏，用于从小窗展开时恢复原展示状态。 */
+    var explicitFullscreen by mutableStateOf(false)
+    private var restoreFullscreenAfterPip = false
+    private var pipSessionActive = false
     var hasNext by mutableStateOf(false)
     var hasPrev by mutableStateOf(false)
 
     var onTogglePlayPause: (() -> Unit)? = null
     var onNextEpisode: (() -> Unit)? = null
     var onPrevEpisode: (() -> Unit)? = null
+    var onRestorePresentation: ((Boolean) -> Unit)? = null
 
-    fun clear() {
+    fun beginManualPipSession() {
+        restoreFullscreenAfterPip = explicitFullscreen
+        pipSessionActive = true
+    }
+
+    fun cancelManualPipSession() {
+        pipSessionActive = false
+        restoreFullscreenAfterPip = false
+    }
+
+    fun finishPipSession() {
+        if (!pipSessionActive) return
+        pipSessionActive = false
+        val restoreFullscreen = restoreFullscreenAfterPip
+        restoreFullscreenAfterPip = false
+        onRestorePresentation?.invoke(restoreFullscreen)
+    }
+
+    fun clearPlayerState() {
         playerActive = false
         isPlaying = false
+        explicitFullscreen = false
         hasNext = false
         hasPrev = false
         onTogglePlayPause = null
         onNextEpisode = null
         onPrevEpisode = null
+    }
+
+    fun resetActivityState() {
+        clearPlayerState()
+        inPipMode = false
+        cancelManualPipSession()
+        onRestorePresentation = null
     }
 }

@@ -11,8 +11,14 @@ internal object PlayerInteractionPolicy {
         HORIZONTAL
     }
 
-    fun showLandscapeSidePanel(isLandscape: Boolean, explicitFullscreen: Boolean): Boolean =
-        isLandscape && !explicitFullscreen
+    fun showLandscapeSidePanel(
+        isLandscape: Boolean,
+        explicitFullscreen: Boolean,
+        inPictureInPicture: Boolean = false
+    ): Boolean = isLandscape && !explicitFullscreen && !inPictureInPicture
+
+    fun shouldPauseOnStop(isActuallyInPictureInPicture: Boolean): Boolean =
+        !isActuallyInPictureInPicture
 
     fun canStartHoldGesture(
         longPressDetected: Boolean,
