@@ -485,7 +485,60 @@ class SourceManager(private val context: Context) {
                 .replace(Regex("[\\s\\p{Punct}【】《》「」『』（）\\[\\]（）]"), "")
                 .lowercase()
                 .trim()
-                .replace(Regex("(动态漫画|动态漫|漫画版|动画版)$"), "")
+                .replace(
+                    Regex(
+                        "(?:动态漫画|动态漫|漫画版|动画版)(?:第?[0-9一二三四五六七八九十]+季)?$"
+                    ),
+                    ""
+                )
+                .replace(Regex("(?:全集|完整版|普通话版|国语版)$"), "")
+                .trim()
+        }
+
+        /**
+         * Source sites commonly append presentation-only suffixes that are
+         * not part of the work's searchable name. Keep the original first,
+         * then try a conservative suffix-free alias.
+         */
+        fun detailSearchVariants(title: String): List<String> {
+            val raw = title
+                .replace(Regex("<[^>]+>"), "")
+                .trim()
+            if (raw.isEmpty()) return emptyList()
+            val suffixFree = raw
+                .replace(
+                    Regex(
+                        "[\\s·:：\\-—_（(【\\[]*(?:动态漫画|动态漫|漫画版|动画版)" +
+                            "(?:\\s*第?[0-9一二三四五六七八九十]+季)?[）)】\\]]*\\s*$",
+                        RegexOption.IGNORE_CASE
+                    ),
+                    ""
+                )
+                .trim()
+            return linkedSetOf(raw, suffixFree)
+                .filter { it.isNotBlank() }
+        }
+
+        fun titlesLikelyMatch(left: String, right: String): Boolean {
+            val a = normalizeTitle(left)
+            val b = normalizeTitle(right)
+            if (a.isBlank() || b.isBlank()) return false
+            if (a == b) return true
+
+            val shorter = if (a.length <= b.length) a else b
+            val longer = if (a.length > b.length) a else b
+            if (shorter.length < 6 || !longer.startsWith(shorter)) return false
+
+            // Accept a trailing season/presentation qualifier, but avoid
+            // matching unrelated works which merely share a short prefix.
+            val tail = longer.removePrefix(shorter)
+            return tail.matches(
+                Regex(
+                    "(?:第?[0-9一二三四五六七八九十]+季|season[0-9]+|" +
+                        "动态漫画|动态漫|漫画版|动画版|全集|完整版)+",
+                    RegexOption.IGNORE_CASE
+                )
+            )
         }
 
         fun mergeSearchItems(items: List<SourceItem>): List<SourceItem> {

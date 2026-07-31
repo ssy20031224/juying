@@ -161,7 +161,7 @@ object RemoteSourceFetcher {
      * Download all remote scripts and cache them for offline use.
      * Call this on app startup (background thread).
      */
-    suspend fun syncAll(context: Context) {
+    suspend fun syncAll(context: Context): Int {
         val client = NetworkClient.create(context)
         val sources = remoteSources()
         var downloaded = 0
@@ -177,6 +177,7 @@ object RemoteSourceFetcher {
             }
         }
         Log.i(TAG, "Sync complete: $downloaded/${sources.size} scripts updated")
+        return downloaded
     }
 
     private fun downloadScript(client: okhttp3.OkHttpClient, context: Context, source: RemoteSource): Boolean {
@@ -188,14 +189,15 @@ object RemoteSourceFetcher {
         // Check if remote has newer content
         val request = Request.Builder().url(remoteUrl).head().build()
         try {
-            val headResp = client.newCall(request).execute()
-            val remoteHash = headResp.header("ETag")
-                ?: headResp.header("x-amz-meta-sha256")
-                ?: headResp.header("Content-MD5")
-            if (remoteHash != null) {
-                val cachedHash = downloadedHashes[source.key]
-                if (cachedHash == remoteHash && cacheFile.exists() && cacheFile.length() > 100) {
-                    return false // Already up to date
+            client.newCall(request).execute().use { headResp ->
+                val remoteHash = headResp.header("ETag")
+                    ?: headResp.header("x-amz-meta-sha256")
+                    ?: headResp.header("Content-MD5")
+                if (remoteHash != null) {
+                    val cachedHash = downloadedHashes[source.key]
+                    if (cachedHash == remoteHash && cacheFile.exists() && cacheFile.length() > 100) {
+                        return false // Already up to date
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -205,22 +207,31 @@ object RemoteSourceFetcher {
         // Download full script
         val getRequest = Request.Builder().url(remoteUrl).get().build()
         return try {
-            val response = client.newCall(getRequest).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "Download failed for ${source.key}: HTTP ${response.code}")
-                return false
-            }
-            val body = decodeEnc1(response.body?.string() ?: return false)
-            if (!isValidJsScript(body)) {
-                Log.w(TAG, "Downloaded content for ${source.key} is invalid JS script")
-                return false
-            }
+            client.newCall(getRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Download failed for ${source.key}: HTTP ${response.code}")
+                    return false
+                }
+                val body = decodeEnc1(response.body?.string() ?: return false)
+                if (!isValidJsScript(body)) {
+                    Log.w(TAG, "Downloaded content for ${source.key} is invalid JS script")
+                    return false
+                }
 
-            val hash = sha256(body)
-            downloadedHashes[source.key] = hash
-            cacheFile.writeText(body)
-            Log.d(TAG, "Downloaded ${source.key}: ${body.length} bytes, hash=$hash")
-            true
+                val hash = sha256(body)
+                val cachedBody = runCatching {
+                    if (cacheFile.exists()) cacheFile.readText() else ""
+                }.getOrDefault("")
+                if (cachedBody.isNotEmpty() && sha256(cachedBody) == hash) {
+                    downloadedHashes[source.key] = hash
+                    return false
+                }
+
+                downloadedHashes[source.key] = hash
+                cacheFile.writeText(body)
+                Log.d(TAG, "Downloaded ${source.key}: ${body.length} bytes, hash=$hash")
+                true
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Download failed for ${source.key}: ${e.message}")
             false
