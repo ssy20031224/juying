@@ -126,7 +126,7 @@ class DiscoveryDataTest {
     }
 
     @Test
-    fun `category search context can classify sparse theatrical metadata`() {
+    fun `category search label cannot relabel sparse or conflicting metadata`() {
         val sparseMovie = SourceItem(title = "只有标题的动画电影", kind = "动漫")
         val entry = SourceRankingEntry(
             item = sparseMovie,
@@ -134,13 +134,21 @@ class DiscoveryDataTest {
             sourcePosition = 1
         )
 
-        assertEquals(
-            listOf("只有标题的动画电影"),
+        assertTrue(
             buildAnimeCategoryRanking(
-                rankedEntries = listOf(entry),
+                rankedEntries = listOf(entry.copy(sourceSection = "搜索:国漫剧场版 · 测试源")),
                 sections = emptyList(),
                 category = AnimeRankingCategory.CHINESE_MOVIE
-            ).map { it.item.title }
+            ).isEmpty()
+        )
+
+        val japaneseDrama = SourceItem(title = "日本电视剧", kind = "日剧 真人版")
+        assertTrue(
+            matchesAnimeRankingCategory(
+                japaneseDrama,
+                "日漫TV番剧",
+                AnimeRankingCategory.JAPANESE_TV
+            ).not()
         )
     }
 }

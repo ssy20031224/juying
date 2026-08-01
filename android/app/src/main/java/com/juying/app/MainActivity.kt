@@ -103,10 +103,9 @@ import java.io.File
 import java.util.Calendar
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
-// 临时关闭账号体系入口：保留原登录/注册实现，后续只需改为 false 即可恢复。
-private const val TEMP_ACCOUNT_AUTH_DISABLED = true
-// 临时关闭评论发送；评论读取仍保留，便于展示已有或外部评论数据。
-private const val TEMP_COMMENT_POSTING_DISABLED = true
+// 维护开关；当前账号与评论能力均已恢复。
+private const val TEMP_ACCOUNT_AUTH_DISABLED = false
+private const val TEMP_COMMENT_POSTING_DISABLED = false
 
 data class CustomColors(
     val bg: Color,
@@ -192,8 +191,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val storageManager = StorageManager(application)
     private val appUpdateManager = AppUpdateManager(application)
     private val lanercDiscoveryRepository = LanercDiscoveryRepository()
+    private val animeMetadataRepository = AnimeMetadataRepository(application)
     private val commentRepository = CommentRepository(application)
     private val accountRepository = AccountRepository(application)
+    private val announcementRepository = AnnouncementRepository(application)
     private var commentsLoadedFor: String? = null
     private var isAppInitialized = false
     private var playerReturnView = "home"
@@ -256,6 +257,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var animeCategoryRankingLoading by mutableStateOf<Set<AnimeRankingCategory>>(emptySet())
         private set
     private val animeCategoryRankingJobs = mutableMapOf<AnimeRankingCategory, Job>()
+    private val animeCategorySearchCompleted = mutableSetOf<AnimeRankingCategory>()
 
     // Player & Detail State
     var activeDetail by mutableStateOf<DetailResult?>(null)
@@ -280,8 +282,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // History and Favorites
     var historyList by mutableStateOf<List<HistoryItem>>(emptyList())
     var favoritesList by mutableStateOf<List<SourceItem>>(emptyList())
-    var searchHistory by mutableStateOf(storageManager.getSearchHistory())
+    var searchHistoryEntries by mutableStateOf(storageManager.getSearchHistoryEntries())
         private set
+    val searchHistory: List<String>
+        get() = searchHistoryEntries.map(SearchHistoryEntry::query)
     var commentNick by mutableStateOf(storageManager.getCommentNick())
     var commentDraft by mutableStateOf("")
     var comments by mutableStateOf<List<CloudComment>>(emptyList())
@@ -299,13 +303,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Theme & Account Settings State
     var themeMode by mutableStateOf(storageManager.getThemeMode())
     var userEmail by mutableStateOf(storageManager.getUserEmail())
-    var userPassword by mutableStateOf(storageManager.getUserPassword())
     var userAvatarIndex by mutableStateOf(storageManager.getUserAvatar())
     var updateChecking by mutableStateOf(false)
     var updateInfo by mutableStateOf<AppUpdateInfo?>(null)
     var updateDialogVisible by mutableStateOf(false)
     var updateMessage by mutableStateOf("")
     var updateDownloadProgress by mutableStateOf<Int?>(null)
+    var announcement by mutableStateOf<AppAnnouncement?>(null)
+        private set
+    var announcementDialogVisible by mutableStateOf(false)
+        private set
 
     fun checkForAppUpdate(manual: Boolean = true) {
         if (updateChecking || updateDownloadProgress != null) return
@@ -365,14 +372,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         storageManager.setUserEmail(email)
     }
 
-    fun updateUserPassword(password: String) {
-        userPassword = password
-        storageManager.setUserPassword(password)
-    }
-
     fun updateUserAvatar(index: Int) {
         userAvatarIndex = index
         storageManager.setUserAvatar(index)
+    }
+
+    private fun loadAnnouncement() {
+        viewModelScope.launch {
+            val loaded = runCatching { announcementRepository.load() }.getOrNull() ?: return@launch
+            announcement = loaded
+            announcementDialogVisible = storageManager.announcementDismissedUntil(loaded.id) <=
+                System.currentTimeMillis()
+        }
+    }
+
+    fun openAnnouncement() {
+        if (announcement != null) announcementDialogVisible = true
+    }
+
+    fun dismissAnnouncement(days: Int = 0) {
+        val current = announcement ?: return
+        val now = System.currentTimeMillis()
+        val until = if (days <= 0) {
+            Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Shanghai")).apply {
+                timeInMillis = now
+                add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        } else now + days * 24L * 60L * 60L * 1000L
+        storageManager.dismissAnnouncementUntil(current.id, until)
+        announcementDialogVisible = false
+    }
+
+    fun closeAnnouncement() {
+        announcementDialogVisible = false
     }
 
     fun updateCommentNick(nick: String) {
@@ -395,13 +431,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     storageManager.setAuthToken(result.token)
                     storageManager.setAccountNickname(result.user.nickname)
+                    storageManager.setCommentNick(result.user.nickname)
+                    commentNick = result.user.nickname
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "登录成功，正在同步本机数据"
                     val remote = accountRepository.pull(result.token)
                     storageManager.mergeCloudData(remote.favorites, remote.history)
                     reloadStorageData()
-                    accountRepository.sync(result.token, favoritesList, historyList)
+                    accountRepository.sync(result.token, favoritesList, historyList, getDownloadedFilesList())
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "登录失败"
@@ -443,13 +481,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     storageManager.setAuthToken(result.token)
                     storageManager.setAccountNickname(result.user.nickname)
+                    storageManager.setCommentNick(result.user.nickname)
+                    commentNick = result.user.nickname
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "注册成功，已同步本机数据"
                     val remote = accountRepository.pull(result.token)
                     storageManager.mergeCloudData(remote.favorites, remote.history)
                     reloadStorageData()
-                    accountRepository.sync(result.token, favoritesList, historyList)
+                    accountRepository.sync(result.token, favoritesList, historyList, getDownloadedFilesList())
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "注册失败"
@@ -577,6 +617,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (result.user != null) {
                         accountUser = result.user
                         updateUserEmail(result.user.email)
+                        commentNick = result.user.nickname
+                        storageManager.setCommentNick(result.user.nickname)
+                        runCatching {
+                            val remote = accountRepository.pull(token)
+                            storageManager.mergeCloudData(remote.favorites, remote.history)
+                            reloadStorageData()
+                            accountRepository.sync(token, favoritesList, historyList, getDownloadedFilesList())
+                        }
                     } else {
                         storageManager.clearAuthToken()
                     }
@@ -593,6 +641,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun remoteDiscoveryPool(): List<SourceItem> =
         (
             lanercSeasons.flatMap { it.entries }.map { it.item } +
+                animeCategoryRankings.values.flatten().map { it.item } +
                 lanercRankings.values.flatten().map { it.item } +
                 lanercSchedule.map { it.item }
             )
@@ -617,6 +666,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = runCatching { lanercDiscoveryRepository.load(force) }
             result.onSuccess { snapshot ->
                 lanercRankings = snapshot.rankings
+                animeCategoryRankings = AnimeRankingCategory.entries.associateWith { category ->
+                    (
+                        snapshot.categoryRankings[category].orEmpty() +
+                            animeCategoryRankings[category].orEmpty().filterNot {
+                                it.item.sourceKey.equals("lanerc", ignoreCase = true)
+                            }
+                        ).distinctBy { normalizeDiscoveryTitle(it.item.title) }
+                }
                 lanercSchedule = snapshot.schedule
                 lanercSeasons = snapshot.seasons
                 lanercDiscoveryUpdatedAt = snapshot.fetchedAt
@@ -651,46 +708,160 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         category: AnimeRankingCategory,
         force: Boolean = false
     ) {
-        if (!force && animeCategoryRankings[category].orEmpty().isNotEmpty()) return
+        if (!force && category in animeCategorySearchCompleted) return
+        if (force) animeCategorySearchCompleted.remove(category)
         animeCategoryRankingJobs.remove(category)?.cancel()
         animeCategoryRankingJobs[category] = viewModelScope.launch {
             animeCategoryRankingLoading = animeCategoryRankingLoading + category
+            val discoverySnapshot = if (force) {
+                runCatching { lanercDiscoveryRepository.load(true) }.getOrNull()
+            } else {
+                null
+            }
+            val baseline = discoverySnapshot?.categoryRankings?.get(category)
+                ?: animeCategoryRankings[category].orEmpty()
             val keywords = when (category) {
                 AnimeRankingCategory.JAPANESE_TV -> listOf("日本新番", "日漫")
                 AnimeRankingCategory.JAPANESE_MOVIE -> listOf("动漫剧场版", "日本动画电影")
                 AnimeRankingCategory.CHINESE_TV -> listOf("国漫", "国产动画")
                 AnimeRankingCategory.CHINESE_MOVIE -> listOf("国漫剧场版", "国产动画电影")
             }
-            val categoryLabel = category.label
-            val fetched = withContext(Dispatchers.IO) {
+            val sourceEnriched = withContext(Dispatchers.IO) {
                 coroutineScope {
-                    sourceManager.allAdapters().map { adapter ->
+                    sourceManager.allAdapters()
+                        .filterNot { it.key.equals("lanerc", ignoreCase = true) }
+                        .map { adapter ->
                         async {
-                            keywords.firstNotNullOfOrNull { keyword ->
-                                runCatching { adapter.search(keyword, 1) }
+                            keywords.flatMap { keyword ->
+                                runCatching { withTimeout(8_000L) { adapter.search(keyword, 1) } }
                                     .getOrNull()
-                                    ?.takeIf(List<SourceItem>::isNotEmpty)
-                                    ?.mapIndexed { index, item ->
-                                        SourceRankingEntry(
+                                    .orEmpty()
+                                    .take(10)
+                                    .mapIndexed { index, item ->
+                                        Triple(adapter, keyword, SourceRankingEntry(
                                             item = item,
-                                            sourceSection = "$categoryLabel · ${adapter.title}",
+                                            sourceSection = "搜索:$keyword · ${adapter.title}",
                                             sourcePosition = index + 1
-                                        )
+                                        ))
                                     }
-                            }.orEmpty()
+                            }
                         }
                     }.awaitAll().flatten()
                 }
-            }
-                .filter {
-                    matchesAnimeRankingCategory(it.item, it.sourceSection, category)
+            }.let { rawEntries ->
+                coroutineScope {
+                    rawEntries
+                        .groupBy { it.first.key }
+                        .values
+                        .map { adapterEntries ->
+                            async(Dispatchers.IO) {
+                            // A single QuickJS adapter must not execute detail()
+                            // concurrently. Enrich only its leading exact-search
+                            // candidates, sequentially; adapters still run in parallel.
+                            adapterEntries
+                                .distinctBy { normalizeDiscoveryTitle(it.third.item.title) }
+                                .take(4)
+                                .map enrich@ { (adapter, _, entry) ->
+                                    val needsDetail = entry.item.score.toDoubleOrNull()?.let { it <= 0.0 } != false ||
+                                        !matchesAnimeRankingCategory(entry.item, entry.sourceSection, category)
+                                    if (!needsDetail) return@enrich entry
+                                    val detailItem = runCatching {
+                                        withTimeout(8_000L) { adapter.detail(entry.item.id).item }
+                                    }.getOrNull()
+                                    if (detailItem == null || detailItem.title.isBlank()) entry
+                                    else entry.copy(item = mergeRankingMetadata(entry.item, detailItem))
+                                }
+                            }
+                        }
+                        .awaitAll()
+                        .flatten()
                 }
+            }
+            // Video sources often omit score/region/platform. Enrich a bounded
+            // set of leading cross-source candidates with exact-title anime
+            // metadata; this never participates in playback resolution.
+            val metadataByTitle = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    sourceEnriched
+                        .groupBy { normalizeDiscoveryTitle(it.item.title) }
+                        .entries
+                        .sortedWith(
+                            compareByDescending<Map.Entry<String, List<SourceRankingEntry>>> { it.value.size }
+                                .thenBy { group -> group.value.minOfOrNull { it.sourcePosition } ?: Int.MAX_VALUE }
+                        )
+                        .take(18)
+                        .map { group ->
+                            async {
+                                group.key to runCatching {
+                                    withTimeout(7_000L) {
+                                        animeMetadataRepository.lookup(group.value.first().item.title)
+                                    }
+                                }.getOrNull()
+                            }
+                        }
+                        .awaitAll()
+                        .mapNotNull { (titleKey, metadata) -> metadata?.let { titleKey to it } }
+                        .toMap()
+                }
+            }
+            val fetched = sourceEnriched
+                .map { entry ->
+                    val metadata = metadataByTitle[normalizeDiscoveryTitle(entry.item.title)]
+                    if (metadata == null) entry
+                    else entry.copy(item = mergeAnimeMetadata(entry.item, metadata))
+                }
+                .filter { matchesAnimeRankingCategory(it.item, it.sourceSection, category) }
                 .distinctBy { normalizeDiscoveryTitle(it.item.title) }
-            animeCategoryRankings = animeCategoryRankings + (category to fetched)
+            val realScoresByTitle = (baseline + fetched)
+                .mapNotNull { entry ->
+                    entry.item.score.toDoubleOrNull()?.takeIf { it > 0.0 }?.let {
+                        normalizeDiscoveryTitle(entry.item.title) to entry.item.score
+                    }
+                }
+                .toMap()
+            val finalEntries = (baseline + fetched)
+                .distinctBy { normalizeDiscoveryTitle(it.item.title) }
+                .map { entry ->
+                    val score = realScoresByTitle[normalizeDiscoveryTitle(entry.item.title)].orEmpty()
+                    if (entry.item.score.isBlank() && score.isNotBlank()) {
+                        entry.copy(item = entry.item.copy(score = score))
+                    } else entry
+                }
+            discoverySnapshot?.let { snapshot ->
+                lanercRankings = snapshot.rankings
+                lanercSchedule = snapshot.schedule
+                lanercSeasons = snapshot.seasons
+                lanercDiscoveryUpdatedAt = snapshot.fetchedAt
+                lanercDiscoveryError = null
+            }
+            animeCategoryRankings = animeCategoryRankings + (
+                category to finalEntries
+            )
+            animeCategorySearchCompleted += category
             animeCategoryRankingLoading = animeCategoryRankingLoading - category
             animeCategoryRankingJobs.remove(category)
         }
     }
+
+    private fun mergeRankingMetadata(summary: SourceItem, detail: SourceItem): SourceItem = summary.copy(
+        title = detail.title.ifBlank { summary.title },
+        year = detail.year.ifBlank { summary.year },
+        kind = detail.kind.ifBlank { summary.kind },
+        tags = (summary.tags + detail.tags).distinct(),
+        status = detail.status.ifBlank { summary.status },
+        score = detail.score.takeIf { it.toDoubleOrNull()?.let { value -> value > 0.0 } == true }
+            ?: summary.score,
+        cover = detail.cover.ifBlank { summary.cover },
+        description = detail.description.ifBlank { summary.description }
+    )
+
+    private fun mergeAnimeMetadata(item: SourceItem, metadata: AnimeMetadata): SourceItem = item.copy(
+        year = item.year.ifBlank { metadata.year },
+        kind = listOf(item.kind, metadata.platform).filter(String::isNotBlank).joinToString(" "),
+        tags = (item.tags + metadata.tags).distinct(),
+        score = item.score.takeIf { it.toDoubleOrNull()?.let { value -> value > 0.0 } == true }
+            ?: metadata.score
+    )
 
     private fun commentMediaKey(item: SourceItem): String =
         "${item.sourceKey.substringBefore(',').trim()}:${item.id}"
@@ -711,9 +882,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addComment() {
-        // TEMP: 评论发送暂时关闭；不要删除下面原有发送逻辑，恢复开关即可继续使用。
+        // 保留本地维护开关；正常构建会继续执行下方登录态校验和云端写入。
         if (TEMP_COMMENT_POSTING_DISABLED) {
             accountMessage = "评论发送暂时关闭，仅展示已有评论"
+            return
+        }
+        if (accountUser == null || storageManager.getAuthToken().isBlank()) {
+            accountMessage = "请先登录账号后发表评论"
+            android.widget.Toast.makeText(getApplication(), "请先登录后评论", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
         val text = commentDraft.trim()
@@ -774,7 +950,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Independent metadata fetch. It never gates source initialization,
         // detail parsing, play URL resolution, or player startup.
         refreshLanercDiscovery(force = false)
-        // TEMP: 登录/注册暂时关闭，保持本地模式，避免启动时访问账号服务。
+        loadAnnouncement()
+        // 正常构建会恢复登录态并拉取用户云端数据。
         if (!TEMP_ACCOUNT_AUTH_DISABLED) restoreAccount()
         viewModelScope.launch {
             withContext(Dispatchers.Main) { notice = "正在加载视频源..." }
@@ -821,7 +998,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val token = storageManager.getAuthToken()
         if (token.isBlank() || accountUser == null) return
         viewModelScope.launch {
-            runCatching { accountRepository.sync(token, favoritesList, historyList) }
+            runCatching {
+                accountRepository.sync(token, favoritesList, historyList, getDownloadedFilesList())
+            }
         }
     }
 
@@ -1199,25 +1378,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (q.isBlank()) return
         query = q
         storageManager.addSearchHistory(q)
-        searchHistory = storageManager.getSearchHistory()
+        searchHistoryEntries = storageManager.getSearchHistoryEntries()
         view = "search_result"
         search(q)
     }
 
     fun openSearch() {
         query = ""
-        searchHistory = storageManager.getSearchHistory()
+        searchHistoryEntries = storageManager.getSearchHistoryEntries()
         view = "search"
     }
 
     fun removeSearchHistory(query: String) {
         storageManager.removeSearchHistory(query)
-        searchHistory = storageManager.getSearchHistory()
+        searchHistoryEntries = storageManager.getSearchHistoryEntries()
     }
 
     fun clearSearchHistory() {
         storageManager.clearSearchHistory()
-        searchHistory = emptyList()
+        searchHistoryEntries = emptyList()
     }
 
     fun clearSearch() {
@@ -2344,6 +2523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         downloader.saveMetadata(detail.item.title, episode.name, detail.item.cover, fileInfo.file)
                         withContext(Dispatchers.Main) {
                             notice = "【下载完成】${detail.item.title} ${episode.name}"
+                            if (accountUser != null) syncAccountData()
                         }
                     } else {
                         withContext(Dispatchers.Main) {
@@ -2380,6 +2560,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (ok) {
             notice = "已成功删除缓存：${item.title} ${item.episodeName}"
             reloadStorageData()
+            if (accountUser != null) syncAccountData()
         } else {
             notice = "删除缓存失败"
         }
@@ -2414,14 +2595,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(item: SourceItem) {
-        if (!PlayerInteractionPolicy.canUseLocalLibrary(
-                accountFeaturesDisabled = TEMP_ACCOUNT_AUTH_DISABLED,
-                accountAvailable = accountUser != null
-            )
-        ) {
-            accountMessage = "请先登录后使用收藏"
-            return
-        }
         val nowFavorite = storageManager.toggleFavorite(item)
         favoritesList = storageManager.getFavorites()
         notice = if (nowFavorite) "已追番" else "已取消追番"
@@ -2431,10 +2604,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun isFavorite(item: SourceItem): Boolean {
-        if (!PlayerInteractionPolicy.canUseLocalLibrary(
-            accountFeaturesDisabled = TEMP_ACCOUNT_AUTH_DISABLED,
-            accountAvailable = accountUser != null
-        )) return false
         val targetSource = item.sourceKey.substringBefore(',').trim()
         val targetTitle = SourceManager.normalizeTitle(item.title)
         return favoritesList.any { favorite ->
@@ -2856,6 +3025,11 @@ fun JuyingApp(vm: MainViewModel) {
                                     color = AppColors.cyan,
                                     fontWeight = FontWeight.Bold
                                 )
+                                Text(
+                                    "更新内容 · ${android.net.Uri.parse(info.source).host ?: info.source}",
+                                    color = AppColors.muted,
+                                    fontSize = 11.sp
+                                )
                                 Surface(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -2913,6 +3087,58 @@ fun JuyingApp(vm: MainViewModel) {
                                 enabled = vm.updateDownloadProgress == null
                             ) {
                                 Text("以后再说", color = AppColors.muted)
+                            }
+                        },
+                        containerColor = AppColors.panel
+                    )
+                }
+            }
+
+            if (vm.announcementDialogVisible && !vm.updateDialogVisible) {
+                vm.announcement?.let { notice ->
+                    AlertDialog(
+                        onDismissRequest = vm::closeAnnouncement,
+                        icon = {
+                            Surface(shape = RoundedCornerShape(12.dp), color = AppColors.orange) {
+                                Text(
+                                    "公告",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                                )
+                            }
+                        },
+                        title = { Text(notice.title, color = AppColors.text, fontWeight = FontWeight.Bold) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (notice.updatedAt.isNotBlank()) {
+                                    Text("更新时间：${notice.updatedAt}", color = AppColors.muted, fontSize = 11.sp)
+                                }
+                                Surface(
+                                    color = AppColors.panel2,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
+                                ) {
+                                    Text(
+                                        notice.content,
+                                        color = AppColors.text,
+                                        lineHeight = 22.sp,
+                                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(14.dp)
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Button(
+                                    onClick = vm::closeAnnouncement,
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.orange),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text("知道了") }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    TextButton(onClick = { vm.dismissAnnouncement(0) }) { Text("今日内不再弹出") }
+                                    TextButton(onClick = { vm.dismissAnnouncement(7) }) { Text("近期不再弹出") }
+                                }
                             }
                         },
                         containerColor = AppColors.panel
@@ -3141,6 +3367,46 @@ fun HomeView(vm: MainViewModel) {
                     if (featuredItems.isNotEmpty()) {
                         item(key = "home_carousel_banner") {
                             HomeCarouselBanner(featuredItems) { vm.openMovie(it) }
+                        }
+                    }
+
+                    vm.announcement?.let { announcement ->
+                        item(key = "home_announcement_${announcement.id}") {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 5.dp)
+                                    .clickable { vm.openAnnouncement() },
+                                shape = RoundedCornerShape(16.dp),
+                                color = AppColors.panel,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    AppColors.orange.copy(alpha = 0.28f)
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(shape = RoundedCornerShape(13.dp), color = AppColors.orange) {
+                                        Text(
+                                            "公告",
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
+                                        )
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        announcement.summary.ifBlank { announcement.title },
+                                        color = AppColors.text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "查看公告", tint = AppColors.muted)
+                                }
+                            }
                         }
                     }
 
@@ -3819,19 +4085,45 @@ fun PlayerViewScreen(vm: MainViewModel) {
         } else {
             // Standalone Comments Tab Screen
             Column(Modifier.fillMaxSize().padding(16.dp)) {
-                // TEMP: 评论发送入口暂时隐藏，只保留评论读取和展示。
-                Text(
-                    "评论发送暂时关闭，仅展示已有评论",
-                    color = AppColors.muted,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(bottom = 10.dp)
-                )
+                if (vm.accountUser == null) {
+                    Surface(
+                        color = AppColors.cyan.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+                    ) {
+                        Text(
+                            "登录后即可发表评论；未登录仍可浏览全部评论。",
+                            color = AppColors.muted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = vm.commentDraft,
+                            onValueChange = { vm.commentDraft = it.take(200) },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text("友善评论，分享你的观后感") },
+                            singleLine = true
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = vm::addComment,
+                            enabled = vm.commentDraft.trim().isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                        ) { Text("发布") }
+                    }
+                }
                 if (vm.comments.isEmpty()) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text("暂无可展示评论", color = AppColors.muted, fontSize = 14.sp)
                     }
                 } else {
-                    LazyColumn(Modifier.fillMaxSize()) {
+                    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
                         items(vm.comments.size) { index ->
                             val comment = vm.comments[index]
                             Card(
@@ -4280,6 +4572,7 @@ fun ActionButton(
 
 @Composable
 fun AccountEntryCard(vm: MainViewModel) {
+    var dialogVisible by remember { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = AppColors.panel),
         shape = RoundedCornerShape(16.dp),
@@ -4287,7 +4580,7 @@ fun AccountEntryCard(vm: MainViewModel) {
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(
-                if (TEMP_ACCOUNT_AUTH_DISABLED) "当前为本地使用模式" else if (vm.accountUser == null) "登录后同步观看记录与收藏" else "云端账号",
+                if (TEMP_ACCOUNT_AUTH_DISABLED) "当前为本地使用模式" else if (vm.accountUser == null) "登录后同步记录、追番与缓存索引" else "云端账号",
                 color = AppColors.text,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp
@@ -4295,7 +4588,7 @@ fun AccountEntryCard(vm: MainViewModel) {
             Spacer(Modifier.height(6.dp))
             Text(
                 if (TEMP_ACCOUNT_AUTH_DISABLED) "登录、注册、邮箱和云端同步暂时关闭；观看记录、收藏和离线缓存均可直接使用。"
-                else if (vm.accountUser == null) "未登录时观看和离线缓存仍可使用，登录后开启账号数据同步。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
+                else if (vm.accountUser == null) "未登录时观看、追番和离线缓存仍可使用；云端不保存视频。" else "${vm.accountUser?.nickname} · ${vm.accountUser?.email}",
                 color = AppColors.muted,
                 fontSize = 12.sp
             )
@@ -4304,7 +4597,7 @@ fun AccountEntryCard(vm: MainViewModel) {
                 Text("账号功能暂时停用", color = AppColors.muted, fontSize = 12.sp)
             } else if (vm.accountUser == null) {
                 Button(
-                    onClick = { /* account dialog is enabled when TEMP_ACCOUNT_AUTH_DISABLED is false */ },
+                    onClick = { dialogVisible = true },
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("登录 / 注册") }
@@ -4317,14 +4610,12 @@ fun AccountEntryCard(vm: MainViewModel) {
             }
         }
     }
-    /* TEMP: 保留原 AccountDialog 调用位置，恢复账号开关后可重新接入。
     if (dialogVisible) {
         AccountDialog(vm) { dialogVisible = false }
     }
-    */
 }
 
-// TEMP: 账号登录/注册弹窗暂时不可达，保留实现以便后续恢复。
+// 登录、注册、验证码与密码找回共用的账号弹窗。
 @Composable
 fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var registering by remember { mutableStateOf(false) }
@@ -4492,7 +4783,7 @@ fun ProfileView(vm: MainViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("个人中心", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(2.dp))
-                        Text(vm.userEmail, color = AppColors.muted, fontSize = 13.sp)
+                        Text(vm.userEmail.ifBlank { "未登录账号" }, color = AppColors.muted, fontSize = 13.sp)
                     }
                     IconButton(onClick = { vm.view = "settings" }) {
                         Icon(Icons.Default.Settings, contentDescription = "设置", tint = AppColors.cyan)
@@ -5084,6 +5375,7 @@ fun SearchLandingScreen(vm: MainViewModel) {
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     var hotPage by remember { mutableStateOf(0) }
+    var guessPage by remember { mutableStateOf(0) }
     val hotPool = remember(vm.lanercRankings, vm.homeSections, vm.lanercSeasons) {
         (
             vm.lanercRankings[RankingKind.HOT].orEmpty().map { it.item } +
@@ -5200,13 +5492,13 @@ fun SearchLandingScreen(vm: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("历史搜索", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            if (vm.searchHistory.isNotEmpty()) {
+            if (vm.searchHistoryEntries.isNotEmpty()) {
                 IconButton(onClick = { vm.clearSearchHistory() }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Delete, contentDescription = "清空历史搜索", tint = AppColors.muted)
                 }
             }
         }
-        if (vm.searchHistory.isEmpty()) {
+        if (vm.searchHistoryEntries.isEmpty()) {
             Text("暂无搜索记录", color = AppColors.muted, fontSize = 12.sp)
         } else {
             FlowRow(
@@ -5214,24 +5506,41 @@ fun SearchLandingScreen(vm: MainViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                vm.searchHistory.take(12).forEach { history ->
+                vm.searchHistoryEntries.take(12).forEach { history ->
                     InputChip(
                         selected = false,
                         onClick = {
                             keyboardController?.hide()
-                            vm.executeSearch(history)
+                            vm.executeSearch(history.query)
                         },
                         label = {
-                            Text(history, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(history.query, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (history.isFrequent) {
+                                    Spacer(Modifier.width(5.dp))
+                                    Surface(
+                                        color = AppColors.rose.copy(alpha = 0.14f),
+                                        shape = RoundedCornerShape(5.dp)
+                                    ) {
+                                        Text(
+                                            "常搜",
+                                            color = AppColors.rose,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                            }
                         },
                         trailingIcon = {
                             Icon(
                                 Icons.Default.Close,
-                                contentDescription = "删除$history",
+                                contentDescription = "删除${history.query}",
                                 tint = AppColors.muted,
                                 modifier = Modifier
                                     .size(16.dp)
-                                    .clickable { vm.removeSearchHistory(history) }
+                                    .clickable { vm.removeSearchHistory(history.query) }
                             )
                         }
                     )
@@ -5284,7 +5593,15 @@ fun SearchLandingScreen(vm: MainViewModel) {
         }
 
         // 猜你想看 (Guess You Want To Watch) section
-        val guessRecommendations = remember(vm.searchHistory, vm.historyList, hotPool, hotPage) {
+        val guessRecommendations = remember(
+            vm.searchHistoryEntries,
+            vm.historyList,
+            hotPool,
+            vm.homeSections,
+            vm.lanercRankings,
+            vm.libraryItems,
+            guessPage
+        ) {
             val candidatePool = (
                 hotPool +
                 vm.homeSections.flatMap { it.items } +
@@ -5293,37 +5610,13 @@ fun SearchLandingScreen(vm: MainViewModel) {
             ).filter { it.title.isNotBlank() }
              .distinctBy { SourceManager.normalizeTitle(it.title) }
 
-            if (candidatePool.isEmpty()) emptyList()
-            else {
-                val recentSearches = vm.searchHistory.take(6)
-                val matched = if (recentSearches.isNotEmpty()) {
-                    candidatePool.filter { candidate ->
-                        recentSearches.any { searchKw ->
-                            candidate.title.contains(searchKw, ignoreCase = true) ||
-                            (candidate.kind != null && candidate.kind.contains(searchKw, ignoreCase = true)) ||
-                            (candidate.description != null && candidate.description.contains(searchKw, ignoreCase = true))
-                        }
-                    }
-                } else if (vm.historyList.isNotEmpty()) {
-                    val historyTitles = vm.historyList.take(6).map { it.item.title }
-                    candidatePool.filter { candidate ->
-                        historyTitles.any { title ->
-                            candidate.title.contains(title.take(3), ignoreCase = true) ||
-                            (candidate.kind != null && vm.historyList.any { h -> candidate.kind == h.item.kind })
-                        }
-                    }
-                } else {
-                    emptyList()
-                }
-
-                val randomSeed = (hotPage * 37 + vm.searchHistory.size * 19 + vm.historyList.size * 7)
-                val matchedShuffled = matched.shuffled(java.util.Random(randomSeed.toLong()))
-                val poolShuffled = candidatePool.shuffled(java.util.Random(randomSeed.toLong()))
-
-                (matchedShuffled + poolShuffled)
-                    .distinctBy { SourceManager.normalizeTitle(it.title) }
-                    .take(6)
-            }
+            buildSearchRecommendations(
+                searchHistory = vm.searchHistoryEntries,
+                watchHistory = vm.historyList,
+                candidates = candidatePool,
+                limit = 6,
+                rotationSeed = guessPage + (System.currentTimeMillis() / 86_400_000L).toInt()
+            )
         }
 
         Spacer(Modifier.height(24.dp))
@@ -5333,11 +5626,19 @@ fun SearchLandingScreen(vm: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("猜你想看", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text(
-                if (vm.searchHistory.isNotEmpty()) "根据近6次搜索推荐" else "随机推荐",
-                color = AppColors.muted,
-                fontSize = 11.sp
-            )
+            TextButton(onClick = { guessPage++ }) {
+                Icon(Icons.Default.Refresh, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    when {
+                        vm.searchHistoryEntries.isNotEmpty() -> "根据最近搜索 · 换一批"
+                        vm.historyList.isNotEmpty() -> "根据观看偏好 · 换一批"
+                        else -> "智能热门 · 换一批"
+                    },
+                    color = AppColors.muted,
+                    fontSize = 10.sp
+                )
+            }
         }
         Spacer(Modifier.height(10.dp))
 
@@ -6152,29 +6453,8 @@ fun LeaderboardScreen(vm: MainViewModel) {
     LaunchedEffect(selectedCategory) {
         vm.loadAnimeCategoryRanking(selectedCategory)
     }
-    val pool = vm.allPoolItems()
-    val sourceRankedEntries = remember(
-        vm.animeCategoryRankings,
-        vm.lanercRankings,
-        vm.discoverySections,
-        pool,
-        selectedCategory
-    ) {
-        (
-            vm.animeCategoryRankings[selectedCategory].orEmpty() +
-            vm.lanercRankings[RankingKind.HOT].orEmpty() +
-                vm.lanercRankings[RankingKind.POPULARITY].orEmpty() +
-                buildRankingEntries(vm.discoverySections, pool, RankingKind.HOT) +
-                buildRankingEntries(vm.discoverySections, pool, RankingKind.POPULARITY)
-            ).distinctBy { normalizeDiscoveryTitle(it.item.title) }
-    }
-    val sourceSections = remember(vm.discoverySections, vm.homeSections) {
-        (vm.discoverySections + vm.homeSections)
-            .distinctBy { "${it.sourceKey}:${it.key}:${it.title}" }
-    }
-    val rankingEntries = remember(selectedCategory, sourceRankedEntries, sourceSections) {
-        buildAnimeCategoryRanking(sourceRankedEntries, sourceSections, selectedCategory)
-    }
+    // 排行榜只显示一次完整请求完成后的分类快照。首页各源逐步加载时不再重排榜单。
+    val rankingEntries = vm.animeCategoryRankings[selectedCategory].orEmpty()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -6200,17 +6480,11 @@ fun LeaderboardScreen(vm: MainViewModel) {
             }
             IconButton(
                 onClick = {
-                    vm.refreshLanercDiscovery(force = true)
-                    vm.loadHome()
                     vm.loadAnimeCategoryRanking(selectedCategory, force = true)
                 },
-                enabled = !vm.lanercDiscoveryLoading &&
-                    !vm.loading &&
-                    selectedCategory !in vm.animeCategoryRankingLoading
+                enabled = selectedCategory !in vm.animeCategoryRankingLoading
             ) {
                 if (
-                    vm.lanercDiscoveryLoading ||
-                    vm.loading ||
                     selectedCategory in vm.animeCategoryRankingLoading
                 ) {
                     LoadingSpinner(Modifier.size(20.dp))
@@ -6435,7 +6709,7 @@ fun SeasonalRankingScreen(vm: MainViewModel) {
                                 Spacer(Modifier.height(3.dp))
                                 val validScore = item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
                                 Text(
-                                    validScore?.let { "★ ${item.score}" } ?: "☆ 暂无评分",
+                                    validScore?.let { "★ ${item.score}" } ?: "☆ 来源未提供评分",
                                     color = if (validScore != null) AppColors.orange else AppColors.muted,
                                     fontSize = 12.sp
                                 )
@@ -6548,7 +6822,7 @@ private fun RankingEntriesList(
                         Spacer(Modifier.height(3.dp))
                         val validScore = item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
                         Text(
-                            validScore?.let { "★ ${item.score}" } ?: "☆ 暂无评分",
+                            validScore?.let { "★ ${item.score}" } ?: "☆ 来源未提供评分",
                             color = if (validScore != null) AppColors.orange else AppColors.muted,
                             fontSize = 12.sp
                         )
@@ -6639,7 +6913,7 @@ private fun RankingPodium(
                 )
                 val validScore = entry.item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
                 Text(
-                    validScore?.let { "★ ${entry.item.score}" } ?: "☆ 暂无评分",
+                    validScore?.let { "★ ${entry.item.score}" } ?: "☆ 来源未提供评分",
                     color = if (validScore != null) AppColors.orange else AppColors.muted,
                     fontSize = 11.sp,
                     maxLines = 1

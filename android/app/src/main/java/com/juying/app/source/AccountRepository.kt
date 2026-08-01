@@ -1,6 +1,7 @@
 package com.juying.app.source
 
 import android.content.Context
+import android.provider.Settings
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.juying.app.BuildConfig
@@ -14,6 +15,7 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 
 data class AccountUser(
     val id: String,
@@ -31,9 +33,19 @@ data class AccountResult(
 data class AccountSyncResult(
     val favorites: List<SourceItem> = emptyList(),
     val history: List<HistoryItem> = emptyList(),
+    val deviceCache: List<CloudDeviceCacheItem> = emptyList(),
+)
+
+data class CloudDeviceCacheItem(
+    val deviceId: String,
+    val mediaKey: String,
+    val episodeKey: String,
+    val status: String,
+    val updatedAt: Long = 0L,
 )
 
 class AccountRepository(context: Context) {
+    private val appContext = context.applicationContext
     private val client = NetworkClient.create(context).newBuilder().cache(null).build()
     private val gson = Gson()
 
@@ -129,7 +141,12 @@ class AccountRepository(context: Context) {
         parseSync(request("/api/sync", token, "GET", null))
     }
 
-    suspend fun sync(token: String, favorites: List<SourceItem>, history: List<HistoryItem>): AccountSyncResult =
+    suspend fun sync(
+        token: String,
+        favorites: List<SourceItem>,
+        history: List<HistoryItem>,
+        downloads: List<DownloadedItemInfo> = emptyList(),
+    ): AccountSyncResult =
         withContext(Dispatchers.IO) {
             val favoriteJson = favorites.map {
                 mapOf(
@@ -156,6 +173,17 @@ class AccountRepository(context: Context) {
                 mapOf(
                     "favorites" to favoriteJson,
                     "progress" to progressJson,
+                    // 仅同步离线缓存索引，不上传本地路径或任何视频字节。
+                    "deviceCache" to downloads.map {
+                        mapOf(
+                            "deviceId" to deviceId(),
+                            "mediaKey" to "offline:${stableKey(it.title)}",
+                            "episodeKey" to stableKey(it.episodeName),
+                            "status" to "downloaded",
+                        )
+                    },
+                    "deviceId" to deviceId(),
+                    "replaceDeviceCache" to true,
                     "replaceFavorites" to true,
                     "replaceProgress" to true,
                 ),
@@ -235,8 +263,31 @@ class AccountRepository(context: Context) {
                 durationMs = (row["durationMs"] as? Number)?.toLong() ?: 0L
             )
         }
-        return AccountSyncResult(remoteFavorites, remoteHistory)
+        val remoteDeviceCache = gson.fromJson<List<Map<String, Any>>>(
+            json.optJSONArray("deviceCache")?.toString() ?: "[]",
+            object : TypeToken<List<Map<String, Any>>>() {}.type,
+        ).map { row ->
+            CloudDeviceCacheItem(
+                deviceId = row["deviceId"]?.toString().orEmpty(),
+                mediaKey = row["mediaKey"]?.toString().orEmpty(),
+                episodeKey = row["episodeKey"]?.toString().orEmpty(),
+                status = row["status"]?.toString().orEmpty(),
+                updatedAt = ((row["updatedAt"] as? Number)?.toLong() ?: 0L) * 1000L,
+            )
+        }
+        return AccountSyncResult(remoteFavorites, remoteHistory, remoteDeviceCache)
     }
+
+    private fun deviceId(): String {
+        val raw = Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
+            .orEmpty()
+            .ifBlank { "android-device" }
+        return "android-${stableKey(raw).take(20)}"
+    }
+
+    private fun stableKey(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.trim().lowercase().toByteArray())
+        .joinToString("") { "%02x".format(it) }
 
     private fun parseError(text: String, status: Int): String {
         val jsonError = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()

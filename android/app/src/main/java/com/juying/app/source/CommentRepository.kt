@@ -18,7 +18,7 @@ data class CloudComment(
 
 /**
  * 评论云端仓库：读写都经过平台 API（/api/comments），
- * 平台服务端持有阿里云 OSS 密钥并落盘 comments/<mediaKey>.json，密钥不进入客户端。
+ * 平台服务端持有 RDS/OSS 凭据；正式评论写入 RDS，兼容部署可回退 OSS，密钥不进入客户端。
  * 网络或接口失败时返回 null，由调用方回退本地处理（来源失败隔离，不影响播放）。
  */
 class CommentRepository(context: Context) {

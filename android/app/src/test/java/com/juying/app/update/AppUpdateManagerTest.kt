@@ -1,6 +1,7 @@
 package com.juying.app.update
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class AppUpdateManagerTest {
@@ -47,5 +48,24 @@ class AppUpdateManagerTest {
         assertEquals("本周版本说明", info.title)
         assertEquals("这里显示发布者自定义的完整内容", info.notes)
         assertEquals("abc", info.sha256)
+    }
+
+    @Test
+    fun newestManifestWinsWithoutLosingPublisherNotesToAnOlderMirror() {
+        val old = AppUpdateInfo(12015, "1.2.15", "旧标题", "旧内容", listOf("https://a/old.apk"))
+        val current = AppUpdateInfo(
+            12016,
+            "1.2.16",
+            "自定义标题",
+            "自定义内容",
+            listOf("https://a/new.apk"),
+            manifestRevision = 2,
+        )
+        val staleRevision = current.copy(title = "缓存标题", notes = "缓存内容", manifestRevision = 1)
+
+        val selected = selectBestUpdateCandidate(listOf(old, current, staleRevision))
+        assertNotNull(selected)
+        assertEquals("自定义标题", selected?.title)
+        assertEquals("自定义内容", selected?.notes)
     }
 }

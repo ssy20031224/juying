@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -209,6 +210,7 @@ def manifest_command(args: argparse.Namespace) -> int:
     manifest = {
         "versionCode": version_code,
         "versionName": version_name,
+        "manifestRevision": int(time.time()),
         "title": args.title.strip() or f"juying {version_name} 更新",
         "notes": notes,
         "apkUrls": urls,

@@ -19,6 +19,10 @@ val configuredAccountApiBase = providers.gradleProperty("LANERC_ACCOUNT_API_BASE
     ?.trim()
     ?.removeSuffix("/")
     ?.takeIf { it.isNotEmpty() }
+val configuredAnnouncementUrls = providers.gradleProperty("LANERC_ANNOUNCEMENT_URLS")
+    .orNull?.trim().orEmpty()
+val configuredSourceScriptBase = providers.gradleProperty("LANERC_SOURCE_SCRIPT_BASE_URL")
+    .orNull?.trim()?.removeSuffix("/")?.takeIf { it.isNotEmpty() }
 
 val releaseStoreFile = providers.gradleProperty("LANERC_RELEASE_STORE_FILE").orNull
 val releaseStorePassword = providers.gradleProperty("LANERC_RELEASE_STORE_PASSWORD").orNull
@@ -53,6 +57,21 @@ android {
             "String",
             "ACCOUNT_API_BASE",
             buildConfigString(configuredAccountApiBase ?: "https://api.lanerc.app")
+        )
+        buildConfigField(
+            "String",
+            "ANNOUNCEMENT_URLS",
+            buildConfigString(
+                configuredAnnouncementUrls.ifBlank {
+                    "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/api/android/announcement.json," +
+                        "https://www.lanerc.app/api/android/announcement.json"
+                }
+            )
+        )
+        buildConfigField(
+            "String",
+            "SOURCE_SCRIPT_BASE_URL",
+            buildConfigString(configuredSourceScriptBase ?: "https://ssyjuying.oss-cn-shanghai.aliyuncs.com/source-scripts")
         )
     }
 
@@ -115,7 +134,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
     implementation("androidx.media3:media3-ui:1.2.1")
-    // GPU 视频效果管线（硬件画质增强：对比度/色彩调整）
+    // GPU 视频效果管线（Anime4K 风格的本地 GLSL 线条修复与纹理放大）
     implementation("androidx.media3:media3-effect:1.2.1")
 
     // Coroutines

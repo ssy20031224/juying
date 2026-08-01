@@ -6,8 +6,8 @@ const SESSION_COOKIE = "lanerc_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const PASSWORD_ITERATIONS = 120_000;
 
-// TEMP: 账号登录/注册暂时关闭。设置 ACCOUNT_AUTH_ENABLED=true 即可恢复全部账号接口。
-export const ACCOUNT_AUTH_ENABLED = process.env.ACCOUNT_AUTH_ENABLED === "true";
+// 默认启用；维护窗口可显式设置 ACCOUNT_AUTH_ENABLED=false。
+export const ACCOUNT_AUTH_ENABLED = process.env.ACCOUNT_AUTH_ENABLED !== "false";
 
 export function accountAuthDisabledResponse(): Response {
   return Response.json(

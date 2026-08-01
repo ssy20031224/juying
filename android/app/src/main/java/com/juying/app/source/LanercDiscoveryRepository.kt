@@ -26,6 +26,7 @@ private const val DOUBAN_REFERER_SUFFIX =
 
 data class LanercDiscoverySnapshot(
     val rankings: Map<RankingKind, List<SourceRankingEntry>>,
+    val categoryRankings: Map<AnimeRankingCategory, List<SourceRankingEntry>> = emptyMap(),
     val schedule: List<ScheduleEntry>,
     val seasons: List<SeasonalRecommendation> = emptyList(),
     val fetchedAt: Long
@@ -33,6 +34,7 @@ data class LanercDiscoverySnapshot(
     val recommendationPool: List<SourceItem>
         get() = (
             seasons.flatMap { it.entries }.map { it.item } +
+                categoryRankings.values.flatten().map { it.item } +
                 rankings.values.flatten().map { it.item } +
                 schedule.map { it.item }
             )
@@ -67,6 +69,7 @@ class LanercDiscoveryRepository {
 
             val previous = cached
             val rankingResult = runCatching { fetchRankings() }
+            val categoryResult = runCatching { fetchCategoryRankings() }
             val scheduleResult = runCatching { fetchSchedule() }
             val rankings = rankingResult.getOrNull()
                 ?.takeIf { it.values.any(List<SourceRankingEntry>::isNotEmpty) }
@@ -76,6 +79,10 @@ class LanercDiscoveryRepository {
                 ?.takeIf(List<ScheduleEntry>::isNotEmpty)
                 ?: previous?.schedule
                 ?: emptyList()
+            val categoryRankings = categoryResult.getOrNull()
+                ?.takeIf { it.values.any(List<SourceRankingEntry>::isNotEmpty) }
+                ?: previous?.categoryRankings
+                ?: emptyMap()
             val seasons = runCatching {
                 fetchSeasonalRecommendations(rankings, schedule, now)
             }.getOrNull()
@@ -83,7 +90,7 @@ class LanercDiscoveryRepository {
                 ?: previous?.seasons
                 ?: emptyList()
 
-            if (rankings.isEmpty() && schedule.isEmpty() && seasons.isEmpty()) {
+            if (rankings.isEmpty() && categoryRankings.isEmpty() && schedule.isEmpty() && seasons.isEmpty()) {
                 throw rankingResult.exceptionOrNull()
                     ?: scheduleResult.exceptionOrNull()
                     ?: IllegalStateException("远程榜单和周表均未返回数据")
@@ -91,6 +98,7 @@ class LanercDiscoveryRepository {
 
             LanercDiscoverySnapshot(
                 rankings = rankings,
+                categoryRankings = categoryRankings,
                 schedule = schedule,
                 seasons = seasons,
                 fetchedAt = now
@@ -152,6 +160,80 @@ class LanercDiscoveryRepository {
             RankingKind.POPULARITY to groupEntries(1),
             RankingKind.SCORE to allScored
         )
+    }
+
+    /**
+     * Lanerc exposes authoritative catalog classes independently from its
+     * misleadingly named seasonal "heat" page: 20=Japanese anime,
+     * 22=Japanese theatrical anime, 24=Chinese anime. Preserve endpoint order
+     * and attach explicit region/format evidence before the shared classifier.
+     */
+    private fun fetchCategoryRankings(): Map<AnimeRankingCategory, List<SourceRankingEntry>> {
+        val japaneseTv = fetchCatalogClass(
+            classId = 20,
+            section = "Lanerc 日漫",
+            fallbackKind = "日漫 TV动画"
+        ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_TV) }
+        val japaneseMovies = fetchCatalogClass(
+            classId = 22,
+            section = "Lanerc 剧场版",
+            fallbackKind = "日漫 剧场版 动画电影"
+        ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_MOVIE) }
+        val chinese = fetchCatalogClass(
+            classId = 24,
+            section = "Lanerc 国漫",
+            fallbackKind = "国漫 国产动画"
+        )
+        return mapOf(
+            AnimeRankingCategory.JAPANESE_TV to japaneseTv,
+            AnimeRankingCategory.JAPANESE_MOVIE to japaneseMovies,
+            AnimeRankingCategory.CHINESE_TV to chinese.filter {
+                matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.CHINESE_TV)
+            },
+            AnimeRankingCategory.CHINESE_MOVIE to chinese.filter {
+                matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.CHINESE_MOVIE)
+            }
+        )
+    }
+
+    private fun fetchCatalogClass(
+        classId: Int,
+        section: String,
+        fallbackKind: String,
+        maxPages: Int = 6
+    ): List<SourceRankingEntry> {
+        val result = mutableListOf<SourceRankingEntry>()
+        val seen = HashSet<String>()
+        for (page in 1..maxPages) {
+            val payload = runCatching {
+                fetchDecodedJson(
+                    "app/vod/filter?page=$page&class_id=$classId&vod_class=&year=&sort_by="
+                )
+            }.getOrNull() ?: break
+            val pageItems = payload.getAsJsonArray("filter_vods")
+                ?.mapNotNull { it.takeIf(JsonElement::isJsonObject)?.asJsonObject }
+                .orEmpty()
+            if (pageItems.isEmpty()) break
+            var added = 0
+            pageItems.forEach { vod ->
+                val item = rankItem(
+                    vod = vod,
+                    fallbackStatus = currentCatalogStatus(vod),
+                    fallbackKind = fallbackKind
+                )
+                val key = normalizeDiscoveryTitle(item.title)
+                if (key.isNotEmpty() && seen.add(key)) {
+                    result += SourceRankingEntry(
+                        item = item,
+                        sourceSection = section,
+                        sourcePosition = result.size + 1
+                    )
+                    added++
+                }
+            }
+            if (added == 0) break
+        }
+        return result
     }
 
     private fun fetchSeasonalRecommendations(
@@ -298,7 +380,8 @@ class LanercDiscoveryRepository {
     private fun rankItem(
         vod: JsonObject,
         fallbackYear: String = "",
-        fallbackStatus: String = ""
+        fallbackStatus: String = "",
+        fallbackKind: String = ""
     ): SourceItem {
         val tags = splitTags(vod.string("vod_class"))
         val score = vod.numberString("vod_score")
@@ -308,7 +391,9 @@ class LanercDiscoveryRepository {
             id = vod.idString("id"),
             title = vod.string("vod_name"),
             year = vod.string("vod_year").ifBlank { fallbackYear },
-            kind = tags.joinToString(" "),
+            kind = listOf(fallbackKind, tags.joinToString(" "))
+                .filter(String::isNotBlank)
+                .joinToString(" "),
             tags = tags,
             status = vod.string("vod_remarks").ifBlank { fallbackStatus },
             score = score,

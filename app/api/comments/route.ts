@@ -5,8 +5,7 @@ import { comments as commentsTable, users } from "../../../db/schema";
 import { getCurrentUser } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
-// TEMP: 评论写入暂时关闭；GET 仍允许读取已有评论数据。
-const COMMENTS_POSTING_ENABLED = process.env.COMMENTS_POSTING_ENABLED === "true";
+const COMMENTS_POSTING_ENABLED = process.env.COMMENTS_POSTING_ENABLED !== "false";
 
 const MAX_COMMENTS = 500;
 const MAX_TEXT_LEN = 200;

@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.media.AudioManager
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.net.Uri
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.view.SurfaceView
 import android.view.TextureView
@@ -22,6 +24,7 @@ import androidx.compose.animation.core.tween
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -56,6 +59,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -63,6 +67,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -78,8 +83,6 @@ import androidx.media3.common.util.Size as Media3Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.effect.Contrast
-import androidx.media3.effect.HslAdjustment
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -98,6 +101,8 @@ import com.juying.app.source.Episode
 import com.juying.app.source.QualityOption
 import com.juying.app.source.SourceLogManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private const val BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -366,7 +371,7 @@ fun EmbeddedVideoPlayer(
     var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     var playError by remember { mutableStateOf(false) }
     var selectedQuality by remember { mutableStateOf("Auto") }
-    var qualityEnhancement by remember { mutableStateOf(false) }
+    var anime4kMode by remember { mutableStateOf(Anime4kMode.OFF) }
     var showQualityMenu by remember { mutableStateOf(false) }
     var showDanmakuSettings by remember { mutableStateOf(false) }
     var danmakuOpacity by remember { mutableStateOf(0.85f) }
@@ -374,7 +379,7 @@ fun EmbeddedVideoPlayer(
     val lowRamDevice = remember(context) {
         (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
     }
-    val maxSpeed = if (lowRamDevice || qualityEnhancement) 2.0f else 3.0f
+    val maxSpeed = if (lowRamDevice || anime4kMode != Anime4kMode.OFF) 2.0f else 3.0f
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
@@ -437,6 +442,12 @@ fun EmbeddedVideoPlayer(
     var gestureHudValue by remember { mutableStateOf(0) }
     var gestureHudText by remember { mutableStateOf("") }
     var gestureHudJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var seekPreviewBitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
+    var seekPreviewPosition by remember(url) { mutableStateOf(0L) }
+    var seekPreviewJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var seekPreviewGeneration by remember { mutableStateOf(0) }
+    var lastPreviewRequestedAt by remember { mutableStateOf(0L) }
+    var gestureSeekOriginPosition by remember { mutableStateOf(0L) }
     var scanlineProgress by remember { mutableStateOf(0f) }
     var isScanlineActive by remember { mutableStateOf(false) }
     val latestProgressCallback by rememberUpdatedState(onPlaybackProgress)
@@ -540,6 +551,53 @@ fun EmbeddedVideoPlayer(
             setReadTimeoutMs(15000)
             if (requestHeaders.isNotEmpty()) {
                 setDefaultRequestProperties(requestHeaders)
+            }
+        }
+    }
+    val requestSeekPreview: (Long) -> Unit = { targetMs ->
+        seekPreviewPosition = targetMs
+        val now = System.currentTimeMillis()
+        if (now - lastPreviewRequestedAt >= 180L) {
+            lastPreviewRequestedAt = now
+            val generation = ++seekPreviewGeneration
+            seekPreviewJob?.cancel()
+            seekPreviewJob = playerScope.launch {
+                delay(80L)
+                val frame = withContext(Dispatchers.IO) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        val uri = Uri.parse(url)
+                        if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
+                            val metadataHeaders = HashMap<String, String>(requestHeaders)
+                            if (metadataHeaders.keys.none { it.equals("User-Agent", true) }) {
+                                metadataHeaders["User-Agent"] = BROWSER_UA
+                            }
+                            retriever.setDataSource(url, metadataHeaders)
+                        } else {
+                            retriever.setDataSource(context, uri)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                            retriever.getScaledFrameAtTime(
+                                targetMs.coerceAtLeast(0L) * 1000L,
+                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                320,
+                                180
+                            )
+                        } else {
+                            retriever.getFrameAtTime(
+                                targetMs.coerceAtLeast(0L) * 1000L,
+                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                            )
+                        }
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        runCatching { retriever.release() }
+                    }
+                }
+                if (generation == seekPreviewGeneration) {
+                    seekPreviewBitmap = frame
+                }
             }
         }
     }
@@ -689,6 +747,36 @@ fun EmbeddedVideoPlayer(
 
                 override fun onPlayerError(error: PlaybackException) {
                     android.util.Log.e("EmbeddedPlayer", "Playback error: ${error.errorCodeName} - ${error.message}")
+                    if (
+                        anime4kMode != Anime4kMode.OFF &&
+                        error.errorCode == PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED
+                    ) {
+                        // A few GPU/driver combinations cannot allocate or recycle the
+                        // enlarged processing texture. Enhancement is optional: recover
+                        // the same media item and position without invoking source
+                        // failover or turning a rendering issue into a playback failure.
+                        val resumePosition = currentPosition.coerceAtLeast(0L)
+                        val resumePlayback = playWhenReady
+                        anime4kMode = Anime4kMode.OFF
+                        runCatching {
+                            stop()
+                            setVideoEffects(emptyList())
+                            prepare()
+                            if (resumePosition > 0L) seekTo(resumePosition)
+                            playWhenReady = resumePlayback
+                        }.onSuccess {
+                            playError = false
+                            Toast.makeText(
+                                context,
+                                "当前GPU不兼容Anime4K，已关闭增强并恢复播放",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }.onFailure {
+                            playError = true
+                            onError()
+                        }
+                        return
+                    }
                     SourceLogManager.error(
                         "player",
                         "播放失败",
@@ -838,39 +926,45 @@ fun EmbeddedVideoPlayer(
     val scanlineAnim = remember { androidx.compose.animation.core.Animatable(0f) }
     var effectsWereEnabled by remember(exoPlayer) { mutableStateOf(false) }
 
-    LaunchedEffect(qualityEnhancement) {
+    LaunchedEffect(anime4kMode) {
         exoPlayer.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
-        // Cross-device Android has no standard vendor-neutral NPU video
-        // super-resolution API. Apply a real GPU edge-enhancement pass plus
-        // restrained contrast/saturation instead of falsely labelling a color
-        // filter as "AI 4K".
+        // Lanerc sends Anime4K GLSL files to libmpv. This native Media3 player
+        // hosts an equivalent local 2x/adaptive-line GLSL pass in Media3's GPU
+        // frame processor, preserving the existing player/session state machine.
         try {
-            if (qualityEnhancement) {
+            val shouldRebuildPipeline =
+                anime4kMode != Anime4kMode.OFF || effectsWereEnabled
+            if (shouldRebuildPipeline) {
+                // Media3 1.2.x can double-release an output texture when the
+                // effect graph is hot-swapped while frames are flowing. Stop
+                // first, then configure effects before prepare(), preserving
+                // the user's media item, position and play/pause state.
+                val resumePosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                val resumePlayback = exoPlayer.playWhenReady
+                val hasMediaItem = exoPlayer.currentMediaItem != null
+                if (hasMediaItem) exoPlayer.stop()
                 exoPlayer.setVideoEffects(
-                    listOf(
-                        GpuSharpenEffect(0.12f),
-                        Contrast(0.08f),
-                        HslAdjustment.Builder()
-                            .adjustSaturation(4f)
-                            .build()
-                        )
-                    )
-                effectsWereEnabled = true
-            } else if (effectsWereEnabled) {
-                // Avoid a redundant asynchronous renderer reconfiguration on
-                // every first composition. Only clear effects after they were
-                // actually enabled.
-                exoPlayer.setVideoEffects(emptyList())
-                effectsWereEnabled = false
+                    if (anime4kMode == Anime4kMode.OFF) {
+                        emptyList()
+                    } else {
+                        listOf(Anime4kGpuEffect(anime4kMode))
+                    }
+                )
+                effectsWereEnabled = anime4kMode != Anime4kMode.OFF
+                if (hasMediaItem) {
+                    exoPlayer.prepare()
+                    if (resumePosition > 0L) exoPlayer.seekTo(resumePosition)
+                    exoPlayer.playWhenReady = resumePlayback
+                }
             }
         } catch (e: Exception) {
-            Toast.makeText(context, "当前设备不支持GPU锐化增强", Toast.LENGTH_SHORT).show()
-            qualityEnhancement = false
+            Toast.makeText(context, "当前设备不支持Anime4K GPU增强", Toast.LENGTH_SHORT).show()
+            anime4kMode = Anime4kMode.OFF
             return@LaunchedEffect
         }
 
-        if (qualityEnhancement) {
+        if (anime4kMode != Anime4kMode.OFF) {
             // 开启：扫描线从左到右扫过表示增强生效
             isScanlineActive = true
             scanlineAnim.animateTo(
@@ -898,6 +992,10 @@ fun EmbeddedVideoPlayer(
 
     DisposableEffect(exoPlayer) {
         onDispose {
+            seekPreviewGeneration++
+            seekPreviewJob?.cancel()
+            seekPreviewJob = null
+            seekPreviewBitmap = null
             try {
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
@@ -1000,6 +1098,9 @@ fun EmbeddedVideoPlayer(
                         totalY = 0f
                         volumeAcc = 0f
                         dragAxis = PlayerInteractionPolicy.DragAxis.UNDECIDED
+                        gestureSeekOriginPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        seekPreviewPosition = gestureSeekOriginPosition
+                        seekPreviewBitmap = null
                         startedOnControls = controlsVisible && startY > size.height * 0.70f
                         resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
@@ -1040,8 +1141,12 @@ fun EmbeddedVideoPlayer(
                         } else if (dragAxis == PlayerInteractionPolicy.DragAxis.HORIZONTAL) {
                             val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                             val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
-                            val targetMs = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, duration.coerceAtLeast(0L))
-                            triggerHud("seek", if (deltaMs >= 0) 1 else -1, "${formatTime(targetMs)} / ${formatTime(duration)}", 1500L)
+                            val targetMs = (gestureSeekOriginPosition + deltaMs)
+                                .coerceIn(0L, duration.coerceAtLeast(0L))
+                            gestureHudType = "seek"
+                            gestureHudValue = if (deltaMs >= 0) 1 else -1
+                            gestureHudText = "${formatTime(targetMs)} / ${formatTime(duration)}"
+                            requestSeekPreview(targetMs)
                         }
                     },
                     onDragEnd = {
@@ -1055,13 +1160,22 @@ fun EmbeddedVideoPlayer(
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
                         val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
-                        val targetPosition = (exoPlayer.currentPosition + deltaMs).coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
+                        val targetPosition = (gestureSeekOriginPosition + deltaMs)
+                            .coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
                         exoPlayer.seekTo(targetPosition)
                         exoPlayer.playWhenReady = resumeAfterGestureSeek
+                        seekPreviewGeneration++
+                        seekPreviewJob?.cancel()
+                        seekPreviewBitmap = null
+                        gestureHudText = ""
                     },
                     onDragCancel = {
                         lastDragTime = System.currentTimeMillis()
                         dragGestureActive = false
+                        seekPreviewGeneration++
+                        seekPreviewJob?.cancel()
+                        seekPreviewBitmap = null
+                        if (gestureHudType == "seek") gestureHudText = ""
                     }
                 )
             }
@@ -1229,7 +1343,11 @@ fun EmbeddedVideoPlayer(
                         .padding(top = 48.dp)
                 ) {
                     Text(
-                        "GPU锐化增强对比中",
+                        if (anime4kMode == Anime4kMode.HIGH_QUALITY) {
+                            "Anime4K 高质量增强中"
+                        } else {
+                            "Anime4K 性能增强中"
+                        },
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
@@ -1239,8 +1357,55 @@ fun EmbeddedVideoPlayer(
             }
         }
 
-        // ── Gesture HUD OSD Badge Overlay (Monochrome White Icons) ──
-        if (gestureHudText.isNotBlank()) {
+        // ── Horizontal seek preview: target frame directly below the top bar ──
+        if (dragGestureActive && gestureHudType == "seek" && gestureHudText.isNotBlank()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (isFullscreen) 52.dp else 36.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .widthIn(min = 180.dp, max = 260.dp)
+                        .aspectRatio(16f / 9f),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.88f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.20f))
+                ) {
+                    val preview = seekPreviewBitmap
+                    if (preview != null && !preview.isRecycled) {
+                        Image(
+                            bitmap = preview.asImageBitmap(),
+                            contentDescription = "跳转位置画面预览",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "${formatTime(seekPreviewPosition)} / ${formatTime(duration)}",
+                    color = Color.White,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                )
+            }
+        }
+
+        // ── Gesture HUD OSD Badge Overlay (brightness/volume/hold actions) ──
+        if (gestureHudText.isNotBlank() && !(dragGestureActive && gestureHudType == "seek")) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = Color.Black.copy(alpha = 0.40f),
@@ -1706,7 +1871,9 @@ fun EmbeddedVideoPlayer(
                 onDismissRequest = { showQualityMenu = false },
                 title = { Text("清晰度与画质增强", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                 text = {
-                    Column {
+                    Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState())
+                    ) {
                         FlowRow(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1749,33 +1916,69 @@ fun EmbeddedVideoPlayer(
                                 modifier = Modifier.padding(top = 10.dp)
                             )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text("GPU实时画质增强", color = AppColors.text)
-                                Text(
-                                    if (lowRamDevice) {
-                                        "GPU边缘锐化与色彩增强；低内存设备最高2x"
-                                    } else {
-                                        "GPU边缘锐化+色彩增强；非虚假的AI 4K超分"
+                        Text(
+                            "Anime4K GPU超分辨率 · 实验功能",
+                            color = AppColors.text,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 14.dp, bottom = 8.dp)
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Anime4kMode.entries.forEach { mode ->
+                                val selected = anime4kMode == mode
+                                val enabled = mode != Anime4kMode.HIGH_QUALITY || !lowRamDevice
+                                Surface(
+                                    onClick = {
+                                        if (enabled) anime4kMode = mode
                                     },
-                                    color = AppColors.muted,
-                                    fontSize = 11.sp
-                                )
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) AppColors.cyan.copy(alpha = 0.22f) else AppColors.panel2,
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (selected) AppColors.cyan else Color.Transparent
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        RadioButton(
+                                            selected = selected,
+                                            onClick = { if (enabled) anime4kMode = mode },
+                                            enabled = enabled,
+                                            colors = RadioButtonDefaults.colors(selectedColor = AppColors.cyan)
+                                        )
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                mode.label,
+                                                color = if (enabled) AppColors.text else AppColors.muted,
+                                                fontSize = 13.sp,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                            if (mode != Anime4kMode.OFF) {
+                                                Text(
+                                                    if (mode == Anime4kMode.PERFORMANCE) {
+                                                        "2× GPU放大与轻量线条恢复，最高处理到1440p"
+                                                    } else if (lowRamDevice) {
+                                                        "低内存设备已停用高质量模式"
+                                                    } else {
+                                                        "2× GPU放大与强化线条恢复，最高处理到2160p"
+                                                    },
+                                                    color = AppColors.muted,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            Switch(
-                                checked = qualityEnhancement,
-                                onCheckedChange = { qualityEnhancement = it }
-                            )
                         }
                         Text(
-                            "说明：腾讯/优酷等AI超分依赖私有模型、NPU及厂商SDK；Android没有统一接口，未接入受支持模型前不会冒充4K超分。",
-                            color = AppColors.muted,
+                            "开启后会持续占用GPU并增加耗电、温度；中低端手机可能出现发热、掉帧或卡顿。遇到卡顿请改用性能优先、关闭弹幕或直接关闭。本功能只增强本地渲染，不会把低清片源变成真正4K片源。",
+                            color = AppColors.orange,
                             fontSize = 10.sp,
-                            modifier = Modifier.padding(top = 6.dp)
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                 },

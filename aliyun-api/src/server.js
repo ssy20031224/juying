@@ -43,7 +43,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// TEMP: 账号接口保留但默认停用，避免删除后续恢复所需的登录/注册逻辑。
+// 运维可通过环境变量关闭账号接口；正式配置默认启用。
 app.use("/api/auth", (req, res, next) => {
   if (!config.accountAuthEnabled) {
     return res.status(503).json({ error: "account login and registration are temporarily disabled" });
@@ -356,6 +356,15 @@ app.post("/api/sync", requireUser, async (req, res, next) => {
       if (req.body?.replaceProgress === true) {
         await connection.execute("DELETE FROM watch_progress WHERE user_id = ?", [req.accountUser.id]);
       }
+      if (req.body?.replaceDeviceCache === true) {
+        const device = safeText(req.body?.deviceId, 120);
+        if (device) {
+          await connection.execute(
+            "DELETE FROM device_cache_items WHERE user_id = ? AND device_id = ?",
+            [req.accountUser.id, device],
+          );
+        }
+      }
       for (const item of favorites) {
         const media = mediaKey(item?.mediaKey);
         if (!media) continue;
@@ -415,6 +424,30 @@ app.post("/api/sync", requireUser, async (req, res, next) => {
   }
 });
 
+app.get("/api/announcement", async (_req, res, next) => {
+  try {
+    let announcement = null;
+    try {
+      const object = await oss.get(config.oss.announcementObject);
+      const raw = Buffer.isBuffer(object.content)
+        ? object.content.toString("utf8")
+        : String(object.content || "");
+      const parsed = JSON.parse(raw);
+      announcement = parsed?.announcement || parsed;
+    } catch (error) {
+      // A not-yet-uploaded announcement object is an empty state, not a 500.
+      if (!String(error?.code || "").includes("NoSuchKey")) console.warn("announcement read failed", error?.code || error?.message);
+    }
+    if (!announcement && config.announcementFallback.title && config.announcementFallback.content) {
+      announcement = { ...config.announcementFallback, enabled: true };
+    }
+    if (!announcement) return res.status(204).end();
+    return res.json({ announcement });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/comments", async (req, res, next) => {
   try {
     const media = mediaKey(req.query.media);
@@ -439,7 +472,7 @@ app.get("/api/comments", async (req, res, next) => {
 });
 
 app.post("/api/comments", (req, res, next) => {
-  // TEMP: 评论发送关闭；GET /api/comments 读取仍保持可用。
+  // 评论写入要求功能开关开启且请求携带有效登录会话。
   if (!config.commentsPostingEnabled) {
     return res.status(503).json({ error: "comment posting is temporarily disabled" });
   }

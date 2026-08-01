@@ -1,6 +1,6 @@
 # 聚映当前系统架构
 
-> 文档状态：2026-07-24（P0+P1 性能优化 + 增量目录缓存）  
+> 文档状态：2026-08-01（Android Anime4K、稳定分类榜、阿里云账号同步与公告）
 > 适用提交：当前工作区最新提交  
 > 本文只描述已经存在的能力；规划中的能力见 `docs/product-gap-roadmap.md`。
 
@@ -25,6 +25,19 @@
 
 ## 2. 技术栈和运行形态
 
+### 2.1 Android 播放与发现补充
+
+- 动漫分类排行榜使用“完整请求一次提交”的分类快照：进入分类后不再随首页来源分批返回而重排，只有右上角主动刷新会重新拉取。14 个 JS 源负责候选与播放，`AnimeMetadataRepository` 仅对标题精确/近精确匹配的动漫补真实评分、地区和 TV/剧场版元数据；它不参与播放，失败也不会影响视频解析。禁止生成假评分，无法验证地域或内容形态的条目不会强行入榜。
+- Android 账号可选登录；阿里云 RDS 保存账号、会话、追番、进度、评论及设备缓存索引，DirectMail 发送验证码，OSS 只保存头像、公告与经过审核的来源脚本。任何视频文件、切片、本地路径及临时播放 URL 都不会进入云端账号同步。
+- 公告由 `aliyun-api` 读取 OSS `config/announcement.json`，Android 启动弹窗和首页公告条复用同一内容；用户的免打扰截止时间只保存在设备端。
+- 更新检查并行比较多份 `update.json` 的版本与修订号，同版本优先发布者配置 URL；来源 JS 则优先从 `LANERC_SOURCE_SCRIPT_BASE_URL` 下载并保留旧 CDN、APK 资产回退。
+
+- Android 继续以 Media3/ExoPlayer 作为唯一播放状态机；Anime4K 风格 GLSL 通过 `media3-effect` 本地 GPU 帧处理接入，不额外引入 Flutter `media_kit` 或第二套 libmpv 播放器，因此离线播放、画中画、换源和生命周期恢复仍共享同一状态。
+- GPU 增强只处理视频渲染纹理，不改变播放 URL、请求头、解析缓存或来源选择。热切换采用停止帧流、设置效果、重新 prepare 并恢复进度；帧处理失败时关闭效果并恢复原流。
+- 横向 Seek 预览使用 `MediaMetadataRetriever` 按目标时间提取缩放关键帧；提取任务限频、可取消并运行在 IO 调度器，手势结束后才提交最终 seek。
+- Lanerc 发现数据由独立 `LanercDiscoveryRepository` 获取和缓存：`/app/home?class=20` 对应日漫 TV，`class=22` 对应日漫剧场版，`class=24` 对应国漫。该缓存与 QuickJS、播放地址解析及播放器连接池隔离。
+- 搜索画像只保存在本机：历史条目记录查询词、累计次数和最近搜索时间；推荐器将搜索相关度、观看记录、来源真实评分作确定性排序，不上传搜索记录，也不生成虚假热度。
+
 | 层 | 当前实现 |
 |---|---|
 | Web 框架 | Next.js 16 App Router 接口，由 vinext 构建 |
@@ -34,7 +47,7 @@
 | 来源适配 | TypeScript Native Adapter；JS Worker/Browser Worker 仅登记未实现 |
 | 缓存 | Node/Worker 进程内 `Map`，带 TTL 和 singleflight 请求合并 |
 | 数据库 | 未启用；`db/schema.ts` 当前为空 |
-| 用户数据 | 浏览器 `localStorage`，无登录、无云同步 |
+| 用户数据 | Web 保留 `localStorage`；Android 可选阿里云账号同步，本地模式继续可用 |
 | App 形态 | PWA；Manifest + Service Worker，不是原生 APK |
 | 部署 | Cloudflare Worker 兼容的 vinext 构建，通过 Sites 发布 |
 
@@ -257,8 +270,8 @@ flowchart LR
 - 清理浏览器数据后会丢失。
 - 不同设备不同步。
 - 播放进度已经按作品/集数写入 `juying:progress:${mediaId}`，但还没有与历史列表统一。
-- 没有服务端账号同步。
-- 没有收藏夹分组、追番更新提醒或账号系统。
+- Web 前端尚未接入账号同步；Android 已接入账号、追番与进度同步。
+- 仍没有收藏夹分组和追番更新提醒。
 - 没有数据导出/恢复实现。
 
 ## 11. 缓存和并发
@@ -391,4 +404,4 @@ flowchart LR
 - Android 搜索入口使用独立页面，搜索历史存于设备 `SharedPreferences`；热门搜索来自已加载的真实榜单、季度和首页作品，不生成虚构词条。
 - Android 历史记录保存作品/剧集身份、播放位置、时长和北京时间，UI 按时间区间分组并支持左滑单删；仍不保存临时播放 URL。
 - Android GPU 画质增强通过 Media3 OpenGL 自定义锐化 Shader、对比度和饱和度效果实现。它不宣称为 AI 4K 超分；厂商 NPU 超分必须在获得对应 SDK/模型和设备能力契约后单独接入。
-- 自定义 JS 导入、数据源诊断和账号编辑实现当前保留在代码中，但不在 Android 前端显示。
+- 自定义 JS 导入和数据源诊断实现继续在 Android 前端隐藏；账号编辑、头像、同步和登录后评论已恢复显示。

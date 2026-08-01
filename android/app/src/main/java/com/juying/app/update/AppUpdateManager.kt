@@ -11,6 +11,9 @@ import androidx.core.content.FileProvider
 import com.juying.app.BuildConfig
 import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.CacheControl
 import okhttp3.Request
@@ -29,7 +32,8 @@ data class AppUpdateInfo(
     val notes: String,
     val apkUrls: List<String>,
     val sha256: String = "",
-    val source: String = ""
+    val source: String = "",
+    val manifestRevision: Long = 0L,
 )
 
 internal fun parseUpdateManifest(raw: String, source: String): AppUpdateInfo {
@@ -93,9 +97,26 @@ internal fun parseUpdateManifest(raw: String, source: String): AppUpdateInfo {
         ).ifBlank { "修复问题并提升使用体验" },
         apkUrls = urls.distinct(),
         sha256 = firstString("sha256", "sha_256"),
-        source = source
+        source = source,
+        manifestRevision = scopes.firstNotNullOfOrNull { json ->
+            json.optLong("manifestRevision", 0L).takeIf { it > 0L }
+                ?: json.optLong("revision", 0L).takeIf { it > 0L }
+        } ?: 0L
     )
 }
+
+internal fun selectBestUpdateCandidate(candidates: List<AppUpdateInfo>): AppUpdateInfo? =
+    candidates.withIndex()
+        .filter { it.value.apkUrls.isNotEmpty() }
+        .sortedWith(
+            compareByDescending<IndexedValue<AppUpdateInfo>> { it.value.versionCode }
+                .thenByDescending { it.value.manifestRevision }
+                // Equal versions keep the earlier configured URL, allowing a
+                // publisher-controlled manifest to override mirrors' notes.
+                .thenBy { it.index }
+        )
+        .firstOrNull()
+        ?.value
 
 private fun firstStringFrom(json: JSONObject, vararg names: String): String =
     names.firstNotNullOfOrNull { name ->
@@ -135,15 +156,15 @@ class AppUpdateManager(private val context: Context) {
                     .split(',', ';', '\n')
                     .map(String::trim)
                     .filter(String::isNotBlank) +
+                    listOf(
+                        "https://www.lanerc.app/api/android/update.json",
+                        "https://lanerc.app/api/android/update.json",
+                        "https://raw.githubusercontent.com/ssy20031224/juying/main/public/api/android/update.json",
+                        "https://cdn.jsdelivr.net/gh/ssy20031224/juying@main/public/api/android/update.json"
+                    ) +
                     listOfNotNull(
                         cloudManifestUrl(ALIYUN_OSS_PUBLIC_BASE),
                         cloudManifestUrl(TENCENT_COS_PUBLIC_BASE)
-                    ) +
-                    listOf(
-                        "https://raw.githubusercontent.com/ssy20031224/juying/main/public/api/android/update.json",
-                        "https://cdn.jsdelivr.net/gh/ssy20031224/juying@main/public/api/android/update.json",
-                        "https://www.lanerc.app/api/android/update.json",
-                        "https://lanerc.app/api/android/update.json"
                     )
                 )
                 .filter { it.startsWith("https://", ignoreCase = true) }
@@ -172,12 +193,16 @@ class AppUpdateManager(private val context: Context) {
         preferences.edit().putLong(KEY_LAST_CHECK, now).apply()
 
         val errors = mutableListOf<String>()
-        MANIFEST_URLS.forEach { url ->
-            val body = fetchText(url, cacheBust = manual)
+        val candidates = mutableListOf<AppUpdateInfo>()
+        val manifestResponses = coroutineScope {
+            MANIFEST_URLS.map { url ->
+                async { url to fetchText(url, cacheBust = manual) }
+            }.awaitAll()
+        }
+        manifestResponses.forEach { (url, body) ->
             if (body != null) {
                 val info = runCatching { parseUpdateManifest(body, url) }.getOrNull()
-                if (info != null) return@withContext compare(info)
-                errors += "$url: invalid manifest"
+                if (info != null) candidates += info else errors += "$url: invalid manifest"
             } else {
                 errors += "$url: unavailable"
             }
@@ -190,12 +215,12 @@ class AppUpdateManager(private val context: Context) {
         )
         if (githubBody != null) {
             val info = runCatching { parseGithubRelease(githubBody) }.getOrNull()
-            if (info != null) return@withContext compare(info)
-            errors += "GitHub Releases: no APK asset"
+            if (info != null) candidates += info else errors += "GitHub Releases: no APK asset"
         } else {
             errors += "GitHub Releases: unavailable"
         }
 
+        selectBestUpdateCandidate(candidates)?.let { return@withContext compare(it) }
         UpdateCheckResult.Failed(errors.joinToString("；").take(320))
         }
     } catch (error: Exception) {
@@ -384,7 +409,7 @@ class AppUpdateManager(private val context: Context) {
         val requestUrl = if (cacheBust) {
             url.toHttpUrlOrNull()
                 ?.newBuilder()
-                ?.addQueryParameter("_juying_check", (System.currentTimeMillis() / 60_000L).toString())
+                ?.addQueryParameter("_juying_check", System.currentTimeMillis().toString())
                 ?.build()
                 ?.toString()
                 ?: url

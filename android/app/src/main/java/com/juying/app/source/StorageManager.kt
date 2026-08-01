@@ -2,6 +2,7 @@ package com.juying.app.source
 
 import android.content.Context
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 
 data class HistoryItem(
@@ -12,6 +13,15 @@ data class HistoryItem(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L
 )
+
+data class SearchHistoryEntry(
+    val query: String,
+    val count: Int = 1,
+    val lastSearchedAt: Long = System.currentTimeMillis()
+) {
+    val isFrequent: Boolean
+        get() = count >= 3
+}
 
 class StorageManager(context: Context) {
     private val prefs = context.getSharedPreferences("juying_prefs", Context.MODE_PRIVATE)
@@ -69,28 +79,57 @@ class StorageManager(context: Context) {
         prefs.edit().remove("watch_history").apply()
     }
 
-    fun getSearchHistory(): List<String> {
+    fun getSearchHistoryEntries(): List<SearchHistoryEntry> {
         val json = prefs.getString("search_history", "[]") ?: "[]"
         return try {
-            gson.fromJson(json, object : TypeToken<List<String>>() {}.type) ?: emptyList()
+            val array = JsonParser.parseString(json).asJsonArray
+            array.mapNotNull { element ->
+                when {
+                    element.isJsonPrimitive && element.asJsonPrimitive.isString -> {
+                        element.asString.trim().takeIf(String::isNotBlank)?.let {
+                            SearchHistoryEntry(query = it)
+                        }
+                    }
+                    element.isJsonObject -> runCatching {
+                        gson.fromJson(element, SearchHistoryEntry::class.java)
+                    }.getOrNull()?.takeIf { it.query.isNotBlank() }
+                    else -> null
+                }
+            }
+                .sortedByDescending(SearchHistoryEntry::lastSearchedAt)
+                .take(20)
         } catch (_: Exception) {
             emptyList()
         }
     }
 
+    fun getSearchHistory(): List<String> = getSearchHistoryEntries().map(SearchHistoryEntry::query)
+
     fun addSearchHistory(query: String) {
         val normalized = query.trim()
         if (normalized.isBlank()) return
-        val updated = getSearchHistory()
-            .filterNot { it.equals(normalized, ignoreCase = true) }
+        val existing = getSearchHistoryEntries().firstOrNull {
+            it.query.equals(normalized, ignoreCase = true)
+        }
+        val updated = getSearchHistoryEntries()
+            .filterNot { it.query.equals(normalized, ignoreCase = true) }
             .toMutableList()
-            .apply { add(0, normalized) }
+            .apply {
+                add(
+                    0,
+                    SearchHistoryEntry(
+                        query = existing?.query ?: normalized,
+                        count = (existing?.count ?: 0) + 1,
+                        lastSearchedAt = System.currentTimeMillis()
+                    )
+                )
+            }
             .take(20)
         prefs.edit().putString("search_history", gson.toJson(updated)).apply()
     }
 
     fun removeSearchHistory(query: String) {
-        val updated = getSearchHistory().filterNot { it.equals(query, ignoreCase = true) }
+        val updated = getSearchHistoryEntries().filterNot { it.query.equals(query, ignoreCase = true) }
         prefs.edit().putString("search_history", gson.toJson(updated)).apply()
     }
 
@@ -162,11 +201,8 @@ class StorageManager(context: Context) {
     fun getThemeMode(): String = prefs.getString("theme_mode", "dark") ?: "dark"
     fun setThemeMode(mode: String) { prefs.edit().putString("theme_mode", mode).apply() }
 
-    fun getUserEmail(): String = prefs.getString("user_email", "user@juying.com") ?: "user@juying.com"
+    fun getUserEmail(): String = prefs.getString("user_email", "") ?: ""
     fun setUserEmail(email: String) { prefs.edit().putString("user_email", email).apply() }
-
-    fun getUserPassword(): String = prefs.getString("user_password", "Pass1234!") ?: "Pass1234!"
-    fun setUserPassword(password: String) { prefs.edit().putString("user_password", password).apply() }
 
     fun getUserAvatar(): Int = prefs.getInt("user_avatar", 0)
     fun setUserAvatar(avatarIndex: Int) { prefs.edit().putInt("user_avatar", avatarIndex).apply() }
@@ -177,4 +213,11 @@ class StorageManager(context: Context) {
 
     fun getAccountNickname(): String = prefs.getString("account_nickname", "") ?: ""
     fun setAccountNickname(nickname: String) { prefs.edit().putString("account_nickname", nickname).apply() }
+
+    fun announcementDismissedUntil(id: String): Long =
+        prefs.getLong("announcement_dismissed_until_$id", 0L)
+
+    fun dismissAnnouncementUntil(id: String, until: Long) {
+        prefs.edit().putLong("announcement_dismissed_until_$id", until).apply()
+    }
 }

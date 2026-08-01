@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.juying.app.engine.NetworkClient
+import com.juying.app.BuildConfig
 import okhttp3.Request
 import java.io.File
 import java.security.MessageDigest
@@ -25,9 +26,7 @@ object RemoteSourceFetcher {
     private const val TAG = "RemoteSourceFetcher"
     private const val ENC1_KEY_SEED = "anime_79bcadc9f3304f99bb8c3896bf826062e14644ff"
 
-    // Change this to your own server URL after deploying the JS scripts.
-    // e.g. "https://your-project.workers.dev/source-scripts/"
-    private const val SOURCE_BASE_URL = "https://js.z1i.cn/js/"
+    private const val LEGACY_SOURCE_BASE_URL = "https://js.z1i.cn/js/"
 
     private val downloadedHashes = mutableMapOf<String, String>()
 
@@ -41,21 +40,30 @@ object RemoteSourceFetcher {
 
     fun remoteSources(): List<RemoteSource> {
         return listOf(
-            RemoteSource("AuvFun", "AuvFun", "AuvFun.js", "${SOURCE_BASE_URL}AuvFun.js"),
-            RemoteSource("lanerc", "Lanerc", "lanerc.js", "${SOURCE_BASE_URL}lanerc_legacy.js"),
-            RemoteSource("jinpai", "金牌", "jinpai.js", "${SOURCE_BASE_URL}jinpaiapp.js"),
-            RemoteSource("cycapp", "次元城", "cycapp.js", "${SOURCE_BASE_URL}cyc.js"),
-            RemoteSource("guazi", "瓜子", "guazi.js", "${SOURCE_BASE_URL}guazi.js"),
-            RemoteSource("shuangxing", "双星", "shuangxing.js", "${SOURCE_BASE_URL}shuangxing99.js"),
-            RemoteSource("xifanacg", "稀饭动漫", "xifanacg.js", "${SOURCE_BASE_URL}xifanacg.js"),
-            RemoteSource("yzx", "云帆", "yzx.js", "${SOURCE_BASE_URL}yzx.js"),
-            RemoteSource("sanqiu", "三秋", "sanqiu.js", "${SOURCE_BASE_URL}sanqiu.js"),
-            RemoteSource("akianime", "AkiAnime", "akianime.js", "${SOURCE_BASE_URL}akianime.js"),
-            RemoteSource("lmm85", "动漫在线", "lmm85.js", "${SOURCE_BASE_URL}lmm85.js"),
-            RemoteSource("gugu", "咕咕动漫", "gugu.js", "${SOURCE_BASE_URL}gugu.js"),
-            RemoteSource("dmbus", "动漫巴士", "dmbus.js", "${SOURCE_BASE_URL}dmbus.js"),
-            RemoteSource("shutiao", "薯条", "shutiao.js", "${SOURCE_BASE_URL}shutiao.js"),
+            RemoteSource("AuvFun", "AuvFun", "AuvFun.js", "${LEGACY_SOURCE_BASE_URL}AuvFun.js"),
+            RemoteSource("lanerc", "Lanerc", "lanerc.js", "${LEGACY_SOURCE_BASE_URL}lanerc_legacy.js"),
+            RemoteSource("jinpai", "金牌", "jinpai.js", "${LEGACY_SOURCE_BASE_URL}jinpaiapp.js"),
+            RemoteSource("cycapp", "次元城", "cycapp.js", "${LEGACY_SOURCE_BASE_URL}cyc.js"),
+            RemoteSource("guazi", "瓜子", "guazi.js", "${LEGACY_SOURCE_BASE_URL}guazi.js"),
+            RemoteSource("shuangxing", "双星", "shuangxing.js", "${LEGACY_SOURCE_BASE_URL}shuangxing99.js"),
+            RemoteSource("xifanacg", "稀饭动漫", "xifanacg.js", "${LEGACY_SOURCE_BASE_URL}xifanacg.js"),
+            RemoteSource("yzx", "云帆", "yzx.js", "${LEGACY_SOURCE_BASE_URL}yzx.js"),
+            RemoteSource("sanqiu", "三秋", "sanqiu.js", "${LEGACY_SOURCE_BASE_URL}sanqiu.js"),
+            RemoteSource("akianime", "AkiAnime", "akianime.js", "${LEGACY_SOURCE_BASE_URL}akianime.js"),
+            RemoteSource("lmm85", "动漫在线", "lmm85.js", "${LEGACY_SOURCE_BASE_URL}lmm85.js"),
+            RemoteSource("gugu", "咕咕动漫", "gugu.js", "${LEGACY_SOURCE_BASE_URL}gugu.js"),
+            RemoteSource("dmbus", "动漫巴士", "dmbus.js", "${LEGACY_SOURCE_BASE_URL}dmbus.js"),
+            RemoteSource("shutiao", "薯条", "shutiao.js", "${LEGACY_SOURCE_BASE_URL}shutiao.js"),
         )
+    }
+
+    private fun candidateUrls(source: RemoteSource): List<String> {
+        val cloud = BuildConfig.SOURCE_SCRIPT_BASE_URL.trim().trimEnd('/')
+        return listOfNotNull(
+            cloud.takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?.let { "$it/${source.localFile}" },
+            source.codeUrl.takeIf(String::isNotBlank)
+        ).distinct()
     }
 
     /**
@@ -94,20 +102,24 @@ object RemoteSourceFetcher {
                     .connectTimeout(3, TimeUnit.SECONDS)
                     .readTimeout(5, TimeUnit.SECONDS)
                     .build()
-                val response = client.newCall(Request.Builder().url(remoteUrl).get().build()).execute()
-                val body = decodeEnc1(response.body?.string().orEmpty())
-                if (response.isSuccessful && isValidJsScript(body)) {
-                    cacheFile.parentFile?.mkdirs()
-                    val tmp = File(cacheFile.parentFile, "${cacheFile.name}.tmp")
-                    tmp.writeText(body)
-                    if (!tmp.renameTo(cacheFile)) {
-                        tmp.delete()
-                        cacheFile.writeText(body)
+                val source = remoteSources().firstOrNull { it.key == key }
+                val urls = source?.let(::candidateUrls) ?: listOf(remoteUrl)
+                for (url in urls) {
+                    val response = client.newCall(Request.Builder().url(url).get().build()).execute()
+                    val body = response.use { decodeEnc1(it.body?.string().orEmpty()) }
+                    if (response.isSuccessful && isValidJsScript(body)) {
+                        cacheFile.parentFile?.mkdirs()
+                        val tmp = File(cacheFile.parentFile, "${cacheFile.name}.tmp")
+                        tmp.writeText(body)
+                        if (!tmp.renameTo(cacheFile)) {
+                            tmp.delete()
+                            cacheFile.writeText(body)
+                        }
+                        Log.i(TAG, "Fetched $key on demand (${body.length} bytes)")
+                        return body.removePrefix("\uFEFF").trim()
                     }
-                    Log.i(TAG, "Fetched $key on demand (${body.length} bytes)")
-                    return body.removePrefix("\uFEFF").trim()
                 }
-                Log.w(TAG, "On-demand fetch for $key rejected: HTTP ${response.code}, bytes=${body.length}")
+                Log.w(TAG, "On-demand fetch for $key rejected by all configured hosts")
             } catch (e: Exception) {
                 Log.w(TAG, "On-demand fetch for $key failed: ${e.message}")
             }
@@ -181,61 +193,56 @@ object RemoteSourceFetcher {
     }
 
     private fun downloadScript(client: okhttp3.OkHttpClient, context: Context, source: RemoteSource): Boolean {
-        val remoteUrl = source.codeUrl
         val cacheDir = File(context.filesDir, "source_scripts")
         if (!cacheDir.exists()) cacheDir.mkdirs()
         val cacheFile = File(cacheDir, "${source.key}.js")
 
-        // Check if remote has newer content
-        val request = Request.Builder().url(remoteUrl).head().build()
-        try {
-            client.newCall(request).execute().use { headResp ->
-                val remoteHash = headResp.header("ETag")
-                    ?: headResp.header("x-amz-meta-sha256")
-                    ?: headResp.header("Content-MD5")
-                if (remoteHash != null) {
-                    val cachedHash = downloadedHashes[source.key]
-                    if (cachedHash == remoteHash && cacheFile.exists() && cacheFile.length() > 100) {
-                        return false // Already up to date
+        for (remoteUrl in candidateUrls(source)) {
+            val request = Request.Builder().url(remoteUrl).head().build()
+            try {
+                client.newCall(request).execute().use { headResp ->
+                    val remoteHash = headResp.header("ETag")
+                        ?: headResp.header("x-oss-hash-crc64ecma")
+                        ?: headResp.header("Content-MD5")
+                    if (remoteHash != null) {
+                        val cachedHash = downloadedHashes[source.key]
+                        if (cachedHash == remoteHash && cacheFile.exists() && cacheFile.length() > 100) {
+                            return false
+                        }
                     }
                 }
+            } catch (_: Exception) {
+                // HEAD failed; proceed to GET.
             }
-        } catch (_: Exception) {
-            // HEAD failed; proceed to GET
-        }
 
-        // Download full script
-        val getRequest = Request.Builder().url(remoteUrl).get().build()
-        return try {
-            client.newCall(getRequest).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "Download failed for ${source.key}: HTTP ${response.code}")
-                    return false
-                }
-                val body = decodeEnc1(response.body?.string() ?: return false)
-                if (!isValidJsScript(body)) {
-                    Log.w(TAG, "Downloaded content for ${source.key} is invalid JS script")
-                    return false
-                }
-
-                val hash = sha256(body)
-                val cachedBody = runCatching {
-                    if (cacheFile.exists()) cacheFile.readText() else ""
-                }.getOrDefault("")
-                if (cachedBody.isNotEmpty() && sha256(cachedBody) == hash) {
+            val getRequest = Request.Builder().url(remoteUrl).get().build()
+            try {
+                client.newCall(getRequest).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = decodeEnc1(response.body?.string() ?: return@use)
+                    if (!isValidJsScript(body)) return@use
+                    val hash = sha256(body)
+                    val cachedBody = runCatching { if (cacheFile.exists()) cacheFile.readText() else "" }
+                        .getOrDefault("")
+                    if (cachedBody.isNotEmpty() && sha256(cachedBody) == hash) {
+                        downloadedHashes[source.key] = hash
+                        return false
+                    }
                     downloadedHashes[source.key] = hash
-                    return false
+                    val tmp = File(cacheDir, "${source.key}.js.tmp")
+                    tmp.writeText(body)
+                    if (!tmp.renameTo(cacheFile)) {
+                        tmp.delete()
+                        cacheFile.writeText(body)
+                    }
+                    Log.d(TAG, "Downloaded ${source.key}: ${body.length} bytes, hash=$hash")
+                    return true
                 }
-
-                downloadedHashes[source.key] = hash
-                cacheFile.writeText(body)
-                Log.d(TAG, "Downloaded ${source.key}: ${body.length} bytes, hash=$hash")
-                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Download failed for ${source.key} from $remoteUrl: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Download failed for ${source.key}: ${e.message}")
-            false
         }
+        return false
     }
 
     private fun sha256(input: String): String {

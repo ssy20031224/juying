@@ -71,8 +71,10 @@ export async function POST(request: Request) {
     favorites?: unknown;
     progress?: unknown;
     deviceCache?: unknown;
+    deviceId?: unknown;
     replaceFavorites?: unknown;
     replaceProgress?: unknown;
+    replaceDeviceCache?: unknown;
   };
   try {
     body = await request.json();
@@ -83,6 +85,7 @@ export async function POST(request: Request) {
   const favoriteItems = Array.isArray(body.favorites) ? body.favorites.slice(0, MAX_ITEMS) : [];
   const progressItems = Array.isArray(body.progress) ? body.progress.slice(0, MAX_ITEMS) : [];
   const cacheItems = Array.isArray(body.deviceCache) ? body.deviceCache.slice(0, MAX_ITEMS) : [];
+  const currentDeviceId = text(body.deviceId, 120);
   const db = await getDb();
 
   await db.transaction(async (tx) => {
@@ -91,6 +94,18 @@ export async function POST(request: Request) {
     }
     if (body.replaceProgress === true) {
       await tx.delete(watchProgress).where(eq(watchProgress.userId, user.id));
+    }
+    if (body.replaceDeviceCache === true && currentDeviceId) {
+      // Android synchronizes only the current device's cache index. Never
+      // delete another device's offline index when this device removes items.
+      await tx
+        .delete(deviceCacheItems)
+        .where(
+          and(
+            eq(deviceCacheItems.userId, user.id),
+            eq(deviceCacheItems.deviceId, currentDeviceId),
+          ),
+        );
     }
     for (const raw of favoriteItems) {
       if (!raw || typeof raw !== "object") continue;

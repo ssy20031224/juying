@@ -8,10 +8,14 @@ const CODE_TTL_SECONDS = 10 * 60;
 const RESEND_INTERVAL_SECONDS = 60;
 
 function codeHash(email: string, purpose: VerificationPurpose, code: string): Promise<string> {
+  const pepper = (process.env.AUTH_CODE_PEPPER || "").trim();
+  if (pepper.length < 32) {
+    throw new Error("AUTH_CODE_PEPPER must be configured with at least 32 characters");
+  }
   return crypto.subtle
     .digest(
       "SHA-256",
-      new TextEncoder().encode(`${email}|${purpose}|${code}|${process.env.AUTH_CODE_PEPPER || "lanerc-code"}`),
+      new TextEncoder().encode(`${email}|${purpose}|${code}|${pepper}`),
     )
     .then((value) => {
       let binary = "";
@@ -127,6 +131,9 @@ export async function issueVerificationCode(
   purpose: VerificationPurpose,
 ): Promise<void> {
   const normalizedEmail = email.trim().toLowerCase();
+  // Validate the server-side secret before sending mail, so a deployment with
+  // an incomplete environment never sends a code it cannot safely verify.
+  await codeHash(normalizedEmail, purpose, "000000");
   const now = Math.floor(Date.now() / 1000);
   const db = await getDb();
   const recent = await db

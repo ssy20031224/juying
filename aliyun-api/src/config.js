@@ -18,11 +18,16 @@ if (!ossEndpoint && !ossRegion) {
 
 export const config = {
   port: Number(process.env.PORT || 3001),
-  // TEMP: 账号登录/注册默认关闭，设置 ACCOUNT_AUTH_ENABLED=true 可恢复。
-  accountAuthEnabled: process.env.ACCOUNT_AUTH_ENABLED === "true",
-  // TEMP: 评论写入默认关闭，GET 读取仍可用。
-  commentsPostingEnabled: process.env.COMMENTS_POSTING_ENABLED === "true",
+  // 生产环境默认启用；需要维护时可显式设置为 false。
+  accountAuthEnabled: process.env.ACCOUNT_AUTH_ENABLED !== "false",
+  commentsPostingEnabled: process.env.COMMENTS_POSTING_ENABLED !== "false",
   publicApiOrigin: String(process.env.PUBLIC_API_ORIGIN || "").replace(/\/+$/, ""),
+  announcementFallback: {
+    id: optional("ANNOUNCEMENT_DEFAULT_ID"),
+    title: optional("ANNOUNCEMENT_DEFAULT_TITLE"),
+    summary: optional("ANNOUNCEMENT_DEFAULT_SUMMARY"),
+    content: optional("ANNOUNCEMENT_DEFAULT_CONTENT"),
+  },
   mysql: {
     host: required("MYSQL_HOST"),
     port: Number(process.env.MYSQL_PORT || 3306),
@@ -46,5 +51,7 @@ export const config = {
     bucket: required("ALIYUN_OSS_BUCKET"),
     publicBaseUrl: required("ALIYUN_OSS_PUBLIC_BASE_URL").replace(/\/+$/, ""),
     stsToken: optional("ALIYUN_OSS_SECURITY_TOKEN"),
+    announcementObject: String(process.env.ANNOUNCEMENT_OBJECT_KEY || "config/announcement.json")
+      .replace(/^\/+/, ""),
   },
 };

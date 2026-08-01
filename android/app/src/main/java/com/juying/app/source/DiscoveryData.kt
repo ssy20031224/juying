@@ -191,19 +191,41 @@ internal fun matchesAnimeRankingCategory(
     sectionTitle: String,
     category: AnimeRankingCategory
 ): Boolean {
-    val evidence = listOf(
-        sectionTitle,
+    val itemEvidence = listOf(
+        item.title,
         item.kind,
         item.tags.joinToString(" "),
-        item.sourceTitle
     ).joinToString(" ").lowercase()
-    val chinese = listOf("国漫", "国产动漫", "国产动画", "国创", "中国动漫", "中国动画")
-        .any(evidence::contains)
-    val japanese = listOf("日漫", "日本动漫", "日本动画", "番剧", "新番", "anime")
-        .any(evidence::contains) ||
-        (!chinese && sectionTitle.contains(Regex("月新番|季度")))
-    val theatrical = listOf("剧场版", "动画电影", "动漫电影", "movie")
-        .any(evidence::contains)
+    val section = sectionTitle.lowercase()
+    // Search queries are retrieval hints, not metadata evidence. Previously
+    // "$categoryLabel · source" was injected here, causing every fuzzy search
+    // result to pass the category it was fetched for.
+    val sourceBackedSection = section.takeUnless {
+        it.startsWith("搜索:") || it.startsWith("来源搜索")
+    }.orEmpty()
+    val explicitChinese = listOf(
+        "国漫", "国产动漫", "国产动画", "国创", "中国动漫", "中国动画", "大陆动漫"
+    ).any(itemEvidence::contains)
+    val explicitJapanese = listOf(
+        "日漫", "日本动漫", "日本动画", "日本番剧", "anime"
+    ).any(itemEvidence::contains)
+    val sectionChinese = listOf("国漫", "国产动画", "中国动画")
+        .any(sourceBackedSection::contains)
+    val sectionJapanese = listOf("日漫", "日本动画", "月新番", "季度新番")
+        .any(sourceBackedSection::contains) ||
+        (item.sourceKey.equals("lanerc", true) && sourceBackedSection.contains("lanerc 剧场版"))
+    val chinese = explicitChinese || (!explicitJapanese && sectionChinese)
+    val japanese = !chinese && (explicitJapanese || sectionJapanese)
+    val liveAction = listOf("电视剧", "日剧", "真人版", "真人剧", "综艺")
+        .any(itemEvidence::contains)
+    val animeLike = explicitChinese || explicitJapanese ||
+        listOf("动漫", "动画", "番剧", "新番", "anime", "剧场版")
+            .any(itemEvidence::contains) || sectionChinese || sectionJapanese
+    val theatrical = listOf("剧场版", "动画电影", "动漫电影", "theatrical", "movie")
+        .any(itemEvidence::contains) ||
+        listOf("剧场版", "动画电影", "动漫电影").any(sourceBackedSection::contains)
+
+    if (!animeLike || liveAction || chinese == japanese) return false
 
     return when (category) {
         AnimeRankingCategory.JAPANESE_TV -> japanese && !theatrical

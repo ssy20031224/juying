@@ -199,9 +199,9 @@ npm run dev
 - Android 客户端当前不要求登录即可使用。
 - 观看历史和收藏直接读取本机 `StorageManager`，不再因为未登录显示登录拦截页。
 - 离线缓存始终是设备本地能力，不依赖账号。
-- 账号登录、注册、邮箱验证码、密码找回、修改邮箱、云端同步和云端头像入口当前暂时停用。
-- 账号相关原实现保留，不得删除；恢复时修改 `MainActivity.kt` 中的 `TEMP_ACCOUNT_AUTH_DISABLED`。
-- 评论发送当前停用，但已有评论仍可读取展示；恢复发送时修改 `TEMP_COMMENT_POSTING_DISABLED` 并同步开启服务端开关。
+- 账号登录、注册、邮箱验证码、密码找回、修改邮箱、云端同步和云端头像入口已恢复；本地历史、收藏和离线缓存仍不要求登录。
+- 账号同步只允许收藏、进度和离线缓存索引，禁止上传视频文件、本地路径和临时播放 URL。
+- 评论读取公开，写入要求有效登录账号；客户端与服务端维护开关必须保持一致。
 - 弹幕发送当前停用，播放器设置和显示开关保留；恢复发送时修改 `EmbeddedVideoPlayer.kt` 中的 `TEMP_DANMAKU_POSTING_DISABLED`。
 - 暂停原因和恢复方式必须保留在代码注释中，不能通过删除原逻辑实现“关闭”。
 
@@ -209,10 +209,12 @@ npm run dev
 
 | 文件 | 当前责任 |
 |---|---|
-| `android/app/src/main/java/com/juying/app/MainActivity.kt` | 本地历史/收藏、账号入口临时关闭、评论只读 |
+| `android/app/src/main/java/com/juying/app/MainActivity.kt` | 本地历史/收藏、账号 UI、云同步、登录后评论与公告 UI |
 | `android/app/src/main/java/com/juying/app/ui/EmbeddedVideoPlayer.kt` | 弹幕发送入口临时关闭；播放控制和弹幕设置仍保留 |
-| `android/app/src/main/java/com/juying/app/source/AccountRepository.kt` | 账号 API 客户端实现，当前不由默认流程调用 |
-| `android/app/src/main/java/com/juying/app/source/CommentRepository.kt` | 评论读取/写入 API 客户端；当前客户端写入入口停用 |
+| `android/app/src/main/java/com/juying/app/source/AccountRepository.kt` | 账号 API、头像、收藏/进度/离线索引同步客户端 |
+| `android/app/src/main/java/com/juying/app/source/AnnouncementRepository.kt` | 公告多地址读取、无缓存解析与真实空状态 |
+| `android/app/src/main/java/com/juying/app/source/AnimeMetadataRepository.kt` | 标题严格匹配的动漫评分、地区与 TV/剧场版元数据补全；不得参与播放解析 |
+| `android/app/src/main/java/com/juying/app/source/CommentRepository.kt` | 评论读取/登录后写入 API 客户端 |
 
 ### 12.2 阿里云国内账号服务
 
@@ -225,20 +227,20 @@ npm run dev
 - Android 默认账号 API 地址为 `https://api.lanerc.app`，可用 Gradle 参数 `LANERC_ACCOUNT_API_BASE` 覆盖。
 - OSS 配置同时支持 `ALIYUN_OSS_ENDPOINT` 或 `ALIYUN_OSS_REGION`，并支持 `ALIYUN_OSS_SECURITY_TOKEN`。
 - `aliyun-api/migrations/001_init.sql` 只负责建表，不要求业务账号拥有创建数据库权限。
-- 原 Next.js/D1 账号 API 作为兼容实现保留，但当前服务端账号接口默认关闭。
+- 原 Next.js/D1 账号 API 作为兼容实现保留；服务端账号和评论默认启用，维护时可显式关闭。
 
 当前服务端开关：
 
 ```text
-ACCOUNT_AUTH_ENABLED=false
-COMMENTS_POSTING_ENABLED=false
+ACCOUNT_AUTH_ENABLED=true
+COMMENTS_POSTING_ENABLED=true
 ```
 
 将两个值改为 `true` 才允许服务端账号接口和评论写入。仅修改服务端开关不能恢复 Android UI，还必须同步恢复 Android 中对应的临时常量。
 
 ### 12.3 账号数据模型与接口
 
-账号服务已实现以下接口，当前按开关停用：
+账号服务已实现并默认启用以下接口：
 
 - `/api/auth/request-code`
 - `/api/auth/register`
@@ -250,7 +252,7 @@ COMMENTS_POSTING_ENABLED=false
 - `/api/auth/avatar`
 - `/api/auth/nickname`
 - `/api/sync`
-- `/api/comments`（GET 读取保留，POST 写入默认关闭）
+- `/api/comments`（GET 公开读取，POST 要求登录）
 
 密码使用 PBKDF2-SHA-256，验证码和会话令牌只保存哈希值。任何新实现不得把明文密码、验证码、会话令牌或云密钥写入日志、APK、GitHub 或持久化业务快照。
 
