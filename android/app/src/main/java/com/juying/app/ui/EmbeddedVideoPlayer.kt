@@ -442,6 +442,7 @@ fun EmbeddedVideoPlayer(
     var gestureHudValue by remember { mutableStateOf(0) }
     var gestureHudText by remember { mutableStateOf("") }
     var gestureHudJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var seekPreviewPosition by remember(url) { mutableStateOf(0L) }
     var gestureSeekOriginPosition by remember { mutableStateOf(0L) }
     var scanlineProgress by remember { mutableStateOf(0f) }
     var isScanlineActive by remember { mutableStateOf(false) }
