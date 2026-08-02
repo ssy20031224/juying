@@ -3430,46 +3430,6 @@ fun HomeView(vm: MainViewModel) {
                         }
                     }
 
-                    vm.announcement?.let { announcement ->
-                        item(key = "home_announcement_${announcement.id}") {
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 5.dp)
-                                    .clickable { vm.openAnnouncement() },
-                                shape = RoundedCornerShape(16.dp),
-                                color = AppColors.panel,
-                                border = androidx.compose.foundation.BorderStroke(
-                                    1.dp,
-                                    AppColors.orange.copy(alpha = 0.28f)
-                                )
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(7.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Surface(shape = RoundedCornerShape(13.dp), color = AppColors.orange) {
-                                        Text(
-                                            "公告",
-                                            color = Color.White,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
-                                        )
-                                    }
-                                    Spacer(Modifier.width(12.dp))
-                                    Text(
-                                        announcement.summary.ifBlank { announcement.title },
-                                        color = AppColors.text,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "查看公告", tint = AppColors.muted)
-                                }
-                            }
-                        }
-                    }
-
                     // ── QUICK NAV CARDS (热度排行榜 | 番剧排期表) ──
                     item(key = "home_quick_nav") {
                         Row(
@@ -3524,6 +3484,57 @@ fun HomeView(vm: MainViewModel) {
                         }
                     }
 
+                    // ── ANNOUNCEMENT CARD (季度排期表下方，热门推荐上方，匹配截图样式) ──
+                    item(key = "home_announcement_card") {
+                        val announcementText = vm.announcement?.let { it.summary.ifBlank { it.title } }
+                            ?: "手机环境异常及注册账号注意事项"
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .clickable { vm.openAnnouncement() },
+                            shape = RoundedCornerShape(22.dp),
+                            color = AppColors.panel,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                AppColors.orange.copy(alpha = 0.22f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = Color(0xFFFF5500)
+                                ) {
+                                    Text(
+                                        "公告",
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    announcementText,
+                                    color = AppColors.text,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    Icons.Default.KeyboardArrowRight,
+                                    contentDescription = "查看公告",
+                                    tint = AppColors.muted.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+
                     // ── SECTIONS ──
                     vm.homeSections.forEach { section ->
                         if (section.items.isNotEmpty()) {
@@ -3568,25 +3579,41 @@ fun HomeView(vm: MainViewModel) {
 
 @Composable
 fun LibraryView(vm: MainViewModel) {
+    var filterExpanded by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxSize()) {
         Text(
             "多源片库",
-            Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp),
+            Modifier.padding(16.dp, 12.dp, 16.dp, 2.dp),
             color = AppColors.text, fontSize = 22.sp, fontWeight = FontWeight.Bold
         )
-        Text(
-            if (vm.loading && vm.items.isEmpty()) "加载中..." else "共 ${vm.totalLibrary} 部作品${if (vm.libraryHasMore) " (下滑加载更多)" else ""}",
-            Modifier.padding(horizontal = 16.dp), color = AppColors.muted, fontSize = 13.sp
-        )
-        Spacer(Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (vm.loading && vm.items.isEmpty()) "加载中..." else "共 ${vm.totalLibrary} 部作品${if (vm.libraryHasMore) " (下滑加载更多)" else ""}",
+                color = AppColors.muted, fontSize = 13.sp
+            )
+            TextButton(onClick = { filterExpanded = !filterExpanded }) {
+                Text(
+                    if (filterExpanded) "收起筛选 ▲" else "展开筛选 ▼",
+                    color = AppColors.cyan,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
 
-        FilterRow("分类", vm.kinds, vm.activeKind) { vm.applyFilter(kind = it) }
-        FilterRow("题材", vm.genres, vm.activeGenre) { vm.applyFilter(genre = it) }
-        FilterRow("年份", vm.years, vm.activeYear) { vm.applyFilter(year = it) }
-        FilterRow("排序", vm.sorts, vm.activeSort) { vm.applyFilter(sort = it) }
-        FilterRow("来源", vm.sourceOptions, vm.activeSource) { vm.applyFilter(source = it) }
-
-        Spacer(Modifier.height(4.dp))
+        if (filterExpanded) {
+            FilterRow("分类", vm.kinds, vm.activeKind) { vm.applyFilter(kind = it) }
+            FilterRow("题材", vm.genres, vm.activeGenre) { vm.applyFilter(genre = it) }
+            FilterRow("年份", vm.years, vm.activeYear) { vm.applyFilter(year = it) }
+            FilterRow("排序", vm.sorts, vm.activeSort) { vm.applyFilter(sort = it) }
+            FilterRow("来源", vm.sourceOptions, vm.activeSource) { vm.applyFilter(source = it) }
+            Spacer(Modifier.height(4.dp))
+        }
 
         if (vm.loading && vm.items.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -3607,7 +3634,7 @@ fun LibraryView(vm: MainViewModel) {
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 120.dp),
+                columns = GridCells.Fixed(3),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -4766,6 +4793,16 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                     onValueChange = { password = it },
                     label = { Text(if (forgot) "新密码" else "密码") },
                     visualTransformation = PasswordVisualTransformation(),
+                    supportingText = {
+                        if (registering || forgot) {
+                            val isStrong = isPasswordStrong(password)
+                            if (password.isNotEmpty() && !isStrong) {
+                                Text("密码需至少8位，且包含大写字母、小写字母、数字、特殊字符中的至少3种", color = AppColors.orange, fontSize = 11.sp)
+                            } else if (password.isEmpty()) {
+                                Text("密码需至少8位，包含大/小写字母、数字、特殊字符中至少3种", color = AppColors.muted, fontSize = 11.sp)
+                            }
+                        }
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -6925,15 +6962,15 @@ fun SeasonalScheduleScreen(vm: MainViewModel) {
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { vm.view = "home" }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text)
+            IconButton(onClick = { vm.view = "home" }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text, modifier = Modifier.size(20.dp))
             }
-            Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(24.dp))
-            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Default.DateRange, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(6.dp))
             Column(Modifier.weight(1f)) {
-                Text("季度新番排期", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("季度新番排期", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Text(
                     if (vm.lanercDiscoveryMessage.isNotBlank()) {
                         vm.lanercDiscoveryMessage
@@ -7003,7 +7040,7 @@ fun SeasonalScheduleScreen(vm: MainViewModel) {
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 120.dp),
+                columns = GridCells.Fixed(3),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -7045,7 +7082,7 @@ fun SeasonalScheduleScreen(vm: MainViewModel) {
 @Composable
 private fun ScheduleEntryGrid(entries: List<ScheduleEntry>, vm: MainViewModel) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 120.dp),
+        columns = GridCells.Fixed(3),
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -7105,17 +7142,17 @@ fun LeaderboardScreen(vm: MainViewModel) {
     // 排行榜只显示一次完整请求完成后的分类快照。首页各源逐步加载时不再重排榜单。
     val rankingEntries = vm.animeCategoryRankings[selectedCategory].orEmpty()
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 Icons.Default.Star,
                 contentDescription = null,
                 tint = AppColors.orange,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(20.dp)
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             Column(Modifier.weight(1f)) {
-                Text("动漫分类排行榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("动漫分类排行榜", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Text(
                     if (vm.lanercDiscoveryMessage.isNotBlank()) {
                         vm.lanercDiscoveryMessage
@@ -7216,15 +7253,15 @@ fun SeasonalRankingScreen(vm: MainViewModel) {
     val rankingEntries = remoteRankingEntries
     val usingRemoteRanking = remoteRankingEntries.isNotEmpty()
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { vm.view = "home" }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text)
+            IconButton(onClick = { vm.view = "home" }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回首页", tint = AppColors.text, modifier = Modifier.size(20.dp))
             }
-            Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(24.dp))
-            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Default.Star, contentDescription = null, tint = AppColors.orange, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(6.dp))
             Column(Modifier.weight(1f)) {
-                Text("季度新番榜", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("季度新番榜", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Text(
                     if (vm.lanercDiscoveryMessage.isNotBlank()) {
                         vm.lanercDiscoveryMessage
