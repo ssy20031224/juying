@@ -7,6 +7,7 @@ package com.juying.app
 
 import android.app.Application
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
@@ -99,6 +100,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import java.io.File
 import java.util.Calendar
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -289,6 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var commentNick by mutableStateOf(storageManager.getCommentNick())
     var commentDraft by mutableStateOf("")
     var comments by mutableStateOf<List<CloudComment>>(emptyList())
+    var commentPosting by mutableStateOf(false)
 
     // Cloud account state. Anonymous local storage remains the default.
     var accountUser by mutableStateOf<AccountUser?>(null)
@@ -455,7 +458,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             accountBusy = true
             accountMessage = ""
             try {
-                accountRepository.requestCode(email, purpose)
+                val token = if (purpose == "change-email") storageManager.getAuthToken() else ""
+                accountRepository.requestCode(email, purpose, token)
                 accountMessage = "验证码已发送，请检查邮箱"
             } catch (error: Exception) {
                 accountMessage = error.message ?: "验证码发送失败"
@@ -532,6 +536,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "邮箱修改失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun changeAccountPassword(oldPassword: String, newPassword: String, confirmPassword: String) {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank() || accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                accountRepository.changePassword(token, oldPassword, newPassword, confirmPassword)
+                accountMessage = "密码修改成功"
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "密码修改失败"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    fun submitFeedback(category: String, text: String, onSuccess: () -> Unit = {}) {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank()) {
+            accountMessage = "请先登录后提交反馈"
+            return
+        }
+        if (accountBusy) return
+        viewModelScope.launch {
+            accountBusy = true
+            accountMessage = ""
+            try {
+                accountRepository.submitFeedback(token, category, text)
+                accountMessage = "反馈已提交，感谢你的建议"
+                onSuccess()
+            } catch (error: Exception) {
+                accountMessage = error.message ?: "反馈提交失败"
             } finally {
                 accountBusy = false
             }
@@ -893,25 +936,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val text = commentDraft.trim()
-        if (text.isEmpty()) return
-        commentDraft = ""
+        if (text.isEmpty() || commentPosting) return
         val detail = displayedDetail ?: activeDetail ?: return
         val key = commentMediaKey(detail.item)
         val nick = commentNick.ifBlank { storageManager.getCommentNick() }
-        // 乐观上屏，再以云端返回的权威列表覆盖
-        comments = comments + CloudComment(nick, text)
         viewModelScope.launch {
-            val remote = commentRepository.post(key, nick, text)
+            commentPosting = true
+            val result = commentRepository.post(key, nick, text)
+            val remote = result.comments
             if (remote != null) {
+                commentDraft = ""
                 commentsLoadedFor = key
                 comments = remote
+                android.widget.Toast.makeText(getApplication(), "评论发布成功", android.widget.Toast.LENGTH_SHORT).show()
             } else {
                 android.widget.Toast.makeText(
                     getApplication(),
-                    "云端评论暂不可用，评论仅保留在本机当前会话",
+                    result.error ?: "评论发布失败，请稍后重试",
                     android.widget.Toast.LENGTH_SHORT
                 ).show()
             }
+            commentPosting = false
         }
     }
 
@@ -2878,6 +2923,7 @@ fun JuyingApp(vm: MainViewModel) {
     BackHandler {
         when {
             vm.view == "player" -> vm.goBackFromPlayer()
+            vm.view.startsWith("settings_") -> vm.view = "settings"
             vm.view.startsWith("profile_") || vm.view == "settings" -> vm.view = "profile"
             vm.view == "search" || vm.view == "search_result" -> vm.view = "home"
             vm.view != "home" -> vm.view = "home"
@@ -2946,7 +2992,7 @@ fun JuyingApp(vm: MainViewModel) {
                         !vm.view.startsWith("seasonal_") &&
                         vm.view != "search" &&
                         vm.view != "search_result" &&
-                        vm.view != "settings"
+                        !vm.view.startsWith("settings")
                     ) {
                         NavigationBar(containerColor = AppColors.panel) {
                             NavigationBarItem(
@@ -2998,6 +3044,10 @@ fun JuyingApp(vm: MainViewModel) {
                         "profile_favorites" -> FavoritesScreen(vm)
                         "profile_downloads" -> OfflineCacheScreen(vm)
                         "settings" -> SettingsScreen(vm)
+                        "settings_password" -> ChangePasswordScreen(vm)
+                        "settings_email" -> ChangeEmailScreen(vm)
+                        "settings_feedback" -> FeedbackScreen(vm)
+                        "settings_disclaimer" -> DisclaimerScreen(vm)
                         "player" -> PlayerViewScreen(vm)
                     }
                 }
@@ -3151,8 +3201,6 @@ fun JuyingApp(vm: MainViewModel) {
 
 @Composable
 fun HomeView(vm: MainViewModel) {
-    val avatars = listOf("👤", "🦊", "🐲", "🐱")
-    val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
     var selectedCategory by remember { mutableStateOf("精选") }
     val homeSeasons = vm.lanercSeasons.map { it.season }
         .ifEmpty { beijingSeasonWindow() }
@@ -3182,7 +3230,7 @@ fun HomeView(vm: MainViewModel) {
                     .size(36.dp)
                     .clickable { vm.view = "profile" }
             ) {
-                AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
+                AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
             }
 
             Spacer(Modifier.width(8.dp))
@@ -4113,9 +4161,9 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         Spacer(Modifier.width(8.dp))
                         Button(
                             onClick = vm::addComment,
-                            enabled = vm.commentDraft.trim().isNotEmpty(),
+                            enabled = vm.commentDraft.trim().isNotEmpty() && !vm.commentPosting,
                             colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
-                        ) { Text("发布") }
+                        ) { Text(if (vm.commentPosting) "发布中" else "发布") }
                     }
                 }
                 if (vm.comments.isEmpty()) {
@@ -4748,52 +4796,64 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
 
 @Composable
 fun ProfileView(vm: MainViewModel) {
-    val avatars = listOf("👤", "🦊", "🐲", "🐱")
-    val avatarEmoji = avatars.getOrElse(vm.userAvatarIndex) { "👤" }
+    var accountDialogVisible by remember { mutableStateOf(false) }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.uploadAccountAvatar(uri)
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
-        // User Profile Header Card with Settings Button
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = AppColors.panel),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (vm.accountUser == null) accountDialogVisible = true else vm.view = "settings"
+                    }
             ) {
                 Row(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 20.dp).fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
                         shape = CircleShape,
                         color = AppColors.cyan.copy(alpha = 0.2f),
-                        modifier = Modifier.size(56.dp)
+                        modifier = Modifier
+                            .size(68.dp)
+                            .clickable(enabled = vm.accountUser != null && !vm.accountBusy) {
+                                avatarPicker.launch("image/*")
+                            }
                     ) {
-                        if (!vm.accountUser?.avatarUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = vm.accountUser?.avatarUrl,
-                                contentDescription = "账号头像",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            AvatarImage(vm.userAvatarIndex, modifier = Modifier.fillMaxSize())
-                        }
+                        AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
                     }
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(18.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("个人中心", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(2.dp))
-                        Text(vm.userEmail.ifBlank { "未登录账号" }, color = AppColors.muted, fontSize = 13.sp)
+                        Text(
+                            vm.accountUser?.nickname?.ifBlank { vm.accountUser?.email?.substringBefore('@').orEmpty() }
+                                ?: "登录 / 注册",
+                            color = AppColors.text,
+                            fontSize = 23.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            if (vm.accountUser == null) "登录后同步追番与观看记录" else "普通用户",
+                            color = AppColors.muted,
+                            fontSize = 14.sp,
+                        )
                     }
-                    IconButton(onClick = { vm.view = "settings" }) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = AppColors.cyan)
-                    }
+                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "进入设置", tint = AppColors.text)
                 }
+            }
+            if (vm.accountMessage.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
             }
             Spacer(Modifier.height(16.dp))
         }
-
-        item { AccountEntryCard(vm) }
 
         // Secondary Entrance Buttons (二级界面入口)
         item {
@@ -4872,6 +4932,28 @@ fun ProfileView(vm: MainViewModel) {
 
         // Advanced custom-source import and diagnostics stay implemented
         // below but are intentionally hidden from the Android user interface.
+    }
+    if (accountDialogVisible) {
+        AccountDialog(vm) { accountDialogVisible = false }
+    }
+}
+
+@Composable
+fun AccountAvatar(avatarUrl: String?, modifier: Modifier = Modifier) {
+    if (!avatarUrl.isNullOrBlank()) {
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(avatarUrl)
+                .crossfade(true)
+                .build(),
+            contentDescription = "账号头像",
+            contentScale = ContentScale.Crop,
+            modifier = modifier.clip(CircleShape),
+        )
+    } else {
+        Box(modifier.background(AppColors.panel2), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Person, contentDescription = "默认头像", tint = AppColors.cyan, modifier = Modifier.size(30.dp))
+        }
     }
 }
 
@@ -5792,7 +5874,7 @@ fun SearchResultScreen(vm: MainViewModel) {
 }
 
 @Composable
-fun SettingsScreen(vm: MainViewModel) {
+private fun LegacySettingsScreen(vm: MainViewModel) {
     var emailInput by remember { mutableStateOf(vm.userEmail) }
     var emailCodeInput by remember { mutableStateOf("") }
     var emailSuccess by remember { mutableStateOf(false) }
@@ -6158,6 +6240,406 @@ fun SettingsScreen(vm: MainViewModel) {
                 }
             }
         }
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(vm: MainViewModel) {
+    val context = LocalContext.current
+    var themeDialogVisible by remember { mutableStateOf(false) }
+    val themeLabel = when (vm.themeMode) {
+        "light" -> "浅色模式"
+        "dark" -> "深色模式"
+        else -> "跟随系统"
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        SettingsHeader("设置") { vm.view = "profile" }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            item { SettingsSectionTitle("外观设置") }
+            item {
+                SettingsCard {
+                    SettingsRow(Icons.Default.Star, "色彩主题", themeLabel) {
+                        themeDialogVisible = true
+                    }
+                }
+            }
+            item { SettingsSectionTitle("账户设置") }
+            if (vm.accountUser == null) {
+                item {
+                    SettingsCard {
+                        SettingsRow(Icons.Default.Person, "登录账号", "登录后可修改账户信息") {
+                            vm.view = "profile"
+                        }
+                    }
+                }
+            } else {
+                item {
+                    SettingsCard {
+                        SettingsRow(Icons.Default.Lock, "修改密码") { vm.view = "settings_password" }
+                        SettingsDivider()
+                        SettingsRow(Icons.Default.Email, "修改邮箱", vm.accountUser?.email.orEmpty()) {
+                            vm.view = "settings_email"
+                        }
+                    }
+                }
+            }
+            item { SettingsSectionTitle("通用设置") }
+            item {
+                SettingsCard {
+                    SettingsRow(
+                        Icons.Default.Refresh,
+                        if (vm.updateChecking) "正在检查更新" else "检查更新",
+                        BuildConfig.VERSION_NAME,
+                    ) { vm.checkForAppUpdate(manual = true) }
+                    SettingsDivider()
+                    SettingsRow(Icons.Default.Edit, "建议反馈") { vm.view = "settings_feedback" }
+                    SettingsDivider()
+                    SettingsRow(Icons.Default.Info, "免责声明") { vm.view = "settings_disclaimer" }
+                    SettingsDivider()
+                    SettingsRow(Icons.Default.Share, "分享应用") {
+                        val share = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "聚映 · 多源动漫播放器")
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                "我正在使用聚映观看动漫，推荐给你：\nhttps://github.com/ssy20031224/juying/releases/latest",
+                            )
+                        }
+                        context.startActivity(Intent.createChooser(share, "分享聚映"))
+                    }
+                }
+            }
+            if (vm.updateMessage.isNotBlank()) {
+                item { Text(vm.updateMessage, color = AppColors.muted, fontSize = 12.sp) }
+            }
+            if (vm.accountMessage.isNotBlank()) {
+                item { Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp) }
+            }
+            if (vm.accountUser != null) {
+                item {
+                    Spacer(Modifier.height(18.dp))
+                    Button(
+                        onClick = { vm.logoutAccount(); vm.view = "profile" },
+                        modifier = Modifier.fillMaxWidth().height(54.dp),
+                        shape = RoundedCornerShape(28.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
+                    ) { Text("退出登录", color = Color.White, fontSize = 16.sp) }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+
+    if (themeDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { themeDialogVisible = false },
+            title = { Text("选择色彩主题", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf("system" to "跟随系统", "light" to "浅色模式", "dark" to "深色模式").forEach { option ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { vm.updateThemeMode(option.first); themeDialogVisible = false }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = vm.themeMode == option.first, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(option.second, color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { themeDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+}
+
+@Composable
+private fun SettingsHeader(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.muted)
+        }
+        Text(title, color = AppColors.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun SettingsSectionTitle(title: String) {
+    Text(
+        title,
+        color = AppColors.text,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+    ) { Column(content = content) }
+}
+
+@Composable
+private fun SettingsDivider() {
+    Divider(
+        color = AppColors.muted.copy(alpha = 0.12f),
+        modifier = Modifier.padding(horizontal = 18.dp),
+    )
+}
+
+@Composable
+private fun SettingsRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    trailing: String = "",
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = AppColors.text, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(18.dp))
+        Text(title, color = AppColors.text, fontSize = 16.sp, modifier = Modifier.weight(1f))
+        if (trailing.isNotBlank()) {
+            Text(
+                trailing,
+                color = AppColors.muted,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 150.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = AppColors.muted)
+    }
+}
+
+@Composable
+fun ChangePasswordScreen(vm: MainViewModel) {
+    var oldPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var oldVisible by remember { mutableStateOf(false) }
+    var newVisible by remember { mutableStateOf(false) }
+    var confirmVisible by remember { mutableStateOf(false) }
+    val valid = oldPassword.isNotBlank() && isPasswordStrong(newPassword) && newPassword == confirmPassword
+
+    Column(Modifier.fillMaxSize()) {
+        SettingsHeader("修改密码") { vm.view = "settings" }
+        Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp)) {
+            SettingsCard {
+                PasswordSettingField("原密码", "请输入原密码", oldPassword, oldVisible, { oldPassword = it }, { oldVisible = !oldVisible })
+                SettingsDivider()
+                PasswordSettingField("新密码", "请输入新密码", newPassword, newVisible, { newPassword = it }, { newVisible = !newVisible })
+                SettingsDivider()
+                PasswordSettingField("确认密码", "请再次输入新密码", confirmPassword, confirmVisible, { confirmPassword = it }, { confirmVisible = !confirmVisible })
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("密码至少 8 位，并包含大写字母、小写字母、数字、特殊字符中的至少 3 类。", color = AppColors.muted, fontSize = 12.sp)
+            if (vm.accountMessage.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                Text(vm.accountMessage, color = AppColors.muted, fontSize = 13.sp)
+            }
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = { vm.changeAccountPassword(oldPassword, newPassword, confirmPassword) },
+                enabled = valid && !vm.accountBusy,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
+            ) { Text(if (vm.accountBusy) "修改中" else "确认修改", color = Color.White) }
+        }
+    }
+}
+
+@Composable
+private fun PasswordSettingField(
+    label: String,
+    placeholder: String,
+    value: String,
+    visible: Boolean,
+    onValueChange: (String) -> Unit,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = AppColors.muted, fontSize = 14.sp, modifier = Modifier.width(76.dp))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = TextStyle(color = AppColors.text, fontSize = 15.sp),
+            cursorBrush = SolidColor(AppColors.cyan),
+            visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+            modifier = Modifier.weight(1f).padding(vertical = 15.dp),
+            decorationBox = { field ->
+                Box {
+                    if (value.isEmpty()) Text(placeholder, color = AppColors.muted.copy(alpha = 0.45f), fontSize = 14.sp)
+                    field()
+                }
+            },
+        )
+        IconButton(onClick = onToggle) {
+            Text(if (visible) "隐藏" else "显示", color = AppColors.text, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+fun ChangeEmailScreen(vm: MainViewModel) {
+    var email by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    val emailValid = isValidEmail(email) && email.trim() != vm.accountUser?.email
+
+    Column(Modifier.fillMaxSize()) {
+        SettingsHeader("修改邮箱") { vm.view = "settings" }
+        Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp)) {
+            SettingsCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("邮箱", color = AppColors.muted, fontSize = 14.sp, modifier = Modifier.width(60.dp))
+                    BasicTextField(
+                        value = email,
+                        onValueChange = { email = it.trim() },
+                        singleLine = true,
+                        textStyle = TextStyle(color = AppColors.text, fontSize = 15.sp),
+                        cursorBrush = SolidColor(AppColors.cyan),
+                        modifier = Modifier.weight(1f).padding(vertical = 22.dp),
+                        decorationBox = { field ->
+                            Box {
+                                if (email.isEmpty()) Text("请输入新邮箱", color = AppColors.muted.copy(alpha = 0.45f))
+                                field()
+                            }
+                        },
+                    )
+                    TextButton(
+                        onClick = { vm.requestAccountCode(email, "change-email") },
+                        enabled = emailValid && !vm.accountBusy,
+                    ) { Text("发送验证码") }
+                }
+                SettingsDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("验证码", color = AppColors.muted, fontSize = 14.sp, modifier = Modifier.width(60.dp))
+                    BasicTextField(
+                        value = code,
+                        onValueChange = { code = it.filter(Char::isDigit).take(6) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = AppColors.text, fontSize = 15.sp),
+                        cursorBrush = SolidColor(AppColors.cyan),
+                        modifier = Modifier.weight(1f).padding(vertical = 22.dp),
+                        decorationBox = { field ->
+                            Box {
+                                if (code.isEmpty()) Text("请输入验证码", color = AppColors.muted.copy(alpha = 0.45f))
+                                field()
+                            }
+                        },
+                    )
+                }
+            }
+            if (vm.accountMessage.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                Text(vm.accountMessage, color = AppColors.muted, fontSize = 13.sp)
+            }
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = { vm.changeAccountEmail(email, code) },
+                enabled = emailValid && code.length == 6 && !vm.accountBusy,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
+            ) { Text(if (vm.accountBusy) "修改中" else "确认修改", color = Color.White) }
+        }
+    }
+}
+
+@Composable
+fun FeedbackScreen(vm: MainViewModel) {
+    var category by remember { mutableStateOf("suggestion") }
+    var text by remember { mutableStateOf("") }
+    val categories = listOf("suggestion" to "功能建议", "bug" to "问题反馈", "content" to "内容问题", "account" to "账号问题", "other" to "其他")
+    Column(Modifier.fillMaxSize()) {
+        SettingsHeader("建议反馈") { vm.view = "settings" }
+        Column(Modifier.fillMaxSize().padding(18.dp)) {
+            Text("反馈类型", color = AppColors.text, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(categories) { item ->
+                    FilterChip(
+                        selected = category == item.first,
+                        onClick = { category = item.first },
+                        label = { Text(item.second) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it.take(2000) },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 190.dp),
+                placeholder = { Text("请描述你的建议、复现步骤或期望效果（至少 5 个字）") },
+                supportingText = { Text("${text.length}/2000") },
+            )
+            if (vm.accountUser == null) {
+                Spacer(Modifier.height(10.dp))
+                Text("登录后才能提交反馈，便于后续与你确认处理结果。", color = AppColors.rose, fontSize = 12.sp)
+            }
+            if (vm.accountMessage.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                Text(vm.accountMessage, color = AppColors.muted, fontSize = 13.sp)
+            }
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = { vm.submitFeedback(category, text) { text = "" } },
+                enabled = vm.accountUser != null && text.trim().length >= 5 && !vm.accountBusy,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+            ) { Text(if (vm.accountBusy) "提交中" else "提交反馈") }
+        }
+    }
+}
+
+@Composable
+fun DisclaimerScreen(vm: MainViewModel) {
+    Column(Modifier.fillMaxSize()) {
+        SettingsHeader("免责声明") { vm.view = "settings" }
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("使用说明与责任边界", color = AppColors.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("聚映仅提供多来源元数据检索、来源切换和临时播放入口，不在服务器保存、上传或分发任何视频文件。", color = AppColors.text, lineHeight = 23.sp)
+            Text("应用展示的封面、标题、简介、剧集与播放地址由对应来源提供，其版权与可用性归权利人及来源方所有。使用者应遵守所在地法律法规、来源网站条款及版权要求。", color = AppColors.text, lineHeight = 23.sp)
+            Text("如内容涉及侵权、失效、错误分类或其他问题，请通过“建议反馈”提交作品名称、来源与问题说明，我们会核查并处理应用内索引或入口。", color = AppColors.text, lineHeight = 23.sp)
+            Text("网络、来源维护、地区限制、设备兼容性等因素可能导致检索或播放失败；聚映不对第三方来源的持续可用性作保证。", color = AppColors.text, lineHeight = 23.sp)
+            Text("继续使用即表示你已阅读并理解上述说明。", color = AppColors.muted, lineHeight = 22.sp)
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

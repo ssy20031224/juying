@@ -16,9 +16,14 @@ data class CloudComment(
     val ts: Long = 0L
 )
 
+data class CommentPostResult(
+    val comments: List<CloudComment>? = null,
+    val error: String? = null,
+)
+
 /**
  * 评论云端仓库：读写都经过平台 API（/api/comments），
- * 平台服务端持有 RDS/OSS 凭据；正式评论写入 RDS，兼容部署可回退 OSS，密钥不进入客户端。
+ * 平台服务端持有 D1/OSS 凭据；正式评论写入 D1，兼容部署可回退 OSS，密钥不进入客户端。
  * 网络或接口失败时返回 null，由调用方回退本地处理（来源失败隔离，不影响播放）。
  */
 class CommentRepository(context: Context) {
@@ -44,7 +49,7 @@ class CommentRepository(context: Context) {
         }
     }
 
-    suspend fun post(mediaKey: String, nick: String, text: String): List<CloudComment>? = withContext(Dispatchers.IO) {
+    suspend fun post(mediaKey: String, nick: String, text: String): CommentPostResult = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject()
                 .put("media", mediaKey)
@@ -60,12 +65,22 @@ class CommentRepository(context: Context) {
                 builder.header("Authorization", "Bearer $it")
             }
             client.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                val body = response.body?.string() ?: return@withContext null
-                parseComments(JSONObject(body))
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val error = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
+                    return@withContext CommentPostResult(
+                        error = when (error) {
+                            "authentication required" -> "登录状态已失效，请重新登录"
+                            "comment posting is temporarily disabled" -> "评论发布正在维护中"
+                            else -> error.ifBlank { "评论发布失败（HTTP ${response.code}）" }
+                        },
+                    )
+                }
+                if (body.isBlank()) return@withContext CommentPostResult(error = "评论服务返回了空响应")
+                CommentPostResult(comments = parseComments(JSONObject(body)))
             }
-        } catch (_: Exception) {
-            null
+        } catch (error: Exception) {
+            CommentPostResult(error = error.message ?: "网络异常，评论发布失败")
         }
     }
 

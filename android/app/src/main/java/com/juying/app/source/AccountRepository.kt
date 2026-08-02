@@ -55,9 +55,9 @@ class AccountRepository(context: Context) {
     suspend fun register(email: String, password: String, nickname: String, code: String): AccountResult =
         requestAuth("/api/auth/register", email, password, nickname, code)
 
-    suspend fun requestCode(email: String, purpose: String) {
+    suspend fun requestCode(email: String, purpose: String, token: String = "") {
         withContext(Dispatchers.IO) {
-            request("/api/auth/request-code", "", "POST", gson.toJson(mapOf("email" to email, "purpose" to purpose)))
+            request("/api/auth/request-code", token, "POST", gson.toJson(mapOf("email" to email, "purpose" to purpose)))
         }
     }
 
@@ -107,6 +107,46 @@ class AccountRepository(context: Context) {
                         "code" to code,
                         "password" to password,
                         "confirmPassword" to confirmPassword,
+                    ),
+                ),
+            )
+        }
+    }
+
+    suspend fun changePassword(
+        token: String,
+        oldPassword: String,
+        newPassword: String,
+        confirmPassword: String,
+    ) {
+        withContext(Dispatchers.IO) {
+            request(
+                "/api/auth/change-password",
+                token,
+                "POST",
+                gson.toJson(
+                    mapOf(
+                        "oldPassword" to oldPassword,
+                        "newPassword" to newPassword,
+                        "confirmPassword" to confirmPassword,
+                    ),
+                ),
+            )
+        }
+    }
+
+    suspend fun submitFeedback(token: String, category: String, text: String) {
+        withContext(Dispatchers.IO) {
+            request(
+                "/api/feedback",
+                token,
+                "POST",
+                gson.toJson(
+                    mapOf(
+                        "category" to category,
+                        "text" to text.trim(),
+                        "appVersion" to "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                        "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}; Android ${android.os.Build.VERSION.RELEASE}",
                     ),
                 ),
             )

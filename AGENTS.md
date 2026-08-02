@@ -224,7 +224,7 @@ npm run dev
 - 阿里云 RDS MySQL 8.0 保存用户、会话、验证码、收藏、观看进度、评论和设备缓存索引。
 - 阿里云 DirectMail 发送注册、修改邮箱和密码重置验证码。
 - 阿里云 OSS 保存用户头像。
-- Android 默认账号 API 地址为 `https://api.lanerc.app`，可用 Gradle 参数 `LANERC_ACCOUNT_API_BASE` 覆盖。
+- Android 默认账号 API 地址为 `https://api.songxiang.online`，可用 Gradle 参数 `LANERC_ACCOUNT_API_BASE` 覆盖。
 - OSS 配置同时支持 `ALIYUN_OSS_ENDPOINT` 或 `ALIYUN_OSS_REGION`，并支持 `ALIYUN_OSS_SECURITY_TOKEN`。
 - `aliyun-api/migrations/001_init.sql` 只负责建表，不要求业务账号拥有创建数据库权限。
 - 原 Next.js/D1 账号 API 作为兼容实现保留；服务端账号和评论默认启用，维护时可显式关闭。
@@ -248,11 +248,13 @@ COMMENTS_POSTING_ENABLED=true
 - `/api/auth/me`
 - `/api/auth/logout`
 - `/api/auth/change-email`
+- `/api/auth/change-password`
 - `/api/auth/reset-password`
 - `/api/auth/avatar`
 - `/api/auth/nickname`
 - `/api/sync`
 - `/api/comments`（GET 公开读取，POST 要求登录）
+- `/api/feedback`（POST 要求登录，D1 保存建议反馈）
 
 密码使用 PBKDF2-SHA-256，验证码和会话令牌只保存哈希值。任何新实现不得把明文密码、验证码、会话令牌或云密钥写入日志、APK、GitHub 或持久化业务快照。
 

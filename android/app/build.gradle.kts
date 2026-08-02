@@ -56,7 +56,7 @@ android {
         buildConfigField(
             "String",
             "ACCOUNT_API_BASE",
-            buildConfigString(configuredAccountApiBase ?: "https://api.lanerc.app")
+            buildConfigString(configuredAccountApiBase ?: "https://api.songxiang.online")
         )
         buildConfigField(
             "String",

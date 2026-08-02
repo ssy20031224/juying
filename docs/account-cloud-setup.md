@@ -50,13 +50,13 @@ Bearer Token 保护用户数据。
 
 国内独立服务位于 `aliyun-api/`，包含 RDS MySQL 初始化脚本、账号 API、DirectMail、OSS
 头像上传和 Dockerfile。原 Next.js/D1 路由暂时保留为兼容层，但 Android 默认使用
-`https://api.lanerc.app`。初期 D1 方案不需要启动该 MySQL 服务；将来迁移时 Android
+`https://api.songxiang.online`。初期 D1 方案不需要启动该 MySQL 服务；将来迁移时 Android
 只需更换 API Base URL，客户端协议不变。
 
 Android 可通过 Gradle 参数覆盖 API 地址：
 
 ```text
-LANERC_ACCOUNT_API_BASE=https://api.lanerc.app
+LANERC_ACCOUNT_API_BASE=https://api.songxiang.online
 ```
 
 账号、邮箱验证、同步和登录后评论已恢复；生产环境保持：

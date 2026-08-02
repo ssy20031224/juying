@@ -7,6 +7,55 @@ export type VerificationPurpose = "register" | "change-email" | "reset-password"
 const CODE_TTL_SECONDS = 10 * 60;
 const RESEND_INTERVAL_SECONDS = 60;
 
+const PURPOSE_COPY: Record<VerificationPurpose, { action: string; title: string; hint: string }> = {
+  register: {
+    action: "注册聚映账号",
+    title: "欢迎加入聚映",
+    hint: "完成验证后即可创建账号，并在不同设备间同步追番、播放进度与缓存索引。",
+  },
+  "change-email": {
+    action: "修改账号邮箱",
+    title: "确认新的账号邮箱",
+    hint: "验证成功后，新邮箱将用于登录、找回密码和接收账号安全通知。",
+  },
+  "reset-password": {
+    action: "重置账号密码",
+    title: "确认密码重置",
+    hint: "验证成功后即可设置新密码。修改完成后，其他设备上的登录会话将失效。",
+  },
+};
+
+function verificationMail(code: string, purpose: VerificationPurpose) {
+  const copy = PURPOSE_COPY[purpose];
+  const subject = `【聚映】${copy.action}验证码：${code}`;
+  const html = `<!doctype html>
+<html lang="zh-CN">
+  <body style="margin:0;background:#f4f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${copy.action}验证码为 ${code}，10 分钟内有效。</div>
+    <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+      <div style="overflow:hidden;border:1px solid #e7edf5;border-radius:22px;background:#ffffff;box-shadow:0 12px 34px rgba(33,64,104,.08);">
+        <div style="padding:25px 30px;background:linear-gradient(135deg,#21b9d2,#6687f5);color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:3px;opacity:.86;">JUYING · 聚映</div>
+          <div style="margin-top:10px;font-size:25px;font-weight:700;">${copy.title}</div>
+        </div>
+        <div style="padding:30px;">
+          <p style="margin:0 0 12px;font-size:15px;line-height:1.8;">你正在进行：<strong>${copy.action}</strong></p>
+          <p style="margin:0 0 24px;color:#68758a;font-size:14px;line-height:1.8;">${copy.hint}</p>
+          <div style="padding:20px;text-align:center;border:1px solid #dce8f6;border-radius:16px;background:#f6fbff;">
+            <div style="margin-bottom:9px;color:#7c8ba1;font-size:12px;letter-spacing:2px;">本次验证码</div>
+            <div style="color:#168fac;font-size:34px;font-weight:800;letter-spacing:10px;">${code}</div>
+          </div>
+          <p style="margin:22px 0 0;color:#68758a;font-size:13px;line-height:1.8;">验证码将在 <strong>10 分钟</strong>后失效，请勿转发或告知他人。聚映工作人员不会向你索要验证码或密码。</p>
+          <p style="margin:10px 0 0;color:#9aa5b5;font-size:12px;line-height:1.7;">若并非你本人操作，请忽略本邮件；账号信息不会因此发生变化。</p>
+        </div>
+      </div>
+      <p style="margin:18px 0 0;text-align:center;color:#9aa5b5;font-size:12px;">此邮件由系统自动发送，请勿直接回复。</p>
+    </div>
+  </body>
+</html>`;
+  return { subject, html };
+}
+
 function codeHash(email: string, purpose: VerificationPurpose, code: string): Promise<string> {
   const pepper = (process.env.AUTH_CODE_PEPPER || "").trim();
   if (pepper.length < 32) {
@@ -38,8 +87,7 @@ async function sendWithResend(to: string, code: string, purpose: VerificationPur
     throw new Error("email provider is not configured; set RESEND_API_KEY and EMAIL_FROM");
   }
 
-  const purposeText =
-    purpose === "register" ? "注册账号" : purpose === "change-email" ? "修改邮箱" : "重置密码";
+  const mail = verificationMail(code, purpose);
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -49,8 +97,8 @@ async function sendWithResend(to: string, code: string, purpose: VerificationPur
     body: JSON.stringify({
       from,
       to: [to],
-      subject: `聚映账号${purposeText}验证码`,
-      html: `<div style="font-family:Arial,sans-serif"><h2>聚映账号安全验证</h2><p>本次操作：${purposeText}</p><p style="font-size:28px;letter-spacing:8px;font-weight:bold">${code}</p><p>验证码 10 分钟内有效。如果不是本人操作，请忽略此邮件。</p></div>`,
+      subject: mail.subject,
+      html: mail.html,
     }),
   });
   if (!response.ok) throw new Error(`email provider rejected request (${response.status})`);
@@ -68,8 +116,7 @@ async function sendWithAliyun(to: string, code: string, purpose: VerificationPur
   if (!accessKeyId || !accessKeySecret || !accountName) {
     throw new Error("Aliyun DirectMail is not configured");
   }
-  const purposeText =
-    purpose === "register" ? "注册账号" : purpose === "change-email" ? "修改邮箱" : "重置密码";
+  const mail = verificationMail(code, purpose);
   const params: Record<string, string> = {
     Action: "SingleSendMail",
     Version: "2015-11-23",
@@ -84,8 +131,8 @@ async function sendWithAliyun(to: string, code: string, purpose: VerificationPur
     ReplyToAddress: "true",
     ToAddress: to,
     FromAlias: fromAlias,
-    Subject: `聚映账号${purposeText}验证码`,
-    HtmlBody: `<div><h2>聚映账号安全验证</h2><p>本次操作：${purposeText}</p><p style="font-size:28px;letter-spacing:8px;font-weight:bold">${code}</p><p>验证码 10 分钟内有效。如果不是本人操作，请忽略此邮件。</p></div>`,
+    Subject: mail.subject,
+    HtmlBody: mail.html,
   };
   const canonical = Object.keys(params)
     .sort()

@@ -116,6 +116,22 @@ export const comments = sqliteTable(
   ],
 );
 
+export const feedback = sqliteTable(
+  "feedback",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    category: text("category").notNull().default("suggestion"),
+    text: text("text").notNull(),
+    appVersion: text("app_version").notNull().default(""),
+    device: text("device").notNull().default(""),
+    createdAt: integer("created_at").notNull().default(now()),
+  },
+  (table) => [index("feedback_user_created_idx").on(table.userId, table.createdAt)],
+);
+
 export const deviceCacheItems = sqliteTable(
   "device_cache_items",
   {
