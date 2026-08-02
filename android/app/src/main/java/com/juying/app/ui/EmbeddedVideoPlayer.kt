@@ -557,43 +557,43 @@ fun EmbeddedVideoPlayer(
     val requestSeekPreview: (Long) -> Unit = { targetMs ->
         seekPreviewPosition = targetMs
         val now = System.currentTimeMillis()
-        if (now - lastPreviewRequestedAt >= 180L) {
+        if (now - lastPreviewRequestedAt >= 180L && !url.contains(".m3u8", ignoreCase = true)) {
             lastPreviewRequestedAt = now
             val generation = ++seekPreviewGeneration
             seekPreviewJob?.cancel()
             seekPreviewJob = playerScope.launch {
                 delay(80L)
                 val frame = withContext(Dispatchers.IO) {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        val uri = Uri.parse(url)
-                        if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
-                            val metadataHeaders = HashMap<String, String>(requestHeaders)
-                            if (metadataHeaders.keys.none { it.equals("User-Agent", true) }) {
-                                metadataHeaders["User-Agent"] = BROWSER_UA
+                    runCatching {
+                        val retriever = MediaMetadataRetriever()
+                        try {
+                            val uri = Uri.parse(url)
+                            if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
+                                val metadataHeaders = HashMap<String, String>(requestHeaders)
+                                if (metadataHeaders.keys.none { it.equals("User-Agent", true) }) {
+                                    metadataHeaders["User-Agent"] = BROWSER_UA
+                                }
+                                retriever.setDataSource(url, metadataHeaders)
+                            } else {
+                                retriever.setDataSource(context, uri)
                             }
-                            retriever.setDataSource(url, metadataHeaders)
-                        } else {
-                            retriever.setDataSource(context, uri)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                retriever.getScaledFrameAtTime(
+                                    targetMs.coerceAtLeast(0L) * 1000L,
+                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                    320,
+                                    180
+                                )
+                            } else {
+                                retriever.getFrameAtTime(
+                                    targetMs.coerceAtLeast(0L) * 1000L,
+                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                                )
+                            }
+                        } finally {
+                            runCatching { retriever.release() }
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                            retriever.getScaledFrameAtTime(
-                                targetMs.coerceAtLeast(0L) * 1000L,
-                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                                320,
-                                180
-                            )
-                        } else {
-                            retriever.getFrameAtTime(
-                                targetMs.coerceAtLeast(0L) * 1000L,
-                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                            )
-                        }
-                    } catch (_: Exception) {
-                        null
-                    } finally {
-                        runCatching { retriever.release() }
-                    }
+                    }.getOrNull()
                 }
                 if (generation == seekPreviewGeneration) {
                     seekPreviewBitmap = frame
@@ -1104,7 +1104,8 @@ fun EmbeddedVideoPlayer(
                         startedOnControls = controlsVisible && startY > size.height * 0.70f
                         resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
-                    onDrag = { _, amount ->
+                    onDrag = { change, amount ->
+                        change.consume()
                         totalX += amount.x
                         totalY += amount.y
                         if (isLocked || startedOnControls) return@detectDragGestures
@@ -1125,28 +1126,33 @@ fun EmbeddedVideoPlayer(
                                 triggerHud("brightness", pct, "亮度 $pct%", 1200L)
                             } else {
                                 audioManager?.let { manager ->
-                                    val maxVol = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                                    val curVol = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                    volumeAcc += -amount.y / 25f
-                                    val step = volumeAcc.toInt()
-                                    if (step != 0) {
-                                        volumeAcc -= step
-                                        val target = (curVol + step).coerceIn(0, maxVol)
-                                        manager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-                                        val pct = if (maxVol > 0) (target * 100) / maxVol else 0
-                                        triggerHud("volume", target, "音量 $pct%", 1200L)
+                                    runCatching {
+                                        val maxVol = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                        val curVol = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                        volumeAcc += -amount.y / 25f
+                                        val step = volumeAcc.toInt()
+                                        if (step != 0) {
+                                            volumeAcc -= step
+                                            val target = (curVol + step).coerceIn(0, maxVol)
+                                            manager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                                            val pct = if (maxVol > 0) (target * 100) / maxVol else 0
+                                            triggerHud("volume", target, "音量 $pct%", 1200L)
+                                        }
                                     }
                                 }
                             }
                         } else if (dragAxis == PlayerInteractionPolicy.DragAxis.HORIZONTAL) {
                             val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
-                            val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
+                            val validDuration = if (duration > 0L) duration else exoPlayer.duration.coerceAtLeast(0L)
+                            val deltaMs = (validDuration.coerceAtLeast(60_000L) * proportion).toLong()
                             val targetMs = (gestureSeekOriginPosition + deltaMs)
-                                .coerceIn(0L, duration.coerceAtLeast(0L))
+                                .coerceIn(0L, validDuration.coerceAtLeast(0L))
                             gestureHudType = "seek"
                             gestureHudValue = if (deltaMs >= 0) 1 else -1
-                            gestureHudText = "${formatTime(targetMs)} / ${formatTime(duration)}"
-                            requestSeekPreview(targetMs)
+                            gestureHudText = "${formatTime(targetMs)} / ${formatTime(validDuration)}"
+                            if (!url.contains(".m3u8", ignoreCase = true)) {
+                                requestSeekPreview(targetMs)
+                            }
                         }
                     },
                     onDragEnd = {
@@ -1159,11 +1165,14 @@ fun EmbeddedVideoPlayer(
                         ) return@detectDragGestures
                         val width = size.width.coerceAtLeast(1)
                         val proportion = (totalX / width.toFloat()).coerceIn(-0.5f, 0.5f)
-                        val deltaMs = (duration.coerceAtLeast(60_000L) * proportion).toLong()
+                        val validDuration = if (duration > 0L) duration else exoPlayer.duration.coerceAtLeast(0L)
+                        val deltaMs = (validDuration.coerceAtLeast(60_000L) * proportion).toLong()
                         val targetPosition = (gestureSeekOriginPosition + deltaMs)
-                            .coerceIn(0L, exoPlayer.duration.coerceAtLeast(0L))
-                        exoPlayer.seekTo(targetPosition)
-                        exoPlayer.playWhenReady = resumeAfterGestureSeek
+                            .coerceIn(0L, validDuration.coerceAtLeast(0L))
+                        runCatching {
+                            exoPlayer.seekTo(targetPosition)
+                            exoPlayer.playWhenReady = resumeAfterGestureSeek
+                        }
                         seekPreviewGeneration++
                         seekPreviewJob?.cancel()
                         seekPreviewBitmap = null

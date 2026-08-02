@@ -3087,9 +3087,10 @@ fun JuyingApp(vm: MainViewModel) {
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    "更新内容 · ${android.net.Uri.parse(info.source).host ?: info.source}",
+                                    "更新说明",
                                     color = AppColors.muted,
-                                    fontSize = 11.sp
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                                 Surface(
                                     modifier = Modifier
@@ -3099,7 +3100,7 @@ fun JuyingApp(vm: MainViewModel) {
                                     shape = RoundedCornerShape(10.dp)
                                 ) {
                                     Text(
-                                        info.notes.ifBlank { "修复问题并提升使用体验" },
+                                        info.notes.ifBlank { "包含性能优化与已知问题修复" },
                                         color = AppColors.muted,
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -4917,7 +4918,11 @@ fun ProfileView(vm: MainViewModel) {
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        if (vm.accountUser != null) "ID: ${vm.accountUser?.id}" else "登录后同步追番与记录",
+                        if (vm.accountUser != null) {
+                            val digitsOnly = vm.accountUser?.id?.filter { it.isDigit() }.orEmpty()
+                            val numericId = if (digitsOnly.length >= 6) digitsOnly.take(6) else (kotlin.math.abs((vm.accountUser?.id ?: "").hashCode()) % 899999 + 100000).toString()
+                            "ID: $numericId"
+                        } else "登录后同步追番与记录",
                         color = AppColors.muted,
                         fontSize = 13.sp,
                     )
@@ -5017,24 +5022,12 @@ fun ProfileView(vm: MainViewModel) {
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(AppColors.panel2)
                                 ) {
-                                    if (!item.cover.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(LocalContext.current)
-                                                .data(item.cover)
-                                                .crossfade(true)
-                                                .build(),
-                                            contentDescription = item.title,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier.fillMaxSize().background(AppColors.panel2),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted.copy(alpha = 0.5f), modifier = Modifier.size(32.dp))
-                                        }
-                                    }
+                                    AsyncImage(
+                                        model = coverRequest(LocalContext.current, item.cover),
+                                        contentDescription = item.title,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
                                     Box(
                                         modifier = Modifier
                                             .size(34.dp)
@@ -5311,14 +5304,22 @@ fun HistoryScreen(vm: MainViewModel) {
                                                 fontSize = 12.sp
                                             )
                                             Spacer(Modifier.height(5.dp))
+                                            val context = LocalContext.current
+                                            val config = context.resources.configuration
+                                            val isTablet = (config.screenLayout and android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK) >= android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
+                                            val deviceIcon = if (isTablet) "💻" else "📱"
+                                            val rawModel = android.os.Build.MODEL.orEmpty()
+                                            val rawManuf = android.os.Build.MANUFACTURER.orEmpty()
+                                            val deviceName = if (rawModel.lowercase().startsWith(rawManuf.lowercase())) rawModel else "$rawManuf $rawModel".trim()
+                                            val displayDevice = deviceName.ifBlank { if (isTablet) "安卓平板" else "安卓手机" }
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text(
-                                                    "📱",
+                                                    deviceIcon,
                                                     fontSize = 11.sp
                                                 )
                                                 Spacer(Modifier.width(4.dp))
                                                 Text(
-                                                    "本机  ${formatHistoryTimestamp(history.timestamp)}",
+                                                    "$displayDevice  ${formatHistoryTimestamp(history.timestamp)}",
                                                     color = AppColors.muted,
                                                     fontSize = 11.sp
                                                 )
