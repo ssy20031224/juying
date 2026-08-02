@@ -279,11 +279,6 @@ function HomeSections({ sections, items, onOpen, favorites, onFavorite }: { sect
 }
 
 function ProfileView({ favorites, history, onOpen, onFavorite }: { favorites: Result[]; history: Result[]; onOpen: (item: Result) => void; onFavorite: (item: Result) => void }) {
-  const displayHistory = history.length ? history : [
-    { id: "demo-h1", title: "与奔驰于透明之夜的你…", year: "2024", kind: "动漫", score: "9.0", sourceKey: "lanerc", sourceTitle: "Lanerc" },
-    { id: "demo-h2", title: "轮回的花瓣", year: "2024", kind: "动漫", score: "8.8", sourceKey: "lanerc", sourceTitle: "Lanerc" }
-  ];
-
   return <section className="profile-view">
     <div className="profile-header-actions" style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: '8px' }}>
       <button className="icon-button" aria-label="设置" style={{ width: '40px', height: '40px', borderRadius: '50%', background: 'var(--panel2, rgba(255,255,255,0.08))', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
@@ -297,10 +292,10 @@ function ProfileView({ favorites, history, onOpen, onFavorite }: { favorites: Re
       </div>
       <div style={{ flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <strong style={{ fontSize: '18px', fontWeight: 600 }}>19383260376</strong>
+          <strong style={{ fontSize: '18px', fontWeight: 600 }}>聚映用户</strong>
           <span style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '12px', background: 'rgba(255,255,255,0.1)', color: 'var(--muted, #8b9aaf)' }}>普通用户</span>
         </div>
-        <div style={{ fontSize: '13px', color: 'var(--muted, #8b9aaf)', marginTop: '4px' }}>ID: 183717</div>
+        <div style={{ fontSize: '13px', color: 'var(--muted, #8b9aaf)', marginTop: '4px' }}>本地观影空间</div>
       </div>
       <ChevronRight size={20} style={{ opacity: 0.5 }} />
     </div>
@@ -329,23 +324,29 @@ function ProfileView({ favorites, history, onOpen, onFavorite }: { favorites: Re
         <h2 style={{ fontSize: '18px', fontWeight: 600 }}>观看历史</h2>
         <span style={{ fontSize: '13px', color: 'var(--muted, #8b9aaf)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>更多 <ChevronRight size={16} /></span>
       </div>
-      <div className="horizontal-grid" style={{ display: 'flex', gap: '14px', overflowX: 'auto', paddingBottom: '8px' }}>
-        {displayHistory.slice(0, 6).map((item) => (
-          <div key={`${item.sourceKey}-${item.id}`} onClick={() => onOpen(item as Result)} style={{ flexShrink: 0, width: '150px', cursor: 'pointer' }}>
-            <div style={{ position: 'relative', width: '150px', height: '88px', borderRadius: '12px', overflow: 'hidden', background: 'var(--panel2, rgba(255,255,255,0.08))' }}>
-              <Cover item={item} />
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.35)' }}>
-                <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Play size={16} fill="currentColor" />
+      {history.length ? (
+        <div className="horizontal-grid" style={{ display: 'flex', gap: '14px', overflowX: 'auto', paddingBottom: '8px' }}>
+          {history.slice(0, 6).map((item) => (
+            <div key={`${item.sourceKey}-${item.id}`} onClick={() => onOpen(item as Result)} style={{ flexShrink: 0, width: '150px', cursor: 'pointer' }}>
+              <div style={{ position: 'relative', width: '150px', height: '88px', borderRadius: '12px', overflow: 'hidden', background: 'var(--panel2, rgba(255,255,255,0.08))' }}>
+                <Cover item={item} />
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.35)' }}>
+                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Play size={16} fill="currentColor" />
+                  </div>
                 </div>
               </div>
+              <div style={{ marginTop: '6px', fontSize: '13px', lineHeight: '1.3', overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                {item.title}
+              </div>
             </div>
-            <div style={{ marginTop: '6px', fontSize: '13px', lineHeight: '1.3', overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
-              {item.title}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state" style={{ padding: '24px 0', textAlign: 'center', color: 'var(--muted, #8b9aaf)', fontSize: '14px' }}>
+          暂无观看记录
+        </div>
+      )}
     </div>
   </section>;
 }

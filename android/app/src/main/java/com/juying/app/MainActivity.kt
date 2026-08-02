@@ -4895,7 +4895,7 @@ fun ProfileView(vm: MainViewModel) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             vm.accountUser?.nickname?.ifBlank { vm.accountUser?.email?.substringBefore('@').orEmpty() }
-                                ?: "19383260376",
+                                ?: "登录 / 注册",
                             color = AppColors.text,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
@@ -4917,7 +4917,7 @@ fun ProfileView(vm: MainViewModel) {
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "ID: ${vm.accountUser?.id ?: "183717"}",
+                        if (vm.accountUser != null) "ID: ${vm.accountUser?.id}" else "登录后同步追番与记录",
                         color = AppColors.muted,
                         fontSize = 13.sp,
                     )
@@ -5058,51 +5058,13 @@ fun ProfileView(vm: MainViewModel) {
                         }
                     }
                 } else {
-                    val demoHistoryTitles = listOf("与奔驰于透明之夜的你…", "轮回的花瓣")
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.fillMaxWidth()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 20.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        items(demoHistoryTitles) { title ->
-                            Column(
-                                modifier = Modifier
-                                    .width(155.dp)
-                                    .clickable { vm.view = "library" }
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(155.dp)
-                                        .height(90.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(AppColors.panel2)
-                                ) {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize().background(AppColors.panel2),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted.copy(alpha = 0.5f), modifier = Modifier.size(32.dp))
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .align(Alignment.Center)
-                                            .background(Color.Black.copy(alpha = 0.45f), CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(Icons.Default.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(20.dp))
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
-                                Text(
-                                    title,
-                                    color = AppColors.text,
-                                    fontSize = 13.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    lineHeight = 17.sp
-                                )
-                            }
-                        }
+                        Text("暂无观看记录", color = AppColors.muted, fontSize = 14.sp)
                     }
                 }
             }
