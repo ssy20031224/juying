@@ -442,11 +442,6 @@ fun EmbeddedVideoPlayer(
     var gestureHudValue by remember { mutableStateOf(0) }
     var gestureHudText by remember { mutableStateOf("") }
     var gestureHudJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var seekPreviewBitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
-    var seekPreviewPosition by remember(url) { mutableStateOf(0L) }
-    var seekPreviewJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var seekPreviewGeneration by remember { mutableStateOf(0) }
-    var lastPreviewRequestedAt by remember { mutableStateOf(0L) }
     var gestureSeekOriginPosition by remember { mutableStateOf(0L) }
     var scanlineProgress by remember { mutableStateOf(0f) }
     var isScanlineActive by remember { mutableStateOf(false) }
@@ -551,53 +546,6 @@ fun EmbeddedVideoPlayer(
             setReadTimeoutMs(15000)
             if (requestHeaders.isNotEmpty()) {
                 setDefaultRequestProperties(requestHeaders)
-            }
-        }
-    }
-    val requestSeekPreview: (Long) -> Unit = { targetMs ->
-        seekPreviewPosition = targetMs
-        val now = System.currentTimeMillis()
-        if (now - lastPreviewRequestedAt >= 180L && !url.contains(".m3u8", ignoreCase = true)) {
-            lastPreviewRequestedAt = now
-            val generation = ++seekPreviewGeneration
-            seekPreviewJob?.cancel()
-            seekPreviewJob = playerScope.launch {
-                delay(80L)
-                val frame = withContext(Dispatchers.IO) {
-                    runCatching {
-                        val retriever = MediaMetadataRetriever()
-                        try {
-                            val uri = Uri.parse(url)
-                            if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
-                                val metadataHeaders = HashMap<String, String>(requestHeaders)
-                                if (metadataHeaders.keys.none { it.equals("User-Agent", true) }) {
-                                    metadataHeaders["User-Agent"] = BROWSER_UA
-                                }
-                                retriever.setDataSource(url, metadataHeaders)
-                            } else {
-                                retriever.setDataSource(context, uri)
-                            }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                                retriever.getScaledFrameAtTime(
-                                    targetMs.coerceAtLeast(0L) * 1000L,
-                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                                    320,
-                                    180
-                                )
-                            } else {
-                                retriever.getFrameAtTime(
-                                    targetMs.coerceAtLeast(0L) * 1000L,
-                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                                )
-                            }
-                        } finally {
-                            runCatching { retriever.release() }
-                        }
-                    }.getOrNull()
-                }
-                if (generation == seekPreviewGeneration) {
-                    seekPreviewBitmap = frame
-                }
             }
         }
     }
@@ -992,10 +940,6 @@ fun EmbeddedVideoPlayer(
 
     DisposableEffect(exoPlayer) {
         onDispose {
-            seekPreviewGeneration++
-            seekPreviewJob?.cancel()
-            seekPreviewJob = null
-            seekPreviewBitmap = null
             try {
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
@@ -1100,7 +1044,6 @@ fun EmbeddedVideoPlayer(
                         dragAxis = PlayerInteractionPolicy.DragAxis.UNDECIDED
                         gestureSeekOriginPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                         seekPreviewPosition = gestureSeekOriginPosition
-                        seekPreviewBitmap = null
                         startedOnControls = controlsVisible && startY > size.height * 0.70f
                         resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
@@ -1147,12 +1090,12 @@ fun EmbeddedVideoPlayer(
                             val deltaMs = (validDuration.coerceAtLeast(60_000L) * proportion).toLong()
                             val targetMs = (gestureSeekOriginPosition + deltaMs)
                                 .coerceIn(0L, validDuration.coerceAtLeast(0L))
+                            seekPreviewPosition = targetMs
                             gestureHudType = "seek"
                             gestureHudValue = if (deltaMs >= 0) 1 else -1
-                            gestureHudText = "${formatTime(targetMs)} / ${formatTime(validDuration)}"
-                            if (!url.contains(".m3u8", ignoreCase = true)) {
-                                requestSeekPreview(targetMs)
-                            }
+                            val directionSymbol = if (deltaMs >= 0) "+" else "-"
+                            val deltaSec = kotlin.math.abs(deltaMs / 1000L)
+                            gestureHudText = "${formatTime(targetMs)} / ${formatTime(validDuration)} (${directionSymbol}${deltaSec}s)"
                         }
                     },
                     onDragEnd = {
@@ -1170,20 +1113,16 @@ fun EmbeddedVideoPlayer(
                         val targetPosition = (gestureSeekOriginPosition + deltaMs)
                             .coerceIn(0L, validDuration.coerceAtLeast(0L))
                         runCatching {
-                            exoPlayer.seekTo(targetPosition)
-                            exoPlayer.playWhenReady = resumeAfterGestureSeek
+                            if (exoPlayer.isCurrentMediaItemSeekable || validDuration > 0L) {
+                                exoPlayer.seekTo(targetPosition)
+                                exoPlayer.playWhenReady = resumeAfterGestureSeek
+                            }
                         }
-                        seekPreviewGeneration++
-                        seekPreviewJob?.cancel()
-                        seekPreviewBitmap = null
                         gestureHudText = ""
                     },
                     onDragCancel = {
                         lastDragTime = System.currentTimeMillis()
                         dragGestureActive = false
-                        seekPreviewGeneration++
-                        seekPreviewJob?.cancel()
-                        seekPreviewBitmap = null
                         if (gestureHudType == "seek") gestureHudText = ""
                     }
                 )
@@ -1366,50 +1305,33 @@ fun EmbeddedVideoPlayer(
             }
         }
 
-        // ── Horizontal seek preview: target frame directly below the top bar ──
+        // ── Horizontal seek preview OSD Badge ──
         if (dragGestureActive && gestureHudType == "seek" && gestureHudText.isNotBlank()) {
-            Column(
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color.Black.copy(alpha = 0.85f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.20f)),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = if (isFullscreen) 52.dp else 36.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(top = if (isFullscreen) 52.dp else 36.dp)
             ) {
-                Surface(
-                    modifier = Modifier
-                        .widthIn(min = 180.dp, max = 260.dp)
-                        .aspectRatio(16f / 9f),
-                    shape = RoundedCornerShape(12.dp),
-                    color = Color.Black.copy(alpha = 0.88f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.20f))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
-                    val preview = seekPreviewBitmap
-                    if (preview != null && !preview.isRecycled) {
-                        Image(
-                            bitmap = preview.asImageBitmap(),
-                            contentDescription = "跳转位置画面预览",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp
-                            )
-                        }
-                    }
+                    Text(
+                        if (gestureHudValue >= 0) "快进 " else "快退 ",
+                        color = AppColors.cyan,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        gestureHudText,
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "${formatTime(seekPreviewPosition)} / ${formatTime(duration)}",
-                    color = Color.White,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                )
             }
         }
 
