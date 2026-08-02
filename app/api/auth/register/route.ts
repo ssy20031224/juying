@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   const email = normalizeEmail(String(body.email ?? ""));
   const password = String(body.password ?? "");
   const code = String(body.code ?? "").trim();
-  const nickname = normalizeNickname(String(body.nickname ?? "")) || `漫友_${Math.floor(1000 + Math.random() * 9000)}`;
+  const nickname = normalizeNickname(String(body.nickname ?? ""));
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return Response.json({ error: "invalid email" }, { status: 400 });
@@ -39,6 +39,9 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  if (!nickname) {
+    return Response.json({ error: "nickname required" }, { status: 400 });
+  }
   if (!code) {
     return Response.json({ error: "email verification code required" }, { status: 400 });
   }
@@ -48,6 +51,9 @@ export async function POST(request: Request) {
   if (existing.length > 0) {
     return Response.json({ error: "email already registered" }, { status: 409 });
   }
+  // Derive the password before consuming the one-time code. This prevents a
+  // transient crypto/runtime failure from burning a valid code.
+  const passwordHash = await hashPassword(password);
   if (!(await consumeVerificationCode(email, "register", code))) {
     return Response.json({ error: "invalid or expired email verification code" }, { status: 400 });
   }
@@ -55,7 +61,7 @@ export async function POST(request: Request) {
   const user = {
     id: crypto.randomUUID(),
     email,
-    passwordHash: await hashPassword(password),
+    passwordHash,
     nickname,
     avatarUrl: "",
   };

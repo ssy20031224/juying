@@ -2,7 +2,11 @@ import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getDb } from "../../../../db";
 import { users } from "../../../../db/schema";
-import { issueVerificationCode, type VerificationPurpose } from "../../../lib/email";
+import {
+  issueVerificationCode,
+  VerificationRateLimitError,
+  type VerificationPurpose,
+} from "../../../lib/email";
 import { ACCOUNT_AUTH_ENABLED, accountAuthDisabledResponse, getCurrentUser, normalizeEmail } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +45,12 @@ export async function POST(request: Request) {
     await issueVerificationCode(email, purpose);
     return NextResponse.json({ ok: true });
   } catch (error) {
+    if (error instanceof VerificationRateLimitError) {
+      return NextResponse.json(
+        { error: "verification code requested too frequently", retryAfter: error.retryAfterSeconds },
+        { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } },
+      );
+    }
     const message = error instanceof Error ? error.message : "failed to send verification code";
     return NextResponse.json({ error: message }, { status: 502 });
   }

@@ -4,7 +4,6 @@ import { authSessions, users } from "../../db/schema";
 
 const SESSION_COOKIE = "lanerc_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
-const PASSWORD_ITERATIONS = 120_000;
 
 // 默认启用；维护窗口可显式设置 ACCOUNT_AUTH_ENABLED=false。
 export const ACCOUNT_AUTH_ENABLED = process.env.ACCOUNT_AUTH_ENABLED !== "false";
@@ -41,36 +40,50 @@ async function digestSha256(value: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(digest));
 }
 
-async function derivePassword(password: string, salt: Uint8Array): Promise<Uint8Array> {
+function passwordPepper(): string {
+  const pepper = (process.env.PASSWORD_PEPPER || process.env.AUTH_CODE_PEPPER || "").trim();
+  if (pepper.length < 32) {
+    throw new Error("PASSWORD_PEPPER must be configured with at least 32 characters");
+  }
+  return pepper;
+}
+
+async function signPassword(password: string, salt: Uint8Array): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(password),
-    "PBKDF2",
+    new TextEncoder().encode(passwordPepper()),
+    { name: "HMAC", hash: "SHA-256" },
     false,
-    ["deriveBits"],
+    ["sign"],
   );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt,
-      iterations: PASSWORD_ITERATIONS,
-      hash: "SHA-256",
-    },
-    key,
-    256,
-  );
-  return new Uint8Array(bits);
+  const payload = `${bytesToBase64Url(salt)}\u0000${password}`;
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
 }
 
 export async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const derived = await derivePassword(password, salt);
-  return `pbkdf2$sha256$${PASSWORD_ITERATIONS}$${bytesToBase64Url(salt)}$${bytesToBase64Url(derived)}`;
+  const signature = await signPassword(password, salt);
+  return `hmac$sha256$1$${bytesToBase64Url(salt)}$${bytesToBase64Url(signature)}`;
 }
 
 export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
   const [algorithm, hash, iterationsText, saltText, expectedText] = encoded.split("$");
-  if (algorithm !== "pbkdf2" || hash !== "sha256") return false;
+  if (algorithm === "hmac") {
+    if (hash !== "sha256" || iterationsText !== "1" || !saltText || !expectedText) return false;
+    const actualBytes = await signPassword(password, base64UrlToBytes(saltText));
+    const expectedBytes = base64UrlToBytes(expectedText);
+    if (actualBytes.length !== expectedBytes.length) return false;
+    let difference = 0;
+    for (let index = 0; index < actualBytes.length; index += 1) {
+      difference |= actualBytes[index] ^ expectedBytes[index];
+    }
+    return difference === 0;
+  }
+
+  // Backward compatibility for accounts created by earlier paid/high-CPU
+  // deployments. New free-tier accounts always use the keyed HMAC format.
+  const peppered = algorithm === "pbkdf2p";
+  if ((!peppered && algorithm !== "pbkdf2") || hash !== "sha256") return false;
   const iterations = Number(iterationsText);
   if (!Number.isInteger(iterations) || iterations < 10_000 || !saltText || !expectedText) return false;
 
@@ -83,7 +96,7 @@ export async function verifyPassword(password: string, encoded: string): Promise
     },
     await crypto.subtle.importKey(
       "raw",
-      new TextEncoder().encode(password),
+      new TextEncoder().encode(peppered ? `${password}\u0000${passwordPepper()}` : password),
       "PBKDF2",
       false,
       ["deriveBits"],

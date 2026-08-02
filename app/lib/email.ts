@@ -7,6 +7,13 @@ export type VerificationPurpose = "register" | "change-email" | "reset-password"
 const CODE_TTL_SECONDS = 10 * 60;
 const RESEND_INTERVAL_SECONDS = 60;
 
+export class VerificationRateLimitError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super("verification code requested too frequently");
+    this.name = "VerificationRateLimitError";
+  }
+}
+
 const PURPOSE_COPY: Record<VerificationPurpose, { action: string; title: string; hint: string }> = {
   register: {
     action: "注册聚映账号",
@@ -184,7 +191,7 @@ export async function issueVerificationCode(
   const now = Math.floor(Date.now() / 1000);
   const db = await getDb();
   const recent = await db
-    .select({ id: verificationCodes.id })
+    .select({ id: verificationCodes.id, createdAt: verificationCodes.createdAt })
     .from(verificationCodes)
     .where(
       and(
@@ -194,7 +201,10 @@ export async function issueVerificationCode(
       ),
     )
     .limit(1);
-  if (recent.length > 0) throw new Error("please wait before requesting another code");
+  if (recent.length > 0) {
+    const elapsed = Math.max(0, now - recent[0].createdAt);
+    throw new VerificationRateLimitError(Math.max(1, RESEND_INTERVAL_SECONDS - elapsed));
+  }
 
   const code = makeCode();
   await sendVerificationEmail(normalizedEmail, code, purpose);

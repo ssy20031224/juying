@@ -22,10 +22,12 @@ ACCOUNT_AUTH_ENABLED=true
 COMMENTS_POSTING_ENABLED=true
 COMMENTS_REQUIRE_ACCOUNT=true
 AUTH_CODE_PEPPER=<至少 32 字符的稳定随机密钥>
+PASSWORD_PEPPER=<至少 32 字符的稳定随机密钥>
 ```
 
-`AUTH_CODE_PEPPER` 一旦产生用户验证码后必须保持稳定，只能存放在服务端 Secret，
-不得写入 Git、APK 或公开配置。D1 路线仍使用阿里云 DirectMail 发送验证码、阿里云
+`AUTH_CODE_PEPPER` 与 `PASSWORD_PEPPER` 必须保持稳定，只能存放在服务端 Secret，
+不得写入 Git、APK 或公开配置。密码采用适配 Workers Free CPU 限额的随机盐 HMAC-SHA256，
+并使用独立服务端 Pepper；单独取得 D1 数据不能离线验证密码。D1 路线仍使用阿里云 DirectMail 发送验证码、阿里云
 OSS 保存头像；公告、更新清单和来源脚本继续使用公开只读 OSS 对象。
 
 Android Release 构建时将账号地址指向公开部署的 Worker/Sites 域名：
@@ -77,6 +79,7 @@ ALIYUN_DM_ACCESS_KEY_SECRET=
 ALIYUN_DM_ACCOUNT_NAME=
 ALIYUN_DM_FROM_ALIAS=聚映
 AUTH_CODE_PEPPER=
+PASSWORD_PEPPER=
 ```
 
 请为 DirectMail 使用单独的 RAM 用户，只授予邮件发送权限，不要复用 OSS 的高权限密钥。

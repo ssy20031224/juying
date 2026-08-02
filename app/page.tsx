@@ -3,8 +3,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
-  Bookmark, ChevronRight, Compass, Download, Film,
-  Heart, History, Home as HomeIcon, Info, Play, Search, Settings2,
+  Bell, Bookmark, ChevronRight, Compass, Download, Film,
+  Heart, History, Home as HomeIcon, Info, MessageSquare, Play, Search, Settings2,
   Share2, Sparkles, UserRound, X,
 } from "lucide-react";
 import { MediaPlayer } from "./components/player/MediaPlayer";
@@ -279,5 +279,73 @@ function HomeSections({ sections, items, onOpen, favorites, onFavorite }: { sect
 }
 
 function ProfileView({ favorites, history, onOpen, onFavorite }: { favorites: Result[]; history: Result[]; onOpen: (item: Result) => void; onFavorite: (item: Result) => void }) {
-  return <section className="profile-view"><div className="profile-card"><div className="profile-avatar"><Sparkles size={23} /></div><div><p>聚映用户</p><h1>本地观影空间</h1><span>收藏和观看记录仅保存在当前设备</span></div><button aria-label="设置"><Settings2 size={19} /></button></div><div className="profile-banner"><div><Sparkles size={18} /><strong>保持轻盈，继续发现</strong><span>不下载、不转存，随时从来源直达</span></div><ChevronRight size={20} /></div><div className="profile-shortcuts"><button><Heart size={20} /><span>我的收藏</span><b>{favorites.length}</b></button><button><History size={20} /><span>历史记录</span><b>{history.length}</b></button><button><Download size={20} /><span>离线缓存</span><b>未启用</b></button></div><div className="profile-section"><div className="section-heading"><div><p className="eyebrow">最近观看</p><h2>继续追番</h2></div></div>{history.length ? <div className="compact-list">{history.slice(0, 5).map((item) => <button key={`${item.sourceKey}-${item.id}`} onClick={() => onOpen(item)}><Cover item={item} /><span><strong>{item.title}</strong><small>{item.sourceTitle} · {item.year || "最新"}</small></span><ChevronRight size={17} /></button>)}</div> : <div className="empty-state"><History size={18} /> 打开一部影片后，这里会记录最近观看</div>}</div><div className="profile-section"><div className="section-heading"><div><p className="eyebrow">我的收藏</p><h2>想看的内容</h2></div></div>{favorites.length ? <div className="compact-list">{favorites.slice(0, 5).map((item) => <div className="compact-row" key={`${item.sourceKey}-${item.id}`} role="button" tabIndex={0} onClick={() => onOpen(item)} onKeyDown={(event) => event.key === "Enter" && onOpen(item)}><Cover item={item} /><span><strong>{item.title}</strong><small>{item.sourceTitle} · {item.kind || "影视"}</small></span><button className="remove-favorite" onClick={(event) => { event.stopPropagation(); onFavorite(item); }} aria-label="取消收藏"><X size={15} /></button></div>)}</div> : <div className="empty-state"><Bookmark size={18} /> 在影片详情中点击收藏，建立自己的片单</div>}</div></section>;
+  const displayHistory = history.length ? history : [
+    { id: "demo-h1", title: "与奔驰于透明之夜的你…", year: "2024", kind: "动漫", score: "9.0", sourceKey: "lanerc", sourceTitle: "Lanerc" },
+    { id: "demo-h2", title: "轮回的花瓣", year: "2024", kind: "动漫", score: "8.8", sourceKey: "lanerc", sourceTitle: "Lanerc" }
+  ];
+
+  return <section className="profile-view">
+    <div className="profile-header-actions" style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: '8px' }}>
+      <button className="icon-button" aria-label="设置" style={{ width: '40px', height: '40px', borderRadius: '50%', background: 'var(--panel2, rgba(255,255,255,0.08))', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+        <Settings2 size={20} />
+      </button>
+    </div>
+
+    <div className="profile-user-row" style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '20px' }}>
+      <div className="profile-avatar" style={{ width: '64px', height: '64px', borderRadius: '50%', overflow: 'hidden', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(67, 213, 232, 0.15)' }}>
+        <Sparkles size={28} />
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <strong style={{ fontSize: '18px', fontWeight: 600 }}>19383260376</strong>
+          <span style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '12px', background: 'rgba(255,255,255,0.1)', color: 'var(--muted, #8b9aaf)' }}>普通用户</span>
+        </div>
+        <div style={{ fontSize: '13px', color: 'var(--muted, #8b9aaf)', marginTop: '4px' }}>ID: 183717</div>
+      </div>
+      <ChevronRight size={20} style={{ opacity: 0.5 }} />
+    </div>
+
+    <div className="profile-actions-card" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', padding: '16px 8px', background: 'var(--panel, rgba(255,255,255,0.05))', borderRadius: '16px', textAlign: 'center', marginBottom: '24px' }}>
+      <button style={{ background: 'none', border: 'none', color: 'inherit', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+        <Heart size={22} />
+        <span style={{ fontSize: '13px' }}>我的追番</span>
+      </button>
+      <button style={{ background: 'none', border: 'none', color: 'inherit', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+        <Download size={22} />
+        <span style={{ fontSize: '13px' }}>下载记录</span>
+      </button>
+      <button style={{ background: 'none', border: 'none', color: 'inherit', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+        <Bell size={22} />
+        <span style={{ fontSize: '13px' }}>消息通知</span>
+      </button>
+      <button style={{ background: 'none', border: 'none', color: 'inherit', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+        <MessageSquare size={22} />
+        <span style={{ fontSize: '13px' }}>意见反馈</span>
+      </button>
+    </div>
+
+    <div className="profile-section">
+      <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+        <h2 style={{ fontSize: '18px', fontWeight: 600 }}>观看历史</h2>
+        <span style={{ fontSize: '13px', color: 'var(--muted, #8b9aaf)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>更多 <ChevronRight size={16} /></span>
+      </div>
+      <div className="horizontal-grid" style={{ display: 'flex', gap: '14px', overflowX: 'auto', paddingBottom: '8px' }}>
+        {displayHistory.slice(0, 6).map((item) => (
+          <div key={`${item.sourceKey}-${item.id}`} onClick={() => onOpen(item as Result)} style={{ flexShrink: 0, width: '150px', cursor: 'pointer' }}>
+            <div style={{ position: 'relative', width: '150px', height: '88px', borderRadius: '12px', overflow: 'hidden', background: 'var(--panel2, rgba(255,255,255,0.08))' }}>
+              <Cover item={item} />
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.35)' }}>
+                <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Play size={16} fill="currentColor" />
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: '6px', fontSize: '13px', lineHeight: '1.3', overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+              {item.title}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>;
 }

@@ -331,10 +331,27 @@ class AccountRepository(context: Context) {
 
     private fun parseError(text: String, status: Int): String {
         val jsonError = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
-        return jsonError.ifBlank {
+        if (jsonError.isNotBlank()) {
+            return when (jsonError) {
+                "invalid email or password" -> "邮箱或密码不正确"
+                "invalid email", "invalid email or purpose" -> "请输入有效的邮箱地址"
+                "email already registered" -> "该邮箱已经注册，请直接登录"
+                "nickname required" -> "请输入昵称"
+                "email verification code required" -> "请输入邮箱验证码"
+                "invalid or expired email verification code" -> "验证码错误或已过期，请重新获取"
+                "verification code requested too frequently" -> "请求过于频繁，请等待 60 秒后重试"
+                "authentication required" -> "登录状态已失效，请重新登录"
+                "password must be 8-128 characters and include at least three character types" ->
+                    "密码需为 8–128 位，并包含大小写字母、数字、符号中的至少三类"
+                else -> jsonError
+            }
+        }
+        return run {
             val trimmed = text.trimStart()
             if (trimmed.startsWith("<!DOCTYPE", ignoreCase = true) || trimmed.startsWith("<html", ignoreCase = true)) {
                 "服务器返回了网页而不是 API 数据（HTTP $status），请检查域名或部署状态"
+            } else if (status >= 500) {
+                "账号服务暂时不可用（HTTP $status），请稍后重试"
             } else {
                 "请求失败（HTTP $status）"
             }

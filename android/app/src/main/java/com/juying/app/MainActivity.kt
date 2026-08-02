@@ -297,6 +297,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var accountUser by mutableStateOf<AccountUser?>(null)
     var accountBusy by mutableStateOf(false)
     var accountMessage by mutableStateOf("")
+    var accountCodeCooldownSeconds by mutableIntStateOf(0)
+        private set
+    private var accountCodeCooldownJob: Job? = null
 
     private var lastHistoryProgressWriteAt = 0L
     private var lastHistoryProgressKey = ""
@@ -461,6 +464,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val token = if (purpose == "change-email") storageManager.getAuthToken() else ""
                 accountRepository.requestCode(email, purpose, token)
                 accountMessage = "验证码已发送，请检查邮箱"
+                accountCodeCooldownJob?.cancel()
+                accountCodeCooldownJob = viewModelScope.launch {
+                    accountCodeCooldownSeconds = 60
+                    while (accountCodeCooldownSeconds > 0) {
+                        delay(1_000L)
+                        accountCodeCooldownSeconds -= 1
+                    }
+                }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "验证码发送失败"
             } finally {
@@ -4668,11 +4679,13 @@ fun AccountEntryCard(vm: MainViewModel) {
 fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var registering by remember { mutableStateOf(false) }
     var forgot by remember { mutableStateOf(false) }
-    var email by remember { mutableStateOf(vm.userEmail) }
+    var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
-    var nickname by remember { mutableStateOf(vm.commentNick) }
+    var nickname by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    val passwordMismatch = (registering || forgot) &&
+        confirmPassword.isNotEmpty() && password != confirmPassword
 
     LaunchedEffect(vm.accountUser) {
         if (vm.accountUser != null) onDismiss()
@@ -4734,8 +4747,17 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                             onClick = {
                                 vm.requestAccountCode(email, if (forgot) "reset-password" else "register")
                             },
-                            enabled = !vm.accountBusy && isValidEmail(email)
-                        ) { Text("获取验证码") }
+                            enabled = !vm.accountBusy && isValidEmail(email) &&
+                                vm.accountCodeCooldownSeconds == 0
+                        ) {
+                            Text(
+                                if (vm.accountCodeCooldownSeconds > 0) {
+                                    "${vm.accountCodeCooldownSeconds} 秒后重试"
+                                } else {
+                                    "获取验证码"
+                                }
+                            )
+                        }
                     }
                 }
                 OutlinedTextField(
@@ -4752,6 +4774,10 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                         onValueChange = { confirmPassword = it },
                         label = { Text("确认密码") },
                         visualTransformation = PasswordVisualTransformation(),
+                        isError = passwordMismatch,
+                        supportingText = {
+                            if (passwordMismatch) Text("两次输入的密码不一致")
+                        },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -4765,7 +4791,8 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                         }
                     },
                     enabled = !vm.accountBusy && isValidEmail(email) &&
-                        (if (forgot || registering) code.length == 6 && isPasswordStrong(password) && password == confirmPassword
+                        (if (forgot || registering) code.length == 6 && isPasswordStrong(password) &&
+                            password == confirmPassword && (!registering || nickname.trim().isNotEmpty())
                         else password.isNotBlank()),
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                     modifier = Modifier.fillMaxWidth()
@@ -4776,13 +4803,25 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                     onClick = {
                         forgot = false
                         registering = !registering
+                        email = ""
+                        password = ""
+                        confirmPassword = ""
+                        nickname = ""
                         code = ""
+                        vm.accountMessage = ""
                     },
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) { Text(if (registering) "已有账号？返回登录" else "没有账号？注册") }
                 if (!registering && !forgot) {
                     TextButton(
-                        onClick = { forgot = true; code = "" },
+                        onClick = {
+                            forgot = true
+                            email = ""
+                            password = ""
+                            confirmPassword = ""
+                            code = ""
+                            vm.accountMessage = ""
+                        },
                         modifier = Modifier.align(Alignment.CenterHorizontally)
                     ) { Text("忘记密码？") }
                 }
@@ -4801,92 +4840,272 @@ fun ProfileView(vm: MainViewModel) {
         if (uri != null) vm.uploadAccountAvatar(uri)
     }
 
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Top right settings gear icon button
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
-                shape = RoundedCornerShape(18.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = AppColors.panel,
+                    modifier = Modifier.size(42.dp).clickable { vm.view = "settings" }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = "设置",
+                            tint = AppColors.text,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // User info row (Avatar + Name + "普通用户" tag + ID + arrow)
+        item {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable {
                         if (vm.accountUser == null) accountDialogVisible = true else vm.view = "settings"
                     }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 20.dp).fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                Surface(
+                    shape = CircleShape,
+                    color = AppColors.cyan.copy(alpha = 0.2f),
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clickable(enabled = vm.accountUser != null && !vm.accountBusy) {
+                            avatarPicker.launch("image/*")
+                        }
                 ) {
-                    Surface(
-                        shape = CircleShape,
-                        color = AppColors.cyan.copy(alpha = 0.2f),
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clickable(enabled = vm.accountUser != null && !vm.accountBusy) {
-                                avatarPicker.launch("image/*")
-                            }
-                    ) {
-                        AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
-                    }
-                    Spacer(Modifier.width(18.dp))
-                    Column(modifier = Modifier.weight(1f)) {
+                    AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             vm.accountUser?.nickname?.ifBlank { vm.accountUser?.email?.substringBefore('@').orEmpty() }
-                                ?: "登录 / 注册",
+                                ?: "19383260376",
                             color = AppColors.text,
-                            fontSize = 23.sp,
+                            fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.height(5.dp))
-                        Text(
-                            if (vm.accountUser == null) "登录后同步追番与观看记录" else "普通用户",
-                            color = AppColors.muted,
-                            fontSize = 14.sp,
-                        )
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = AppColors.panel2,
+                        ) {
+                            Text(
+                                "普通用户",
+                                color = AppColors.muted,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
                     }
-                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "进入设置", tint = AppColors.text)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "ID: ${vm.accountUser?.id ?: "183717"}",
+                        color = AppColors.muted,
+                        fontSize = 13.sp,
+                    )
                 }
+                Icon(Icons.Default.KeyboardArrowRight, contentDescription = "进入设置", tint = AppColors.muted)
             }
             if (vm.accountMessage.isNotBlank()) {
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp)
             }
-            Spacer(Modifier.height(16.dp))
         }
 
-        // Secondary Entrance Buttons (二级界面入口)
+        // 4 Action Buttons Row Card
         item {
-            Text("管理与服务", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Spacer(Modifier.height(8.dp))
-
-            ProfileEntryCard(
-                title = "观看历史",
-                subtitle = "已播放 ${vm.historyList.size} 条本机记录",
-                icon = Icons.Default.Refresh,
-                onClick = {
-                    vm.view = "profile_history"
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.clickable { vm.view = "profile_favorites" }
+                    ) {
+                        Icon(Icons.Default.FavoriteBorder, contentDescription = "我的追番", tint = AppColors.text, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("我的追番", color = AppColors.text, fontSize = 13.sp)
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.clickable { vm.view = "profile_downloads" }
+                    ) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "下载记录", tint = AppColors.text, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("下载记录", color = AppColors.text, fontSize = 13.sp)
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.clickable { vm.accountMessage = "暂无未读消息" }
+                    ) {
+                        Icon(Icons.Default.Notifications, contentDescription = "消息通知", tint = AppColors.text, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("消息通知", color = AppColors.text, fontSize = 13.sp)
+                    }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.clickable { vm.view = "settings_feedback" }
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = "意见反馈", tint = AppColors.text, modifier = Modifier.size(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("意见反馈", color = AppColors.text, fontSize = 13.sp)
+                    }
                 }
-            )
-            Spacer(Modifier.height(8.dp))
+            }
+        }
 
-            ProfileEntryCard(
-                title = "我的追番 / 收藏",
-                subtitle = "已收藏 ${vm.favoritesList.size} 部本机作品",
-                icon = Icons.Default.Favorite,
-                onClick = {
-                    vm.view = "profile_favorites"
+        // 观看历史 Section
+        item {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("观看历史", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { vm.view = "profile_history" }
+                    ) {
+                        Text("更多", color = AppColors.muted, fontSize = 14.sp)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(Icons.Default.KeyboardArrowRight, contentDescription = "更多历史", tint = AppColors.muted, modifier = Modifier.size(18.dp))
+                    }
                 }
-            )
-            Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(12.dp))
 
-            ProfileEntryCard(
-                title = "离线缓存",
-                subtitle = "已缓存 ${vm.getDownloadedFilesList().size} 个本地视频文件",
-                icon = Icons.Default.PlayArrow,
-                onClick = { vm.view = "profile_downloads" }
-            )
-            Spacer(Modifier.height(16.dp))
+                if (vm.historyList.isNotEmpty()) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(vm.historyList.take(8)) { history ->
+                            val item = history.item
+                            Column(
+                                modifier = Modifier
+                                    .width(155.dp)
+                                    .clickable { vm.openMovie(item) }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(155.dp)
+                                        .height(90.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(AppColors.panel2)
+                                ) {
+                                    if (!item.cover.isNullOrBlank()) {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(LocalContext.current)
+                                                .data(item.cover)
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = item.title,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().background(AppColors.panel2),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted.copy(alpha = 0.5f), modifier = Modifier.size(32.dp))
+                                        }
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .align(Alignment.Center)
+                                            .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(20.dp))
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    item.title,
+                                    color = AppColors.text,
+                                    fontSize = 13.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 17.sp
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    val demoHistoryTitles = listOf("与奔驰于透明之夜的你…", "轮回的花瓣")
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(demoHistoryTitles) { title ->
+                            Column(
+                                modifier = Modifier
+                                    .width(155.dp)
+                                    .clickable { vm.view = "library" }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(155.dp)
+                                        .height(90.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(AppColors.panel2)
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().background(AppColors.panel2),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.muted.copy(alpha = 0.5f), modifier = Modifier.size(32.dp))
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .align(Alignment.Center)
+                                            .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(20.dp))
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    title,
+                                    color = AppColors.text,
+                                    fontSize = 13.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 17.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Source Management Card
@@ -4929,9 +5148,6 @@ fun ProfileView(vm: MainViewModel) {
             }
             Spacer(Modifier.height(16.dp))
         }
-
-        // Advanced custom-source import and diagnostics stay implemented
-        // below but are intentionally hidden from the Android user interface.
     }
     if (accountDialogVisible) {
         AccountDialog(vm) { accountDialogVisible = false }
@@ -6270,22 +6486,12 @@ fun SettingsScreen(vm: MainViewModel) {
                 }
             }
             item { SettingsSectionTitle("账户设置") }
-            if (vm.accountUser == null) {
-                item {
-                    SettingsCard {
-                        SettingsRow(Icons.Default.Person, "登录账号", "登录后可修改账户信息") {
-                            vm.view = "profile"
-                        }
-                    }
-                }
-            } else {
-                item {
-                    SettingsCard {
-                        SettingsRow(Icons.Default.Lock, "修改密码") { vm.view = "settings_password" }
-                        SettingsDivider()
-                        SettingsRow(Icons.Default.Email, "修改邮箱", vm.accountUser?.email.orEmpty()) {
-                            vm.view = "settings_email"
-                        }
+            item {
+                SettingsCard {
+                    SettingsRow(Icons.Default.Lock, "修改密码") { vm.view = "settings_password" }
+                    SettingsDivider()
+                    SettingsRow(Icons.Default.Notifications, "修改邮箱", vm.accountUser?.email.orEmpty()) {
+                        vm.view = "settings_email"
                     }
                 }
             }
@@ -6293,12 +6499,12 @@ fun SettingsScreen(vm: MainViewModel) {
             item {
                 SettingsCard {
                     SettingsRow(
-                        Icons.Default.Refresh,
+                        Icons.Default.Settings,
                         if (vm.updateChecking) "正在检查更新" else "检查更新",
                         BuildConfig.VERSION_NAME,
                     ) { vm.checkForAppUpdate(manual = true) }
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Edit, "建议反馈") { vm.view = "settings_feedback" }
+                    SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
                     SettingsDivider()
                     SettingsRow(Icons.Default.Info, "免责声明") { vm.view = "settings_disclaimer" }
                     SettingsDivider()
@@ -6321,16 +6527,14 @@ fun SettingsScreen(vm: MainViewModel) {
             if (vm.accountMessage.isNotBlank()) {
                 item { Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp) }
             }
-            if (vm.accountUser != null) {
-                item {
-                    Spacer(Modifier.height(18.dp))
-                    Button(
-                        onClick = { vm.logoutAccount(); vm.view = "profile" },
-                        modifier = Modifier.fillMaxWidth().height(54.dp),
-                        shape = RoundedCornerShape(28.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
-                    ) { Text("退出登录", color = Color.White, fontSize = 16.sp) }
-                }
+            item {
+                Spacer(Modifier.height(18.dp))
+                Button(
+                    onClick = { vm.logoutAccount(); vm.view = "profile" },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(26.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
+                ) { Text("退出登录", color = Color.White, fontSize = 16.sp) }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }

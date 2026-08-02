@@ -28,10 +28,15 @@ export async function POST(request: Request) {
   const db = await getDb();
   const rows = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
   const user = rows[0];
-  if (!user || !(await consumeVerificationCode(email, "reset-password", code))) {
+  if (!user) {
     return NextResponse.json({ error: "invalid or expired reset request" }, { status: 400 });
   }
-  await db.update(users).set({ passwordHash: await hashPassword(password), updatedAt: Math.floor(Date.now() / 1000) }).where(eq(users.id, user.id));
+  // Derive the password before consuming the one-time code, same as register.
+  const passwordHash = await hashPassword(password);
+  if (!(await consumeVerificationCode(email, "reset-password", code))) {
+    return NextResponse.json({ error: "invalid or expired reset request" }, { status: 400 });
+  }
+  await db.update(users).set({ passwordHash, updatedAt: Math.floor(Date.now() / 1000) }).where(eq(users.id, user.id));
   await db.delete(authSessions).where(eq(authSessions.userId, user.id));
   return NextResponse.json({ ok: true });
 }
