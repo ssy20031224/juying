@@ -36,8 +36,17 @@ class AnnouncementRepository(context: Context) {
                     parse(response.body?.string().orEmpty())
                 }
             }.getOrNull()
-        }
+        } ?: defaultAnnouncement()
     }
+
+    // 全部公告源不可用时展示的内置兜底公告，保证首页公告入口始终可用
+    private fun defaultAnnouncement(): AppAnnouncement = AppAnnouncement(
+        id = "builtin_default",
+        title = "欢迎使用聚映",
+        summary = "追番、评论与弹幕功能说明",
+        content = "【聚映使用说明】\n1. 追番收藏与观看记录支持登录后多设备云端同步。\n2. 观看时右侧长按可临时快进倍速，上滑锁定、下滑恢复；播放中发送的弹幕会在同剧集同时间点回放。\n3. 如遇到播放卡顿，可在设置中切换视频源或降低清晰度。\n4. 请妥善保管账号密码，勿泄露给他人。",
+        updatedAt = "2026-08-03 12:00",
+    )
 
     private fun parse(raw: String): AppAnnouncement? {
         val root = JSONObject(raw)

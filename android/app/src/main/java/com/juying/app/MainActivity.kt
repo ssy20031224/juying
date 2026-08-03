@@ -57,27 +57,35 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.google.gson.Gson
 import com.juying.app.source.*
 import com.juying.app.ui.EmbeddedVideoPlayer
 import com.juying.app.ui.PipController
@@ -197,8 +205,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val commentRepository = CommentRepository(application)
     private val accountRepository = AccountRepository(application)
     private val announcementRepository = AnnouncementRepository(application)
+    private val notificationRepository = NotificationRepository(application)
+    private val gson = Gson()
     private var commentsLoadedFor: String? = null
     private var isAppInitialized = false
+    private var notificationPromptShownThisSession = false
     private var playerReturnView = "home"
     private var pendingEpisodeName: String? = null
     private data class PlayerNavigationState(
@@ -320,6 +331,117 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var announcementDialogVisible by mutableStateOf(false)
         private set
+
+    // ── 消息通知（追番更新 / 评论回复）──
+    var notifications by mutableStateOf<List<CloudNotification>>(emptyList())
+        private set
+    var notificationPromptVisible by mutableStateOf(false)
+        private set
+    val unreadNotificationCount: Int
+        get() = notifications.count { !it.read }
+
+    fun openNotificationsScreen() {
+        notificationPromptVisible = false
+        view = "notifications"
+        viewModelScope.launch {
+            val fresh = notificationRepository.load()
+            if (fresh != null) notifications = fresh
+        }
+    }
+
+    fun dismissNotificationPrompt() {
+        notificationPromptVisible = false
+    }
+
+    fun closeNotificationsScreen() {
+        if (notifications.any { !it.read }) {
+            viewModelScope.launch {
+                notificationRepository.markAllRead()
+                notifications = notifications.map { it.copy(read = true) }
+            }
+        }
+    }
+
+    private fun loadNotifications() {
+        viewModelScope.launch {
+            val fresh = runCatching { notificationRepository.load() }.getOrNull() ?: return@launch
+            notifications = fresh
+            if (fresh.any { !it.read } && !notificationPromptShownThisSession) {
+                notificationPromptShownThisSession = true
+                notificationPromptVisible = true
+            }
+        }
+    }
+
+    // 追番更新检测：收藏且未完结的作品出现「超出已看集数」的新剧集时上报提醒
+    private fun checkFavoriteUpdate(item: SourceItem, detail: DetailResult) {
+        if (TEMP_ACCOUNT_AUTH_DISABLED || accountUser == null) return
+        val state = resolveMediaStatus(item).state
+        if (state != MediaReleaseState.SERIALIZING && state != MediaReleaseState.UPDATING) return
+        if (!storageManager.isFavorite(item)) return
+        val latest = detail.episodes.lastOrNull()?.name?.trim().orEmpty()
+        if (latest.isEmpty()) return
+        val latestNum = episodeNumber(latest).toIntOrNull() ?: return
+        val watchedNums = historyList
+            .filter { SourceManager.normalizeTitle(it.item.title) == SourceManager.normalizeTitle(item.title) }
+            .mapNotNull { episodeNumber(it.episodeName).toIntOrNull() }
+        val maxWatched = watchedNums.maxOrNull() ?: return
+        if (latestNum <= maxWatched) return
+        if (storageManager.getAuthToken().isBlank()) return
+        val mediaKey = commentMediaKey(item)
+        viewModelScope.launch {
+            notificationRepository.reportFavoriteUpdate(
+                title = "追番更新提醒",
+                body = "你收藏的「${item.title}」更新了（$latest），请您追番哦。",
+                mediaKey = mediaKey,
+                episodeName = latest,
+                mediaSnapshot = gson.toJson(item)
+            )
+            val fresh = notificationRepository.load()
+            if (fresh != null) notifications = fresh
+            if (notifications.any { !it.read } && !notificationPromptShownThisSession) {
+                notificationPromptShownThisSession = true
+                notificationPromptVisible = true
+            }
+        }
+    }
+
+    // 应用启动时后台检测最近收藏的未完结番剧是否有更新
+    private fun backgroundFavoriteUpdateCheck() {
+        if (TEMP_ACCOUNT_AUTH_DISABLED || accountUser == null) return
+        val candidates = favoritesList
+            .filter {
+                val state = resolveMediaStatus(it).state
+                state == MediaReleaseState.SERIALIZING || state == MediaReleaseState.UPDATING
+            }
+            .take(5)
+        if (candidates.isEmpty()) return
+        viewModelScope.launch {
+            candidates.forEach { item ->
+                runCatching {
+                    val primarySourceKey = item.sourceKey
+                        .split(',')
+                        .asSequence()
+                        .map { it.trim() }
+                        .firstOrNull { it.isNotEmpty() && sourceManager.getAdapter(it) != null }
+                        ?: item.sourceKey.trim()
+                    val adapter = sourceManager.getAdapter(primarySourceKey)
+                    val cached = ResultCache.getDetail("$primarySourceKey:${item.id}")
+                    val detail = cached?.let { mergeDetailMetadata(item, it) } ?: run {
+                        if (adapter == null) return@runCatching
+                        val fresh = withContext(Dispatchers.IO) {
+                            fetchUsableDetail(adapter, item)
+                        } ?: return@runCatching
+                        val merged = mergeDetailMetadata(item, fresh)
+                        if (merged.episodes.isNotEmpty()) ResultCache.putDetail("$primarySourceKey:${item.id}", merged)
+                        merged
+                    }
+                    checkFavoriteUpdate(item, detail)
+                }
+                delay(600L)
+            }
+        }
+    }
 
     fun checkForAppUpdate(manual: Boolean = true) {
         if (updateChecking || updateDownloadProgress != null) return
@@ -443,10 +565,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateUserEmail(result.user.email)
                     accountUser = result.user
                     accountMessage = "登录成功，正在同步本机数据"
-                    val remote = accountRepository.pull(result.token)
-                    storageManager.mergeCloudData(remote.favorites, remote.history)
-                    reloadStorageData()
-                    accountRepository.sync(result.token, favoritesList, historyList, getDownloadedFilesList())
+                    // 同步失败不影响登录；下次启动会再次拉取
+                    runCatching {
+                        val remote = accountRepository.pull(result.token)
+                        storageManager.mergeCloudData(remote.favorites, remote.history)
+                        reloadStorageData()
+                        accountRepository.sync(result.token, favoritesList, historyList, getDownloadedFilesList())
+                    }
+                    loadNotifications()
+                    backgroundFavoriteUpdateCheck()
                 }
             } catch (error: Exception) {
                 accountMessage = error.message ?: "登录失败"
@@ -680,11 +807,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             reloadStorageData()
                             accountRepository.sync(token, favoritesList, historyList, getDownloadedFilesList())
                         }
+                        loadNotifications()
+                        backgroundFavoriteUpdateCheck()
                     } else {
                         storageManager.clearAuthToken()
                     }
                 }
-                .onFailure { storageManager.clearAuthToken() }
+                // 仅当接口明确返回无效时才登出；网络抖动不清除登录态
+                .onFailure { /* 网络异常时保留登录态，下次启动重试 */ }
         }
     }
 
@@ -918,7 +1048,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: metadata.score
     )
 
-    private fun commentMediaKey(item: SourceItem): String =
+    fun commentMediaKey(item: SourceItem): String =
         "${item.sourceKey.substringBefore(',').trim()}:${item.id}"
 
     // 打开详情/播放页时按作品加载云端评论；接口失败保持空列表，不影响播放链路
@@ -936,15 +1066,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addComment() {
-        // 保留本地维护开关；正常构建会继续执行下方登录态校验和云端写入。
+    var replyTargetComment by mutableStateOf<CloudComment?>(null)
+
+    fun addComment(parentId: String? = null, replyToNick: String? = null) {
         if (TEMP_COMMENT_POSTING_DISABLED) {
             accountMessage = "评论发送暂时关闭，仅展示已有评论"
             return
         }
         if (accountUser == null || storageManager.getAuthToken().isBlank()) {
-            accountMessage = "请先登录账号后发表评论"
-            android.widget.Toast.makeText(getApplication(), "请先登录后评论", android.widget.Toast.LENGTH_SHORT).show()
+            accountMessage = "请先“登录”后发表评论"
+            accountDialogVisible = true
             return
         }
         val text = commentDraft.trim()
@@ -954,12 +1085,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val userNick = accountUser?.nickname?.ifBlank { accountUser?.email?.substringBefore('@') }
         val nick = userNick?.ifBlank { null } ?: commentNick.ifBlank { storageManager.getCommentNick() }
         val avatarUrl = accountUser?.avatarUrl.orEmpty()
+        val targetParentId = parentId ?: replyTargetComment?.let { it.parentId ?: it.id }
+        val targetReplyNick = replyToNick ?: replyTargetComment?.nick
+
         viewModelScope.launch {
             commentPosting = true
-            val result = commentRepository.post(key, nick, text, avatarUrl)
+            val result = commentRepository.post(key, nick, text, avatarUrl, targetParentId, targetReplyNick)
             val remote = result.comments
             if (remote != null) {
                 commentDraft = ""
+                replyTargetComment = null
                 commentsLoadedFor = key
                 comments = remote
                 android.widget.Toast.makeText(getApplication(), "评论发布成功", android.widget.Toast.LENGTH_SHORT).show()
@@ -971,6 +1106,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ).show()
             }
             commentPosting = false
+        }
+    }
+
+    fun deleteComment(comment: CloudComment) {
+        val detail = displayedDetail ?: activeDetail ?: return
+        val key = commentMediaKey(detail.item)
+        viewModelScope.launch {
+            val ok = commentRepository.delete(key, comment.id)
+            if (ok) {
+                val fresh = commentRepository.load(key)
+                if (fresh != null) comments = fresh
+                android.widget.Toast.makeText(getApplication(), "已删除评论", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                val updated = comments.filterNot { it.id == comment.id }.map { parent ->
+                    parent.copy(replies = parent.replies.filterNot { it.id == comment.id })
+                }
+                comments = updated
+                android.widget.Toast.makeText(getApplication(), "已删除评论", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun likeComment(comment: CloudComment) {
+        val detail = displayedDetail ?: activeDetail ?: return
+        val key = commentMediaKey(detail.item)
+        viewModelScope.launch {
+            comments = comments.map { parent ->
+                if (parent.id == comment.id) {
+                    val newLiked = !parent.likedByMe
+                    val newCount = if (newLiked) parent.likesCount + 1 else (parent.likesCount - 1).coerceAtLeast(0)
+                    parent.copy(likedByMe = newLiked, likesCount = newCount)
+                } else {
+                    val updatedReplies = parent.replies.map { reply ->
+                        if (reply.id == comment.id) {
+                            val newLiked = !reply.likedByMe
+                            val newCount = if (newLiked) reply.likesCount + 1 else (reply.likesCount - 1).coerceAtLeast(0)
+                            reply.copy(likedByMe = newLiked, likesCount = newCount)
+                        } else reply
+                    }
+                    parent.copy(replies = updatedReplies)
+                }
+            }
+            commentRepository.like(key, comment.id)
         }
     }
 
@@ -1011,7 +1189,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshLanercDiscovery(force = false)
         loadAnnouncement()
         // 正常构建会恢复登录态并拉取用户云端数据。
-        if (!TEMP_ACCOUNT_AUTH_DISABLED) restoreAccount()
+        if (!TEMP_ACCOUNT_AUTH_DISABLED) {
+            restoreAccount()
+        }
         viewModelScope.launch {
             withContext(Dispatchers.Main) { notice = "正在加载视频源..." }
             withContext(Dispatchers.IO) { sourceManager.init() }
@@ -2032,6 +2212,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (detailGeneration != detailLoadGeneration) return@launch
+
+            // 收藏且未完结的番剧加载出剧集列表后，检测是否有未看过的新集并上报追番更新提醒
+            checkFavoriteUpdate(playableItem, finalDetailResult)
 
             // Keep the fast cache-first render, then revalidate metadata and
             // episode count in the background so a recently completed/updated
@@ -3222,6 +3405,62 @@ fun JuyingApp(vm: MainViewModel) {
     }
 }
 
+// 文本超宽时向左滚动展示全名（跑马灯）；文本不超宽时静态左对齐
+@OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+@Composable
+private fun MarqueeText(
+    text: String,
+    color: Color,
+    fontSize: TextUnit,
+    fontWeight: FontWeight,
+    modifier: Modifier = Modifier,
+    speedDpPerSec: Float = 48f,
+    gapDp: Float = 48f
+) {
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val style = TextStyle(color = color, fontSize = fontSize, fontWeight = fontWeight)
+    val measuredWidthPx = remember(text, style) {
+        textMeasurer.measure(
+            text = AnnotatedString(text),
+            style = style,
+            constraints = androidx.compose.ui.unit.Constraints(maxWidth = androidx.compose.ui.unit.Constraints.Infinity)
+        ).size.width.toFloat()
+    }
+    var containerWidthPx by remember { mutableFloatStateOf(0f) }
+    val needsMarquee = measuredWidthPx > containerWidthPx && containerWidthPx > 0f
+    val travelPx = measuredWidthPx + with(density) { gapDp.dp.toPx() }
+    val durationMs = if (needsMarquee) {
+        (((travelPx + containerWidthPx) / with(density) { speedDpPerSec.dp.toPx() }) * 1000f).toInt().coerceAtLeast(2000)
+    } else 1
+    val infinite = rememberInfiniteTransition(label = "marqueeTransition")
+    val offsetX by infinite.animateFloat(
+        initialValue = if (needsMarquee) containerWidthPx else 0f,
+        targetValue = if (needsMarquee) -travelPx else 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = durationMs, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "marqueeOffset"
+    )
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clipToBounds()
+            .onSizeChanged { containerWidthPx = it.width.toFloat() }
+    ) {
+        Text(
+            text = text,
+            color = color,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.offset(x = with(density) { offsetX.dp })
+        )
+    }
+}
+
 @Composable
 fun HomeView(vm: MainViewModel) {
     var selectedCategory by remember { mutableStateOf("精选") }
@@ -3300,6 +3539,33 @@ fun HomeView(vm: MainViewModel) {
 
             Spacer(Modifier.width(8.dp))
 
+            // Notification Bell with Unread Badge
+            Box(modifier = Modifier.size(36.dp)) {
+                IconButton(
+                    onClick = { vm.openNotificationsScreen() },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Text("🔔", fontSize = 18.sp)
+                }
+                if (vm.unreadNotificationCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = 4.dp, y = (-2).dp)
+                            .size(16.dp)
+                            .background(AppColors.rose, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (vm.unreadNotificationCount > 99) "99+" else vm.unreadNotificationCount.toString(),
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
             // History Clock Icon on Right (截图1 风格)
             IconButton(
                 onClick = { vm.view = "profile_history" },
@@ -3367,15 +3633,22 @@ fun HomeView(vm: MainViewModel) {
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        "正在播放: ${activeDetail.item.title} ($currentEpName)",
-                        color = AppColors.text,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        MarqueeText(
+                            text = activeDetail.item.title,
+                            color = AppColors.text,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            currentEpName,
+                            color = AppColors.muted,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
                     Surface(
                         shape = RoundedCornerShape(6.dp),
                         color = AppColors.cyan,
@@ -3770,6 +4043,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     qualities = playResult.qualities,
                     title = detail.item.title,
                     episodeName = currentEpisode?.name.orEmpty(),
+                    danmakuMediaKey = vm.commentMediaKey(detail.item),
+                    danmakuEpisodeKey = currentEpisode?.name.orEmpty(),
                     episodes = detail.episodes,
                     currentEpisodeIndex = vm.currentEpisodeIndex,
                     onSelectEpisode = { vm.selectEpisode(it) },
@@ -4206,23 +4481,62 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         }
                     }
                 } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = vm.commentDraft,
-                            onValueChange = { vm.commentDraft = it.take(200) },
-                            modifier = Modifier.weight(1f),
-                            placeholder = { Text("友善评论，分享你的观后感") },
-                            singleLine = true
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            onClick = vm::addComment,
-                            enabled = vm.commentDraft.trim().isNotEmpty() && !vm.commentPosting,
-                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
-                        ) { Text(if (vm.commentPosting) "发布中" else "发布") }
+                    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                        val replyTarget = vm.replyTargetComment
+                        if (replyTarget != null) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = AppColors.cyan.copy(alpha = 0.12f),
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "回复 @${replyTarget.nick}",
+                                        color = AppColors.cyan,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        "取消",
+                                        color = AppColors.muted,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { vm.replyTargetComment = null }
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = vm.commentDraft,
+                                onValueChange = { vm.commentDraft = it.take(200) },
+                                modifier = Modifier.weight(1f),
+                                placeholder = {
+                                    Text(
+                                        if (replyTarget != null) "回复 @${replyTarget.nick}" else "友善评论，分享你的观后感",
+                                        maxLines = 1
+                                    )
+                                },
+                                singleLine = true
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = vm::addComment,
+                                enabled = vm.commentDraft.trim().isNotEmpty() && !vm.commentPosting,
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
+                            ) { Text(if (vm.commentPosting) "发布中" else "发布") }
+                        }
                     }
                 }
                 if (vm.comments.isEmpty()) {
@@ -4233,38 +4547,25 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
                         items(vm.comments.size) { index ->
                             val comment = vm.comments[index]
-                            Card(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.Top
-                                ) {
-                                    AccountAvatar(
-                                        avatarUrl = comment.avatarUrl,
-                                        modifier = Modifier.size(36.dp)
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(comment.nick, color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                            Text(
-                                                if (comment.ts > 0L) {
-                                                    android.text.format.DateUtils.getRelativeTimeSpanString(comment.ts).toString()
-                                                } else "刚刚",
-                                                color = AppColors.muted,
-                                                fontSize = 11.sp
-                                            )
-                                        }
-                                        Spacer(Modifier.height(4.dp))
-                                        Text(comment.text, color = AppColors.text, fontSize = 14.sp)
+                            CommentCard(
+                                comment = comment,
+                                currentUserId = vm.accountUser?.id.orEmpty(),
+                                onLike = { target ->
+                                    if (vm.accountUser == null) {
+                                        vm.accountDialogVisible = true
+                                    } else {
+                                        vm.likeComment(target)
                                     }
-                                }
-                            }
+                                },
+                                onReply = { target ->
+                                    if (vm.accountUser == null) {
+                                        vm.accountDialogVisible = true
+                                    } else {
+                                        vm.replyTargetComment = target
+                                    }
+                                },
+                                onDelete = { vm.deleteComment(it) }
+                            )
                         }
                     }
                 }
@@ -4280,6 +4581,161 @@ fun PlayerViewScreen(vm: MainViewModel) {
                 genreSummary = genreSummary,
                 modifier = Modifier.weight(1f).fillMaxHeight()
             )
+        }
+    }
+}
+
+@Composable
+private fun CommentActionRow(
+    likesCount: Int,
+    likedByMe: Boolean,
+    isOwn: Boolean,
+    onLike: () -> Unit,
+    onReply: (() -> Unit)?,
+    onDelete: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(
+            if (likesCount > 0) "👍 $likesCount" else "👍",
+            color = if (likedByMe) AppColors.rose else AppColors.muted,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { onLike() }
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+        if (onReply != null) {
+            Text(
+                "回复",
+                color = AppColors.muted,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onReply() }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            )
+        }
+        if (isOwn) {
+            Text(
+                "删除",
+                color = AppColors.rose.copy(alpha = 0.8f),
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onDelete() }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommentReplyRow(
+    reply: CloudComment,
+    currentUserId: String,
+    onLike: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(verticalAlignment = Alignment.Top) {
+        AccountAvatar(avatarUrl = reply.avatarUrl, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(reply.nick, color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                if (!reply.replyToNick.isNullOrBlank()) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "回复 @${reply.replyToNick}",
+                        color = AppColors.muted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(reply.text, color = AppColors.text, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            CommentActionRow(
+                likesCount = reply.likesCount,
+                likedByMe = reply.likedByMe,
+                isOwn = reply.userId.isNotBlank() && reply.userId == currentUserId,
+                onLike = onLike,
+                onReply = null,
+                onDelete = onDelete
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommentCard(
+    comment: CloudComment,
+    currentUserId: String,
+    onLike: (CloudComment) -> Unit,
+    onReply: (CloudComment) -> Unit,
+    onDelete: (CloudComment) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                AccountAvatar(avatarUrl = comment.avatarUrl, modifier = Modifier.size(36.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(comment.nick, color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(
+                            if (comment.ts > 0L) {
+                                android.text.format.DateUtils.getRelativeTimeSpanString(comment.ts).toString()
+                            } else "刚刚",
+                            color = AppColors.muted,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(comment.text, color = AppColors.text, fontSize = 14.sp)
+                    Spacer(Modifier.height(6.dp))
+                    CommentActionRow(
+                        likesCount = comment.likesCount,
+                        likedByMe = comment.likedByMe,
+                        isOwn = comment.userId.isNotBlank() && comment.userId == currentUserId,
+                        onLike = { onLike(comment) },
+                        onReply = { onReply(comment) },
+                        onDelete = { onDelete(comment) }
+                    )
+                }
+            }
+
+            if (comment.replies.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 46.dp)
+                        .background(AppColors.bg.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    comment.replies.forEach { reply ->
+                        CommentReplyRow(
+                            reply = reply,
+                            currentUserId = currentUserId,
+                            onLike = { onLike(reply) },
+                            onDelete = { onDelete(reply) }
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -5055,7 +5511,7 @@ fun ProfileView(vm: MainViewModel) {
                     }
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.clickable { vm.accountMessage = "暂无未读消息" }
+                        modifier = Modifier.clickable { vm.openNotificationsScreen() }
                     ) {
                         Icon(Icons.Default.Notifications, contentDescription = "消息通知", tint = AppColors.text, modifier = Modifier.size(26.dp))
                         Spacer(Modifier.height(8.dp))
@@ -5196,6 +5652,173 @@ fun ProfileView(vm: MainViewModel) {
     }
     if (accountDialogVisible) {
         AccountDialog(vm) { accountDialogVisible = false }
+    }
+    if (vm.notificationPromptVisible) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissNotificationPrompt() },
+            title = { Text("消息提醒", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "您有 ${vm.unreadNotificationCount} 条新消息",
+                        color = AppColors.text,
+                        fontSize = 14.sp
+                    )
+                    vm.notifications.firstOrNull { !it.read }?.let { latest ->
+                        Text(
+                            latest.body,
+                            color = AppColors.muted,
+                            fontSize = 13.sp,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.openNotificationsScreen() }) {
+                    Text("查看", color = AppColors.cyan, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.dismissNotificationPrompt() }) {
+                    Text("知道了", color = AppColors.muted)
+                }
+            },
+            containerColor = AppColors.panel,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+}
+
+@Composable
+private fun NotificationCard(notification: CloudNotification, vm: MainViewModel) {
+    val unread = !notification.read
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .clickable {
+                if (notification.type == "favorite_update") {
+                    val item = runCatching {
+                        Gson().fromJson(notification.mediaSnapshot, SourceItem::class.java)
+                    }.getOrNull()
+                    if (item != null && item.id.isNotBlank()) {
+                        vm.openMovie(item)
+                        vm.closeNotificationsScreen()
+                    } else {
+                        android.widget.Toast.makeText(
+                            vm.getApplication(),
+                            "作品信息缺失，无法直接打开",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                } else {
+                    val favorite = vm.favoritesList.firstOrNull { vm.commentMediaKey(it) == notification.mediaKey }
+                    if (favorite != null) {
+                        vm.openMovie(favorite)
+                        vm.closeNotificationsScreen()
+                    } else {
+                        android.widget.Toast.makeText(
+                            vm.getApplication(),
+                            "该作品不在收藏中，无法直接打开",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+        colors = CardDefaults.cardColors(
+            containerColor = if (unread) AppColors.cyan.copy(alpha = 0.12f) else AppColors.panel2.copy(alpha = 0.7f)
+        ),
+        border = if (unread) androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.4f)) else null
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(if (notification.type == "comment_reply") "💬" else "📢", fontSize = 18.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        notification.title,
+                        color = AppColors.text,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (unread) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(AppColors.rose, CircleShape)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(
+                            if (notification.ts > 0L) {
+                                android.text.format.DateUtils.getRelativeTimeSpanString(notification.ts).toString()
+                            } else "刚刚",
+                            color = AppColors.muted,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(notification.body, color = AppColors.text, fontSize = 13.sp, lineHeight = 19.sp)
+            }
+        }
+    }
+}
+
+@Composable
+fun NotificationsScreen(vm: MainViewModel) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = {
+                    vm.closeNotificationsScreen()
+                    vm.view = "profile"
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回我的", tint = AppColors.text, modifier = Modifier.size(20.dp))
+            }
+            Icon(Icons.Default.Notifications, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Text("消息通知", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("实时接收追番更新与互动提醒", color = AppColors.muted, fontSize = 11.sp)
+            }
+            if (vm.unreadNotificationCount > 0) {
+                TextButton(onClick = { vm.closeNotificationsScreen() }) {
+                    Text("全部已读", color = AppColors.cyan, fontSize = 12.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        if (vm.notifications.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("🔔", fontSize = 34.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text("暂无消息", color = AppColors.muted, fontSize = 14.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("收藏的番剧更新或有人回复评论时会提醒你", color = AppColors.muted, fontSize = 12.sp)
+                }
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(vm.notifications.size) { index ->
+                    NotificationCard(vm.notifications[index], vm)
+                }
+            }
+        }
     }
 }
 
@@ -6556,8 +7179,7 @@ fun SettingsScreen(vm: MainViewModel) {
                         BuildConfig.VERSION_NAME,
                     ) { vm.checkForAppUpdate(manual = true) }
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Lock, "重置 / 修改密码") { vm.accountMessage = ""; vm.view = "profile" }
-            SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
+                    SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
                     SettingsDivider()
                     SettingsRow(Icons.Default.Info, "免责声明") { vm.view = "settings_disclaimer" }
                     SettingsDivider()
@@ -7690,6 +8312,11 @@ fun FilterRow(label: String, options: List<Any>, active: String, onSelect: (Stri
     }
 }
 
+// 提取剧集名中的集数用于比较（"第3集"/"03话"→"3"）；无数字时原样返回
+private fun episodeNumber(name: String): String {
+    return Regex("\\d+").find(name)?.value ?: name.trim()
+}
+
 private fun coverRequest(context: android.content.Context, raw: String): ImageRequest {
     var url = raw.trim()
     val headers = linkedMapOf<String, String>()
@@ -8153,69 +8780,6 @@ fun SourceDebugLogCard(vm: MainViewModel) {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun NotificationsScreen(vm: MainViewModel) {
-    val favoriteAnimes = remember { listOf<String>() }
-    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { vm.view = "profile" }, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回我的", tint = AppColors.text, modifier = Modifier.size(20.dp))
-            }
-            Icon(Icons.Default.Notifications, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(6.dp))
-            Column(Modifier.weight(1f)) {
-                Text("消息通知", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Text("实时接收追番更新与互动提醒", color = AppColors.muted, fontSize = 11.sp)
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-
-        val notificationsList = remember(favoriteAnimes) {
-            val list = mutableListOf<Triple<String, String, String>>()
-            list.add(Triple("系统通知", "【最新播报】您关注的剧集及账号服务已成功接入云端保护，享受超清无卡顿播放 🎬", "刚刚"))
-            list.add(Triple("追番更新", "您关注的动漫《完妹的世界》已更新最新第148集，快去观看吧！", "今天 12:00"))
-            list.add(Triple("互动提醒", "漫友 [风之伤] 点赞了您的弹幕：'这部动漫画质太棒了！' 👍", "昨天 18:30"))
-            list.add(Triple("回复提醒", "漫友 [晴空] 在评论区回复了您：'同感，这一集高能满满满！' 💬", "2天前"))
-            list
-        }
-
-        LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(notificationsList.size) { idx ->
-                val (tag, body, time) = notificationsList[idx]
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = AppColors.panel2,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = if (tag == "追番更新") AppColors.orange else AppColors.cyan.copy(alpha = 0.2f)
-                            ) {
-                                Text(
-                                    tag,
-                                    color = if (tag == "追番更新") Color.White else AppColors.cyan,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                )
-                            }
-                            Text(time, color = AppColors.muted, fontSize = 11.sp)
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        Text(body, color = AppColors.text, fontSize = 13.sp, lineHeight = 18.sp)
                     }
                 }
             }

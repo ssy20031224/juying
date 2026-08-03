@@ -108,11 +108,72 @@ export const comments = sqliteTable(
     mediaKey: text("media_key").notNull(),
     episodeKey: text("episode_key").notNull().default(""),
     text: text("text").notNull(),
+    parentId: text("parent_id"),
+    replyToNick: text("reply_to_nick").notNull().default(""),
     createdAt: integer("created_at").notNull().default(now()),
   },
   (table) => [
     index("comments_media_created_idx").on(table.mediaKey, table.createdAt),
     index("comments_user_created_idx").on(table.userId, table.createdAt),
+    index("comments_parent_idx").on(table.parentId),
+  ],
+);
+
+export const commentLikes = sqliteTable(
+  "comment_likes",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    commentId: text("comment_id")
+      .notNull()
+      .references(() => comments.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").notNull().default(now()),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.commentId] }),
+    index("comment_likes_comment_idx").on(table.commentId),
+  ],
+);
+
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type").notNull().default("favorite_update"),
+    title: text("title").notNull().default(""),
+    body: text("body").notNull().default(""),
+    mediaKey: text("media_key").notNull().default(""),
+    episodeName: text("episode_name").notNull().default(""),
+    commentId: text("comment_id").notNull().default(""),
+    mediaSnapshot: text("media_snapshot").notNull().default("{}"),
+    read: integer("read", { mode: "boolean" }).notNull().default(false),
+    createdAt: integer("created_at").notNull().default(now()),
+  },
+  (table) => [
+    index("notifications_user_created_idx").on(table.userId, table.createdAt),
+  ],
+);
+
+export const danmakus = sqliteTable(
+  "danmakus",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    mediaKey: text("media_key").notNull(),
+    episodeKey: text("episode_key").notNull(),
+    positionMs: integer("position_ms").notNull().default(0),
+    text: text("text").notNull(),
+    color: text("color").notNull().default("#FFFFFFFF"),
+    createdAt: integer("created_at").notNull().default(now()),
+  },
+  (table) => [
+    index("danmakus_media_episode_idx").on(table.mediaKey, table.episodeKey, table.positionMs),
   ],
 );
 

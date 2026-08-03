@@ -1,7 +1,7 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getDb } from "../../../db";
-import { comments as commentsTable, users } from "../../../db/schema";
+import { commentLikes, comments as commentsTable, notifications, users } from "../../../db/schema";
 import { getCurrentUser } from "../../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,18 @@ const MAX_TEXT_LEN = 200;
 const MAX_NICK_LEN = 24;
 const MAX_MEDIA_KEY_LEN = 140;
 
-type CloudComment = { id: string; nick: string; text: string; ts: number };
+type CloudComment = {
+  id: string;
+  userId: string;
+  nick: string;
+  text: string;
+  ts: number;
+  avatarUrl?: string;
+  parentId?: string | null;
+  replyToNick?: string | null;
+  likesCount?: number;
+  likedByMe?: boolean;
+};
 
 interface OssConfig {
   accessKeyId: string;
@@ -101,14 +112,22 @@ async function writeComments(cfg: OssConfig, objectKey: string, comments: CloudC
   }
 }
 
-async function readDbComments(media: string): Promise<CloudComment[]> {
+async function readDbComments(media: string, currentUserId?: string): Promise<CloudComment[]> {
   const db = await getDb();
   const rows = await db
     .select({
       id: commentsTable.id,
+      userId: commentsTable.userId,
       nick: users.nickname,
       text: commentsTable.text,
       ts: commentsTable.createdAt,
+      avatarUrl: users.avatarUrl,
+      parentId: commentsTable.parentId,
+      replyToNick: commentsTable.replyToNick,
+      likesCount: sql<number>`(SELECT COUNT(*) FROM ${commentLikes} WHERE ${commentLikes.commentId} = ${commentsTable.id})`,
+      likedByMe: currentUserId
+        ? sql<number>`(SELECT COUNT(*) FROM ${commentLikes} WHERE ${commentLikes.commentId} = ${commentsTable.id} AND ${commentLikes.userId} = ${currentUserId})`
+        : sql<number>`0`,
     })
     .from(commentsTable)
     .innerJoin(users, eq(users.id, commentsTable.userId))
@@ -117,21 +136,65 @@ async function readDbComments(media: string): Promise<CloudComment[]> {
     .limit(MAX_COMMENTS);
   return rows.reverse().map((row) => ({
     id: row.id,
+    userId: row.userId,
     nick: row.nick,
     text: row.text,
     ts: Number(row.ts) * 1000,
+    avatarUrl: row.avatarUrl || "",
+    parentId: row.parentId || null,
+    replyToNick: row.replyToNick || null,
+    likesCount: Number(row.likesCount || 0),
+    likedByMe: Number(row.likedByMe || 0) > 0,
   }));
 }
 
-async function writeDbComment(userId: string, media: string, text: string): Promise<CloudComment[]> {
+async function writeDbComment(
+  userId: string,
+  media: string,
+  text: string,
+  parentId?: string | null,
+  replyToNick?: string | null,
+  replyAuthorNick?: string,
+): Promise<CloudComment[]> {
   const db = await getDb();
+  let validParentId: string | null = null;
+  let parentAuthorId: string | null = null;
+  if (parentId) {
+    const parent = await db
+      .select({ id: commentsTable.id, userId: commentsTable.userId })
+      .from(commentsTable)
+      .where(eq(commentsTable.id, parentId))
+      .limit(1);
+    if (parent.length) {
+      validParentId = parentId;
+      parentAuthorId = parent[0].userId;
+    }
+  }
   await db.insert(commentsTable).values({
     id: crypto.randomUUID(),
     userId,
     mediaKey: media,
     text,
+    parentId: validParentId,
+    replyToNick: validParentId ? String(replyToNick || "").trim().slice(0, MAX_NICK_LEN) : "",
   });
-  return readDbComments(media);
+  // 楼中楼回复：给被回复评论的作者推送通知（自己回复自己不提醒）
+  if (validParentId && parentAuthorId && parentAuthorId !== userId) {
+    try {
+      await db.insert(notifications).values({
+        id: crypto.randomUUID(),
+        userId: parentAuthorId,
+        type: "comment_reply",
+        title: "评论回复提醒",
+        body: `@${String(replyAuthorNick || "").trim().slice(0, MAX_NICK_LEN) || "漫友"} 回复了你：${text.slice(0, 50)}`,
+        mediaKey: media,
+        commentId: validParentId,
+      });
+    } catch {
+      // 通知写入失败不影响评论发布
+    }
+  }
+  return readDbComments(media, userId);
 }
 
 export async function GET(request: Request) {
@@ -139,7 +202,8 @@ export async function GET(request: Request) {
   if (!media) return NextResponse.json({ error: "missing media" }, { status: 400 });
 
   try {
-    const comments = await readDbComments(media);
+    const currentUser = await getCurrentUser(request);
+    const comments = await readDbComments(media, currentUser?.id);
     return NextResponse.json({ comments }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     // D1 may not be provisioned in local/legacy deployments; keep OSS fallback below.
@@ -155,7 +219,7 @@ export async function POST(request: Request) {
   if (!COMMENTS_POSTING_ENABLED) {
     return NextResponse.json({ error: "comment posting is temporarily disabled" }, { status: 503 });
   }
-  let body: { media?: unknown; nick?: unknown; text?: unknown };
+  let body: { media?: unknown; nick?: unknown; text?: unknown; parentId?: unknown; replyToNick?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -172,7 +236,14 @@ export async function POST(request: Request) {
   }
   if (currentUser) {
     try {
-      const comments = await writeDbComment(currentUser.id, media, text);
+      const comments = await writeDbComment(
+        currentUser.id,
+        media,
+        text,
+        String(body.parentId || "").slice(0, 64) || null,
+        String(body.replyToNick || ""),
+        currentUser.nickname,
+      );
       return NextResponse.json({ comments }, { headers: { "Cache-Control": "no-store" } });
     } catch {
       // Fall through to OSS only when D1 is not available yet.
@@ -186,7 +257,7 @@ export async function POST(request: Request) {
   const nick = String(body.nick || "").trim().slice(0, MAX_NICK_LEN) || "动漫用户";
   const objectKey = `${cfg.prefix}/${media}.json`;
   const comments = await readComments(cfg, objectKey);
-  comments.push({ id: crypto.randomUUID(), nick, text, ts: Date.now() });
+  comments.push({ id: crypto.randomUUID(), userId: "", nick, text, ts: Date.now() });
   const trimmed = comments.slice(-MAX_COMMENTS);
   const saved = await writeComments(cfg, objectKey, trimmed);
   if (!saved) return NextResponse.json({ error: "comments storage write failed" }, { status: 502 });

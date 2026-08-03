@@ -103,6 +103,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.juying.app.AppColors
 import com.juying.app.R
+import com.juying.app.source.DanmakuRepository
 import com.juying.app.source.Episode
 import com.juying.app.source.QualityOption
 import com.juying.app.source.SourceLogManager
@@ -113,16 +114,36 @@ import java.util.Locale
 
 private const val BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 private const val PLAYER_DIAG_TAG = "JuyingPlayerDiag"
-// TEMP: 弹幕发送暂时关闭；保留输入弹窗实现，后续接入授权外部弹幕 API 时恢复。
-private const val TEMP_DANMAKU_POSTING_DISABLED = true
 
 data class DanmakuItem(
     val id: Long = System.nanoTime(),
     val text: String,
     val color: Color = Color.White,
     val lineIndex: Int = 0,
-    val createdAt: Long = System.currentTimeMillis()
+    val positionMs: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis(),
+    var isPaused: Boolean = false,
+    var likesCount: Int = 0,
+    var plusOneCount: Int = 0,
+    var likedByMe: Boolean = false
 )
+
+private fun parseDanmakuColor(hex: String): Color = runCatching {
+    val value = hex.removePrefix("#")
+    val argb = value.toLong(16)
+    when (value.length) {
+        6 -> Color(0xFF000000L or argb)
+        else -> Color(argb)
+    }
+}.getOrDefault(Color.White)
+
+private fun colorToHex(color: Color): String {
+    val argb = (color.alpha * 255f).toInt() shl 24 or
+        ((color.red * 255f).toInt() shl 16) or
+        ((color.green * 255f).toInt() shl 8) or
+        (color.blue * 255f).toInt()
+    return String.format("#%08X", argb)
+}
 
 private fun Context.findActivity(): Activity? {
     var context = this
@@ -367,6 +388,8 @@ fun EmbeddedVideoPlayer(
     qualities: List<QualityOption> = emptyList(),
     title: String,
     episodeName: String,
+    danmakuMediaKey: String? = null,
+    danmakuEpisodeKey: String? = null,
     episodes: List<Episode> = emptyList(),
     currentEpisodeIndex: Int = 0,
     onSelectEpisode: ((Int) -> Unit)? = null,
@@ -406,6 +429,9 @@ fun EmbeddedVideoPlayer(
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
     val sentDanmaku = remember { mutableStateListOf<String>() }
+    val danmakuRepository = remember(context) { DanmakuRepository(context) }
+    // 本集已从云端加载、尚未到时间点的历史弹幕（到点后移入 activeDanmakus 展示）
+    val pendingDanmakus = remember { mutableStateListOf<DanmakuItem>() }
 
     // The player is prepared paused and only starts after the output surface
     // is ready. Do not show a false pause state before Media3 starts.
@@ -820,8 +846,40 @@ fun EmbeddedVideoPlayer(
                 if (duration > 0L) {
                     latestProgressCallback(currentPosition, duration)
                 }
+                // 回放历史弹幕：到时间点且未展示过的云端弹幕注入画面
+                if (danmakuEnabled && pendingDanmakus.isNotEmpty()) {
+                    val pos = currentPosition
+                    val iterator = pendingDanmakus.iterator()
+                    while (iterator.hasNext()) {
+                        val item = iterator.next()
+                        if (item.positionMs in (pos - 500L)..(pos + 1500L)) {
+                            iterator.remove()
+                            activeDanmakus.add(item.copy(lineIndex = activeDanmakus.size % 5))
+                        }
+                    }
+                }
             }
             delay(500)
+        }
+    }
+
+    // 切换剧集时按「作品 + 剧集」拉取历史弹幕
+    LaunchedEffect(url, danmakuMediaKey, danmakuEpisodeKey) {
+        pendingDanmakus.clear()
+        val mediaKey = danmakuMediaKey
+        val episodeKey = danmakuEpisodeKey
+        if (mediaKey.isNullOrBlank() || episodeKey.isNullOrBlank()) return@LaunchedEffect
+        val loaded = danmakuRepository.load(mediaKey, episodeKey)
+        // 加载期间可能已切换剧集
+        if (mediaKey != danmakuMediaKey || episodeKey != danmakuEpisodeKey) return@LaunchedEffect
+        if (loaded != null) {
+            pendingDanmakus.addAll(loaded.map { dm ->
+                DanmakuItem(
+                    text = dm.text,
+                    color = parseDanmakuColor(dm.color),
+                    positionMs = dm.positionMs
+                )
+            })
         }
     }
 
@@ -1199,7 +1257,12 @@ fun EmbeddedVideoPlayer(
                             var isSpeedLockedThisHold = isSpeedLocked
                             val startY = longPress.position.y
                             currentSpeed = longPressSpeed
-                            triggerHud("speed", 1, "${String.format("%.1f", longPressSpeed)}X >> (上滑锁定)", 0L)
+                            triggerHud(
+                                "speed",
+                                1,
+                                "${String.format("%.1f", longPressSpeed)}X >> (${if (isSpeedLocked) "下滑恢复原倍速" else "上滑锁定"})",
+                                0L
+                            )
 
                             while (true) {
                                 val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Main)
@@ -1210,16 +1273,15 @@ fun EmbeddedVideoPlayer(
                                     isSpeedLockedThisHold = true
                                     isSpeedLocked = true
                                     triggerHud("speed", 1, "已锁定 ${String.format("%.1f", longPressSpeed)}X", 0L)
-                                } else if (diffY < -50f && isSpeedLockedThisHold) {
+                                } else if (diffY < -50f) {
                                     isSpeedLockedThisHold = false
                                     isSpeedLocked = false
-                                    triggerHud("speed", 1, "已恢复1.0倍速", 1200L)
+                                    currentSpeed = speedBeforeHold
+                                    triggerHud("speed", 0, "已恢复 ${String.format("%.1f", speedBeforeHold)}X", 1200L)
                                 }
                             }
 
-                            if (isSpeedLockedThisHold) {
-                                isSpeedLocked = true
-                            }
+                            isSpeedLocked = isSpeedLockedThisHold
                         }
 
                         // 等待松手（或手势被取消）
@@ -1231,8 +1293,9 @@ fun EmbeddedVideoPlayer(
                             currentSpeed = longPressSpeed
                             triggerHud("speed", 1, "已锁定 ${String.format("%.1f", longPressSpeed)}X", 1800L)
                         } else {
-                            currentSpeed = speedBeforeHold.coerceAtLeast(1.0f)
-                            triggerHud("speed", 0, "已恢复1.0倍速", 1200L)
+                            // 普通松手：静默恢复长按前的倍速（可能是 3.0X 等非 1.0X 倍速），不再弹出提示
+                            currentSpeed = speedBeforeHold
+                            gestureHudText = ""
                         }
                     }
                 }
@@ -1410,43 +1473,112 @@ fun EmbeddedVideoPlayer(
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (isFullscreen) 240.dp else 160.dp)
+                    .height(if (isFullscreen) 260.dp else 180.dp)
                     .padding(top = if (isFullscreen) 36.dp else 16.dp)
                     .clipToBounds()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                    ) {
+                        activeDanmakus.forEach { it.isPaused = false }
+                    }
             ) {
                 val screenWidthPx = with(LocalDensity.current) { constraints.maxWidth.toFloat() }
 
                 activeDanmakus.forEach { danmaku ->
                     key(danmaku.id) {
                         var progress by remember { mutableFloatStateOf(0f) }
-                        val lineTopDp = (danmaku.lineIndex * 28).dp
+                        val lineTopDp = (danmaku.lineIndex * 32).dp
 
-                        LaunchedEffect(danmaku.id) {
-                            val durationMs = 6500L
-                            val startTime = System.currentTimeMillis()
+                        LaunchedEffect(danmaku.id, danmaku.isPaused) {
+                            val durationMs = 7000L
+                            var startTime = System.currentTimeMillis() - (progress * durationMs).toLong()
                             while (progress < 1f) {
-                                val elapsed = System.currentTimeMillis() - startTime
-                                progress = (elapsed.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                                if (!danmaku.isPaused) {
+                                    val elapsed = System.currentTimeMillis() - startTime
+                                    progress = (elapsed.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                                } else {
+                                    startTime = System.currentTimeMillis() - (progress * durationMs).toLong()
+                                }
                                 delay(16L)
                             }
                             activeDanmakus.remove(danmaku)
                         }
 
                         val translationX = with(LocalDensity.current) {
-                            (screenWidthPx * (1f - progress) - 280.dp.toPx() * progress).toDp()
+                            (screenWidthPx * (1f - progress) - 340.dp.toPx() * progress).toDp()
                         }
 
-                        Text(
-                            text = danmaku.text,
-                            color = danmaku.color.copy(alpha = danmakuOpacity),
-                            fontSize = (14 * danmakuFontSizeScale).sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier
                                 .offset(x = translationX, y = lineTopDp)
-                                .background(Color.Black.copy(alpha = 0.40f * danmakuOpacity), CircleShape)
-                                .padding(horizontal = 10.dp, vertical = 3.dp)
-                        )
+                                .background(
+                                    color = if (danmaku.isPaused) Color(0xFF1E1E28) else Color.Black.copy(alpha = 0.45f * danmakuOpacity),
+                                    shape = CircleShape
+                                )
+                                .border(
+                                    width = if (danmaku.isPaused) 1.5.dp else 0.dp,
+                                    color = if (danmaku.isPaused) AppColors.cyan else Color.Transparent,
+                                    shape = CircleShape
+                                )
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = danmaku.text,
+                                color = danmaku.color.copy(alpha = danmakuOpacity),
+                                fontSize = (14 * danmakuFontSizeScale).sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                modifier = Modifier.clickable {
+                                    danmaku.isPaused = !danmaku.isPaused
+                                }
+                            )
+
+                            // +1 Button Badge
+                            Surface(
+                                color = AppColors.cyan.copy(alpha = 0.25f),
+                                shape = CircleShape,
+                                modifier = Modifier.clickable {
+                                    danmaku.plusOneCount++
+                                    activeDanmakus.add(
+                                        DanmakuItem(
+                                            text = danmaku.text,
+                                            color = danmaku.color,
+                                            lineIndex = (activeDanmakus.size % 5)
+                                        )
+                                    )
+                                    sentDanmaku.add(danmaku.text)
+                                }
+                            ) {
+                                Text(
+                                    text = "+1${if (danmaku.plusOneCount > 0) " ${danmaku.plusOneCount}" else ""}",
+                                    color = AppColors.cyan,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+
+                            // Like Button Badge
+                            Surface(
+                                color = if (danmaku.likedByMe) AppColors.rose.copy(alpha = 0.35f) else Color.White.copy(alpha = 0.15f),
+                                shape = CircleShape,
+                                modifier = Modifier.clickable {
+                                    danmaku.likedByMe = !danmaku.likedByMe
+                                    if (danmaku.likedByMe) danmaku.likesCount++ else danmaku.likesCount = (danmaku.likesCount - 1).coerceAtLeast(0)
+                                }
+                            ) {
+                                Text(
+                                    text = "👍${if (danmaku.likesCount > 0) " ${danmaku.likesCount}" else ""}",
+                                    color = if (danmaku.likedByMe) AppColors.rose else Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2374,12 +2506,32 @@ fun EmbeddedVideoPlayer(
                         onClick = {
                             val text = danmakuDraft.trim()
                             if (text.isNotEmpty()) {
+                                val positionMs = currentPosition
+                                val mediaKey = danmakuMediaKey
+                                val episodeKey = danmakuEpisodeKey
+                                val colorHex = colorToHex(selectedDanmakuColor)
+                                // 同步到云端（记录本集发送时间点，供后续观看者回放）；失败不阻塞本地展示
+                                if (!mediaKey.isNullOrBlank() && !episodeKey.isNullOrBlank()) {
+                                    playerScope.launch {
+                                        val error = danmakuRepository.post(
+                                            mediaKey = mediaKey,
+                                            episodeKey = episodeKey,
+                                            positionMs = positionMs,
+                                            text = text,
+                                            color = colorHex
+                                        )
+                                        if (error != null) {
+                                            Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
                                 sentDanmaku.add(text)
                                 activeDanmakus.add(
                                     DanmakuItem(
                                         text = text,
                                         color = selectedDanmakuColor,
-                                        lineIndex = (activeDanmakus.size % 5)
+                                        lineIndex = (activeDanmakus.size % 5),
+                                        positionMs = positionMs
                                     )
                                 )
                                 danmakuDraft = ""
