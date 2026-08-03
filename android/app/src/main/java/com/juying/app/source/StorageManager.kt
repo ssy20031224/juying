@@ -180,6 +180,31 @@ class StorageManager(context: Context) {
         return !exists
     }
 
+    // 收藏时记录番剧集数作为提醒基线：之后每更新一集才提醒一次
+    private fun getFavoriteBaselines(): MutableMap<String, Int> {
+        val json = prefs.getString("fav_episode_baselines", "{}") ?: "{}"
+        return try {
+            gson.fromJson(json, object : TypeToken<MutableMap<String, Int>>() {}.type) ?: mutableMapOf()
+        } catch (_: Exception) { mutableMapOf() }
+    }
+
+    private fun saveFavoriteBaselines(map: MutableMap<String, Int>) {
+        prefs.edit().putString("fav_episode_baselines", gson.toJson(map)).apply()
+    }
+
+    fun getFavoriteBaseline(mediaKey: String): Int? = getFavoriteBaselines()[mediaKey]
+
+    fun setFavoriteBaseline(mediaKey: String, episodeNum: Int) {
+        val map = getFavoriteBaselines()
+        map[mediaKey] = episodeNum
+        saveFavoriteBaselines(map)
+    }
+
+    fun removeFavoriteBaseline(mediaKey: String) {
+        val map = getFavoriteBaselines()
+        if (map.remove(mediaKey) != null) saveFavoriteBaselines(map)
+    }
+
     fun mergeCloudData(remoteFavorites: List<SourceItem>, remoteHistory: List<HistoryItem>) {
         val mergedFavorites = getFavorites().toMutableList()
         remoteFavorites.forEach { remote ->

@@ -10,6 +10,8 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -303,6 +305,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var commentDraft by mutableStateOf("")
     var comments by mutableStateOf<List<CloudComment>>(emptyList())
     var commentPosting by mutableStateOf(false)
+    var commentImageUrl by mutableStateOf("")
+    var commentImageUploading by mutableStateOf(false)
 
     // Cloud account state. Anonymous local storage remains the default.
     var accountUser by mutableStateOf<AccountUser?>(null)
@@ -382,13 +386,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val latest = detail.episodes.lastOrNull()?.name?.trim().orEmpty()
         if (latest.isEmpty()) return
         val latestNum = episodeNumber(latest).toIntOrNull() ?: return
-        val watchedNums = historyList
-            .filter { SourceManager.normalizeTitle(it.item.title) == SourceManager.normalizeTitle(item.title) }
-            .mapNotNull { episodeNumber(it.episodeName).toIntOrNull() }
-        val maxWatched = watchedNums.maxOrNull() ?: return
-        if (latestNum <= maxWatched) return
-        if (storageManager.getAuthToken().isBlank()) return
         val mediaKey = commentMediaKey(item)
+        // 以收藏时的集数为基线：无基线的旧收藏先静默记下当前集数，之后每更新一集提醒一次
+        val baseline = storageManager.getFavoriteBaseline(mediaKey) ?: run {
+            storageManager.setFavoriteBaseline(mediaKey, latestNum)
+            return
+        }
+        if (latestNum <= baseline) return
+        storageManager.setFavoriteBaseline(mediaKey, latestNum)
+        if (storageManager.getAuthToken().isBlank()) return
         viewModelScope.launch {
             notificationRepository.reportFavoriteUpdate(
                 title = "追番更新提醒",
@@ -790,6 +796,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun uploadCommentImage(uri: Uri) {
+        val token = storageManager.getAuthToken()
+        if (token.isBlank()) {
+            accountMessage = "请先“登录”后发表评论"
+            accountDialogVisible = true
+            return
+        }
+        if (commentImageUploading) return
+        viewModelScope.launch {
+            commentImageUploading = true
+            val file = compressCommentImage(getApplication(), uri)
+            if (file == null) {
+                accountMessage = "无法读取图片"
+                android.widget.Toast.makeText(getApplication(), "无法读取图片，请重试", android.widget.Toast.LENGTH_SHORT).show()
+                commentImageUploading = false
+                return@launch
+            }
+            try {
+                val result = commentRepository.uploadImage(file)
+                if (result.url != null) {
+                    commentImageUrl = result.url
+                } else {
+                    accountMessage = result.error ?: "图片上传失败"
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        result.error ?: "图片上传失败",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } finally {
+                file.delete()
+                commentImageUploading = false
+            }
+        }
+    }
+
     private fun restoreAccount() {
         val token = storageManager.getAuthToken()
         if (token.isBlank()) return
@@ -1051,13 +1093,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun commentMediaKey(item: SourceItem): String =
         "${item.sourceKey.substringBefore(',').trim()}:${item.id}"
 
-    // 打开详情/播放页时按作品加载云端评论；接口失败保持空列表，不影响播放链路
-    fun loadCommentsForActiveDetail() {
+    // 打开详情/播放页时按作品加载云端评论；接口失败保持空列表，不影响播放链路。
+    // force=true 时即使同一部番剧再次进入也会重新拉取（避免上次加载失败/为空时列表一直空白）
+    fun loadCommentsForActiveDetail(force: Boolean = false) {
         val detail = displayedDetail ?: activeDetail ?: return
         val key = commentMediaKey(detail.item)
-        if (key == commentsLoadedFor) return
+        if (!force && key == commentsLoadedFor) return
         commentsLoadedFor = key
-        comments = emptyList()
+        if (force && comments.isNotEmpty()) {
+            // 已有数据时先保留展示，后台刷新成功后替换
+        } else {
+            comments = emptyList()
+        }
         viewModelScope.launch {
             val remote = commentRepository.load(key)
             if (remote != null && commentsLoadedFor == key) {
@@ -1090,10 +1137,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             commentPosting = true
-            val result = commentRepository.post(key, nick, text, avatarUrl, targetParentId, targetReplyNick)
+            val result = commentRepository.post(key, nick, text, avatarUrl, targetParentId, targetReplyNick, commentImageUrl)
             val remote = result.comments
             if (remote != null) {
                 commentDraft = ""
+                commentImageUrl = ""
                 replyTargetComment = null
                 commentsLoadedFor = key
                 comments = remote
@@ -2839,10 +2887,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = "正在播放离线缓存：${item.title} ${item.episodeName}"
     }
 
-    fun toggleFavorite(item: SourceItem) {
+    fun toggleFavorite(item: SourceItem, latestEpisodeNum: Int? = null) {
         val nowFavorite = storageManager.toggleFavorite(item)
         favoritesList = storageManager.getFavorites()
         notice = if (nowFavorite) "已追番" else "已取消追番"
+        val mediaKey = commentMediaKey(item)
+        if (nowFavorite) {
+            // 记录收藏时的集数作为提醒基线，之后每更新一集才提醒
+            if (latestEpisodeNum != null) storageManager.setFavoriteBaseline(mediaKey, latestEpisodeNum)
+        } else {
+            storageManager.removeFavoriteBaseline(mediaKey)
+        }
         if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
             syncAccountData()
         }
@@ -4005,9 +4060,9 @@ fun PlayerViewScreen(vm: MainViewModel) {
         AllEpisodesModal(vm) { showAllEpisodesModal = false }
     }
 
-    // 进入详情/播放页时按作品加载云端评论
+    // 进入详情/播放页时按作品加载云端评论（每次进入都强制刷新，保证最新评论可见）
     LaunchedEffect(detail.item.sourceKey, detail.item.id) {
-        vm.loadCommentsForActiveDetail()
+        vm.loadCommentsForActiveDetail(force = true)
     }
 
     // 横屏（全屏播放）时播放器必须精确占满可见区域：
@@ -4122,7 +4177,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                 onClick = { activeTab = "comments" },
                 text = {
                     Text(
-                        "评论 (${vm.comments.size})",
+                        "评论 (${vm.comments.sumOf { 1 + it.replies.size }})",
                         fontWeight = if (activeTab == "comments") FontWeight.Bold else FontWeight.Normal,
                         fontSize = 15.sp
                     )
@@ -4215,7 +4270,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             if (isFav) "已追番" else "追番",
                             tint = if (isFav) AppColors.rose else AppColors.text
-                        ) { vm.toggleFavorite(detail.item) }
+                        ) { vm.toggleFavorite(detail.item, latestEpisodeNum(detail)) }
                         ActionButton(Icons.Default.Share, "分享", enabled = false) {}
                     }
 
@@ -4514,10 +4569,22 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                 }
                             }
                         }
+                        var showEmojiPanel by remember { mutableStateOf(false) }
+                        val commentImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                            if (uri != null) vm.uploadCommentImage(uri)
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Text(
+                                "😀",
+                                fontSize = 20.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { showEmojiPanel = !showEmojiPanel }
+                                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                            )
                             OutlinedTextField(
                                 value = vm.commentDraft,
                                 onValueChange = { vm.commentDraft = it.take(200) },
@@ -4530,12 +4597,76 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                 },
                                 singleLine = true
                             )
+                            Spacer(Modifier.width(6.dp))
+                            when {
+                                vm.commentImageUploading -> {
+                                    Text("上传中…", color = AppColors.muted, fontSize = 11.sp)
+                                }
+                                vm.commentImageUrl.isNotEmpty() -> {
+                                    Box {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(LocalContext.current)
+                                                .data(vm.commentImageUrl)
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = "评论图片",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(34.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .align(Alignment.TopEnd)
+                                                .clip(CircleShape)
+                                                .background(Color.Black.copy(alpha = 0.7f))
+                                                .clickable { vm.commentImageUrl = "" }
+                                                .padding(2.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("×", color = Color.White, fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                                else -> {
+                                    Text(
+                                        "📷",
+                                        fontSize = 18.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { commentImagePicker.launch("image/*") }
+                                            .padding(horizontal = 4.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
                             Spacer(Modifier.width(8.dp))
                             Button(
                                 onClick = vm::addComment,
                                 enabled = vm.commentDraft.trim().isNotEmpty() && !vm.commentPosting,
                                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
                             ) { Text(if (vm.commentPosting) "发布中" else "发布") }
+                        }
+                        if (showEmojiPanel) {
+                            LazyRow(
+                                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                items(COMMENT_EMOJIS.size) { index ->
+                                    val emoji = COMMENT_EMOJIS[index]
+                                    Text(
+                                        emoji,
+                                        fontSize = 22.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable {
+                                                vm.commentDraft = (vm.commentDraft + emoji).take(200)
+                                                showEmojiPanel = false
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -4658,6 +4789,21 @@ private fun CommentReplyRow(
             }
             Spacer(Modifier.height(2.dp))
             Text(reply.text, color = AppColors.text, fontSize = 13.sp)
+            if (!reply.imageUrl.isBlank()) {
+                Spacer(Modifier.height(4.dp))
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(reply.imageUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "评论图片",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth(0.6f)
+                        .height(120.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            }
             Spacer(Modifier.height(4.dp))
             CommentActionRow(
                 likesCount = reply.likesCount,
@@ -4704,6 +4850,21 @@ private fun CommentCard(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(comment.text, color = AppColors.text, fontSize = 14.sp)
+                    if (!comment.imageUrl.isBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data(comment.imageUrl)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "评论图片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth(0.6f)
+                                .height(140.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                        )
+                    }
                     Spacer(Modifier.height(6.dp))
                     CommentActionRow(
                         likesCount = comment.likesCount,
@@ -4834,7 +4995,7 @@ private fun LandscapePlayerSidePanel(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        TextButton(onClick = { vm.toggleFavorite(detail.item) }) {
+                        TextButton(onClick = { vm.toggleFavorite(detail.item, latestEpisodeNum(detail)) }) {
                             Icon(
                                 if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                 contentDescription = null,
@@ -8315,6 +8476,41 @@ fun FilterRow(label: String, options: List<Any>, active: String, onSelect: (Stri
 // 提取剧集名中的集数用于比较（"第3集"/"03话"→"3"）；无数字时原样返回
 private fun episodeNumber(name: String): String {
     return Regex("\\d+").find(name)?.value ?: name.trim()
+}
+
+/** 详情列表的最后一集集数（收藏时作为追番提醒基线） */
+private fun latestEpisodeNum(detail: DetailResult): Int? =
+    detail.episodes.lastOrNull()?.name?.trim()?.let { episodeNumber(it).toIntOrNull() }
+
+private val COMMENT_EMOJIS = listOf(
+    "😀", "😁", "😂", "🤣", "😅", "😊", "😍", "🥰", "😘", "😜",
+    "🤪", "😎", "🤩", "🥳", "😭", "😤", "😡", "🥺", "😱", "🤔",
+    "🤗", "🤫", "😴", "👍", "👎", "👏", "🙏", "💪", "🔥", "❤️",
+    "💖", "💔", "⭐", "✨", "🎉", "🎊", "🍀", "🌸", "🍺", "🍜",
+)
+
+/** 评论图片压缩：采样到最长边 1280px、JPEG 80%，输出到 cacheDir */
+private fun compressCommentImage(context: android.content.Context, uri: Uri): File? {
+    return try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        // inJustDecodeBounds 模式下 decode 返回 null 是正常的（只读尺寸），不能当失败处理
+        val canRead = context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+            true
+        } ?: false
+        if (!canRead) return null
+        var sample = 1
+        while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)
+        } ?: return null
+        val out = File(context.cacheDir, "comment_image_${System.currentTimeMillis()}.jpg")
+        out.outputStream().use { fos -> bitmap.compress(Bitmap.CompressFormat.JPEG, 80, fos) }
+        out
+    } catch (_: Exception) {
+        null
+    }
 }
 
 private fun coverRequest(context: android.content.Context, raw: String): ImageRequest {

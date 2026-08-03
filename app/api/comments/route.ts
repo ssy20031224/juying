@@ -19,6 +19,7 @@ type CloudComment = {
   text: string;
   ts: number;
   avatarUrl?: string;
+  imageUrl?: string;
   parentId?: string | null;
   replyToNick?: string | null;
   likesCount?: number;
@@ -58,6 +59,16 @@ function ossConfig(): OssConfig {
 
 function sanitizeMediaKey(raw: string): string {
   return raw.replace(/[^A-Za-z0-9:_@./-]/g, "_").slice(0, MAX_MEDIA_KEY_LEN);
+}
+
+function sanitizeImageUrl(raw: unknown): string {
+  const value = String(raw || "").trim();
+  if (!value || value.length > 400) return "";
+  try {
+    return new URL(value).protocol === "https:" ? value : "";
+  } catch {
+    return "";
+  }
 }
 
 async function readComments(cfg: OssConfig, objectKey: string): Promise<CloudComment[]> {
@@ -122,6 +133,7 @@ async function readDbComments(media: string, currentUserId?: string): Promise<Cl
       text: commentsTable.text,
       ts: commentsTable.createdAt,
       avatarUrl: users.avatarUrl,
+      imageUrl: commentsTable.imageUrl,
       parentId: commentsTable.parentId,
       replyToNick: commentsTable.replyToNick,
       likesCount: sql<number>`(SELECT COUNT(*) FROM ${commentLikes} WHERE ${commentLikes.commentId} = ${commentsTable.id})`,
@@ -134,13 +146,15 @@ async function readDbComments(media: string, currentUserId?: string): Promise<Cl
     .where(eq(commentsTable.mediaKey, media))
     .orderBy(desc(commentsTable.createdAt))
     .limit(MAX_COMMENTS);
-  return rows.reverse().map((row) => ({
+  // 新评论在前，客户端发布后立即可见
+  return rows.map((row) => ({
     id: row.id,
     userId: row.userId,
     nick: row.nick,
     text: row.text,
     ts: Number(row.ts) * 1000,
     avatarUrl: row.avatarUrl || "",
+    imageUrl: row.imageUrl || "",
     parentId: row.parentId || null,
     replyToNick: row.replyToNick || null,
     likesCount: Number(row.likesCount || 0),
@@ -152,6 +166,7 @@ async function writeDbComment(
   userId: string,
   media: string,
   text: string,
+  imageUrl: string,
   parentId?: string | null,
   replyToNick?: string | null,
   replyAuthorNick?: string,
@@ -175,6 +190,7 @@ async function writeDbComment(
     userId,
     mediaKey: media,
     text,
+    imageUrl,
     parentId: validParentId,
     replyToNick: validParentId ? String(replyToNick || "").trim().slice(0, MAX_NICK_LEN) : "",
   });
@@ -219,7 +235,7 @@ export async function POST(request: Request) {
   if (!COMMENTS_POSTING_ENABLED) {
     return NextResponse.json({ error: "comment posting is temporarily disabled" }, { status: 503 });
   }
-  let body: { media?: unknown; nick?: unknown; text?: unknown; parentId?: unknown; replyToNick?: unknown };
+  let body: { media?: unknown; nick?: unknown; text?: unknown; imageUrl?: unknown; parentId?: unknown; replyToNick?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -234,12 +250,14 @@ export async function POST(request: Request) {
   if (!currentUser && process.env.COMMENTS_REQUIRE_ACCOUNT !== "false") {
     return NextResponse.json({ error: "authentication required" }, { status: 401 });
   }
+  const imageUrl = sanitizeImageUrl(body.imageUrl);
   if (currentUser) {
     try {
       const comments = await writeDbComment(
         currentUser.id,
         media,
         text,
+        imageUrl,
         String(body.parentId || "").slice(0, 64) || null,
         String(body.replyToNick || ""),
         currentUser.nickname,
@@ -257,8 +275,16 @@ export async function POST(request: Request) {
   const nick = String(body.nick || "").trim().slice(0, MAX_NICK_LEN) || "动漫用户";
   const objectKey = `${cfg.prefix}/${media}.json`;
   const comments = await readComments(cfg, objectKey);
-  comments.push({ id: crypto.randomUUID(), userId: "", nick, text, ts: Date.now() });
-  const trimmed = comments.slice(-MAX_COMMENTS);
+  // 新评论插入头部，保持“新在前”的展示顺序
+  comments.unshift({
+    id: crypto.randomUUID(),
+    userId: "",
+    nick,
+    text,
+    ts: Date.now(),
+    ...(imageUrl ? { imageUrl } : {}),
+  });
+  const trimmed = comments.slice(0, MAX_COMMENTS);
   const saved = await writeComments(cfg, objectKey, trimmed);
   if (!saved) return NextResponse.json({ error: "comments storage write failed" }, { status: 502 });
   return NextResponse.json({ comments: trimmed }, { headers: { "Cache-Control": "no-store" } });

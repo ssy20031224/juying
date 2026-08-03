@@ -298,7 +298,13 @@ class AccountRepository(context: Context) {
             val epName = row["episodeName"]?.toString() ?: row["episode_name"]?.toString().orEmpty()
             val pos = (row["positionMs"] as? Number ?: row["position_ms"] as? Number)?.toLong() ?: 0L
             val dur = (row["durationMs"] as? Number ?: row["duration_ms"] as? Number)?.toLong() ?: 0L
-            val ts = (row["updatedAt"] as? Number ?: row["updated_at"] as? Number)?.toLong() ?: System.currentTimeMillis()
+            // 服务端 updated_at 为 unix 秒，转换为毫秒（老数据可能是毫秒，做一次范围判断）
+            val tsRaw = (row["updatedAt"] as? Number ?: row["updated_at"] as? Number)?.toLong() ?: 0L
+            val ts = when {
+                tsRaw > 0L && tsRaw < 10_000_000_000L -> tsRaw * 1000L
+                tsRaw > 0L -> tsRaw
+                else -> System.currentTimeMillis()
+            }
             HistoryItem(
                 item = item,
                 episodeName = epName,

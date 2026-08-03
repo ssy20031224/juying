@@ -108,6 +108,7 @@ export const comments = sqliteTable(
     mediaKey: text("media_key").notNull(),
     episodeKey: text("episode_key").notNull().default(""),
     text: text("text").notNull(),
+    imageUrl: text("image_url").notNull().default(""),
     parentId: text("parent_id"),
     replyToNick: text("reply_to_nick").notNull().default(""),
     createdAt: integer("created_at").notNull().default(now()),

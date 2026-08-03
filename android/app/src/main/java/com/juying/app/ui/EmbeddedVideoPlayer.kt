@@ -1802,6 +1802,8 @@ fun EmbeddedVideoPlayer(
                         }
 
                         // ── ROW 2: Play/Pause, NextEp, Danmaku, Line, Danmaku Input, SuperRes, Speed, Episodes ──
+                        // 竖屏（非全屏）时隐藏，只保留进度条；点画面可暂停/播放
+                        if (isFullscreen) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1949,6 +1951,7 @@ fun EmbeddedVideoPlayer(
                                 }
                             }
                         }
+                        } // end if (isFullscreen) ROW 2
                     }
                 }
             }
@@ -2508,10 +2511,13 @@ fun EmbeddedVideoPlayer(
                             if (text.isNotEmpty()) {
                                 val positionMs = currentPosition
                                 val mediaKey = danmakuMediaKey
-                                val episodeKey = danmakuEpisodeKey
+                                // 进入播放器时剧集列表可能仍在加载，danmakuEpisodeKey 参数为空；
+                                // 用播放器内的 episodes 列表兜底，仍为空时明确提示而不是静默丢弃。
+                                val episodeKey = danmakuEpisodeKey?.takeIf { it.isNotBlank() }
+                                    ?: episodes.getOrNull(currentEpisodeIndex)?.name.orEmpty()
                                 val colorHex = colorToHex(selectedDanmakuColor)
                                 // 同步到云端（记录本集发送时间点，供后续观看者回放）；失败不阻塞本地展示
-                                if (!mediaKey.isNullOrBlank() && !episodeKey.isNullOrBlank()) {
+                                if (!mediaKey.isNullOrBlank() && episodeKey.isNotBlank()) {
                                     playerScope.launch {
                                         val error = danmakuRepository.post(
                                             mediaKey = mediaKey,
@@ -2524,6 +2530,12 @@ fun EmbeddedVideoPlayer(
                                             Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
                                         }
                                     }
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "剧集信息未就绪，弹幕未能同步到云端（仅本地展示）",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
                                 }
                                 sentDanmaku.add(text)
                                 activeDanmakus.add(

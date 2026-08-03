@@ -6,9 +6,12 @@ import com.juying.app.engine.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.File
 
 data class CloudComment(
     val id: String = "",
@@ -17,6 +20,7 @@ data class CloudComment(
     val text: String = "",
     val ts: Long = 0L,
     val avatarUrl: String = "",
+    val imageUrl: String = "",
     val parentId: String? = null,
     val replyToNick: String? = null,
     val likesCount: Int = 0,
@@ -26,6 +30,11 @@ data class CloudComment(
 
 data class CommentPostResult(
     val comments: List<CloudComment>? = null,
+    val error: String? = null,
+)
+
+data class CommentImageResult(
+    val url: String? = null,
     val error: String? = null,
 )
 
@@ -64,7 +73,8 @@ class CommentRepository(context: Context) {
         text: String,
         avatarUrl: String = "",
         parentId: String? = null,
-        replyToNick: String? = null
+        replyToNick: String? = null,
+        imageUrl: String = ""
     ): CommentPostResult = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject()
@@ -76,6 +86,10 @@ class CommentRepository(context: Context) {
                         put("avatarUrl", avatarUrl)
                         put("avatar", avatarUrl)
                         put("avatar_url", avatarUrl)
+                    }
+                    if (imageUrl.isNotBlank()) {
+                        put("imageUrl", imageUrl)
+                        put("image_url", imageUrl)
                     }
                     if (!parentId.isNullOrBlank()) {
                         put("parentId", parentId)
@@ -112,6 +126,42 @@ class CommentRepository(context: Context) {
             }
         } catch (error: Exception) {
             CommentPostResult(error = error.message ?: "网络异常，评论发布失败")
+        }
+    }
+
+    /** 上传评论图片到 OSS，返回公开可访问的 URL */
+    suspend fun uploadImage(file: File): CommentImageResult = withContext(Dispatchers.IO) {
+        try {
+            val token = storage.getAuthToken()
+            if (token.isBlank()) return@withContext CommentImageResult(error = "请先“登录”后上传图片")
+            val mime = when (file.extension.lowercase()) {
+                "png" -> "image/png"
+                "webp" -> "image/webp"
+                "gif" -> "image/gif"
+                else -> "image/jpeg"
+            }
+            val multipart = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", file.name, file.asRequestBody(mime.toMediaType()))
+                .build()
+            val request = Request.Builder()
+                .url("$API_BASE/images")
+                .header("User-Agent", "juying Android")
+                .header("Authorization", "Bearer $token")
+                .post(multipart)
+                .build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val error = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
+                    return@withContext CommentImageResult(error = error.ifBlank { "图片上传失败（HTTP ${response.code}）" })
+                }
+                val url = runCatching { JSONObject(body).optString("url") }.getOrNull().orEmpty()
+                if (url.isBlank()) return@withContext CommentImageResult(error = "图片上传服务返回了空响应")
+                CommentImageResult(url = url)
+            }
+        } catch (error: Exception) {
+            CommentImageResult(error = error.message ?: "网络异常，图片上传失败")
         }
     }
 
@@ -179,10 +229,19 @@ class CommentRepository(context: Context) {
                 .ifBlank { userObj?.optString("avatar_url").orEmpty() }
                 .ifBlank { userObj?.optString("avatar").orEmpty() }
 
+            // org.json 对 JSON null 返回字符串 "null"，需要显式过滤
+            val imageUrl = obj.optString("imageUrl")
+                .ifBlank { obj.optString("image_url") }
+                .takeIf { it.isNotBlank() && it != "null" }
+                .orEmpty()
+
             val id = obj.optString("id").ifBlank { obj.optString("_id") }.ifBlank { "${obj.optString("nick")}_${obj.optLong("ts")}" }
             val userId = obj.optString("userId").ifBlank { obj.optString("user_id") }
-            val parentId = obj.optString("parentId").ifBlank { obj.optString("parent_id") }.ifBlank { null }
-            val replyToNick = obj.optString("replyToNick").ifBlank { obj.optString("reply_to_nick") }.ifBlank { null }
+            // Android org.json 的 optString 对 JSON null 会返回字符串 "null"，必须显式过滤
+            val parentId = obj.optString("parentId").takeIf { it.isNotBlank() && it != "null" }
+                ?: obj.optString("parent_id").takeIf { it.isNotBlank() && it != "null" }
+            val replyToNick = obj.optString("replyToNick").takeIf { it.isNotBlank() && it != "null" }
+                ?: obj.optString("reply_to_nick").takeIf { it.isNotBlank() && it != "null" }
             val likes = obj.optInt("likesCount", obj.optInt("likes_count", obj.optInt("likes", 0)))
             val liked = obj.optBoolean("likedByMe", obj.optBoolean("liked_by_me", false))
 
@@ -193,6 +252,7 @@ class CommentRepository(context: Context) {
                 text = text,
                 ts = obj.optLong("ts", 0L),
                 avatarUrl = avatarUrl,
+                imageUrl = imageUrl,
                 parentId = parentId,
                 replyToNick = replyToNick,
                 likesCount = likes,
