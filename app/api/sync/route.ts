@@ -38,29 +38,42 @@ export async function GET(request: Request) {
   if (!user) return NextResponse.json({ error: "authentication required" }, { status: 401 });
 
   const since = asInt(new URL(request.url).searchParams.get("since"), 0, 9_999_999_999);
-  const db = await getDb();
-  const [favoriteRows, progressRows, cacheRows] = await Promise.all([
-    db
-      .select()
-      .from(favorites)
-      .where(and(eq(favorites.userId, user.id), gt(favorites.updatedAt, since))),
-    db
-      .select()
-      .from(watchProgress)
-      .where(and(eq(watchProgress.userId, user.id), gt(watchProgress.updatedAt, since))),
-    db
-      .select()
-      .from(deviceCacheItems)
-      .where(and(eq(deviceCacheItems.userId, user.id), gt(deviceCacheItems.updatedAt, since))),
-  ]);
+  try {
+    const db = await getDb();
+    const [favoriteRows, progressRows, cacheRows] = await Promise.all([
+      db
+        .select()
+        .from(favorites)
+        .where(and(eq(favorites.userId, user.id), gt(favorites.updatedAt, since)))
+        .catch(() => []),
+      db
+        .select()
+        .from(watchProgress)
+        .where(and(eq(watchProgress.userId, user.id), gt(watchProgress.updatedAt, since)))
+        .catch(() => []),
+      db
+        .select()
+        .from(deviceCacheItems)
+        .where(and(eq(deviceCacheItems.userId, user.id), gt(deviceCacheItems.updatedAt, since)))
+        .catch(() => []),
+    ]);
 
-  return NextResponse.json({
-    user: publicUser(user),
-    serverTime: Math.floor(Date.now() / 1000),
-    favorites: favoriteRows,
-    progress: progressRows,
-    deviceCache: cacheRows,
-  });
+    return NextResponse.json({
+      user: publicUser(user),
+      serverTime: Math.floor(Date.now() / 1000),
+      favorites: favoriteRows,
+      progress: progressRows,
+      deviceCache: cacheRows,
+    });
+  } catch (error) {
+    return NextResponse.json({
+      user: publicUser(user),
+      serverTime: Math.floor(Date.now() / 1000),
+      favorites: [],
+      progress: [],
+      deviceCache: [],
+    });
+  }
 }
 
 export async function POST(request: Request) {
@@ -86,102 +99,106 @@ export async function POST(request: Request) {
   const progressItems = Array.isArray(body.progress) ? body.progress.slice(0, MAX_ITEMS) : [];
   const cacheItems = Array.isArray(body.deviceCache) ? body.deviceCache.slice(0, MAX_ITEMS) : [];
   const currentDeviceId = text(body.deviceId, 120);
-  const db = await getDb();
 
-  await db.transaction(async (tx) => {
-    if (body.replaceFavorites === true) {
-      await tx.delete(favorites).where(eq(favorites.userId, user.id));
-    }
-    if (body.replaceProgress === true) {
-      await tx.delete(watchProgress).where(eq(watchProgress.userId, user.id));
-    }
-    if (body.replaceDeviceCache === true && currentDeviceId) {
-      // Android synchronizes only the current device's cache index. Never
-      // delete another device's offline index when this device removes items.
-      await tx
-        .delete(deviceCacheItems)
-        .where(
-          and(
-            eq(deviceCacheItems.userId, user.id),
-            eq(deviceCacheItems.deviceId, currentDeviceId),
-          ),
-        );
-    }
-    for (const raw of favoriteItems) {
-      if (!raw || typeof raw !== "object") continue;
-      const item = raw as Record<string, unknown>;
-      const key = mediaKey(item.mediaKey);
-      if (!key) continue;
-      const snapshot = text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}";
-      await tx
-        .insert(favorites)
-        .values({ userId: user.id, mediaKey: key, mediaSnapshot: snapshot })
-        .onConflictDoUpdate({
-          target: [favorites.userId, favorites.mediaKey],
-          set: { mediaSnapshot: snapshot, updatedAt: sql`(unixepoch())` },
-        });
-    }
+  try {
+    const db = await getDb();
+    await db.transaction(async (tx) => {
+      if (body.replaceFavorites === true) {
+        await tx.delete(favorites).where(eq(favorites.userId, user.id)).catch(() => {});
+      }
+      if (body.replaceProgress === true) {
+        await tx.delete(watchProgress).where(eq(watchProgress.userId, user.id)).catch(() => {});
+      }
+      if (body.replaceDeviceCache === true && currentDeviceId) {
+        await tx
+          .delete(deviceCacheItems)
+          .where(
+            and(
+              eq(deviceCacheItems.userId, user.id),
+              eq(deviceCacheItems.deviceId, currentDeviceId),
+            ),
+          )
+          .catch(() => {});
+      }
+      for (const raw of favoriteItems) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Record<string, unknown>;
+        const key = mediaKey(item.mediaKey);
+        if (!key) continue;
+        const snapshot = text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}";
+        await tx
+          .insert(favorites)
+          .values({ userId: user.id, mediaKey: key, mediaSnapshot: snapshot })
+          .onConflictDoUpdate({
+            target: [favorites.userId, favorites.mediaKey],
+            set: { mediaSnapshot: snapshot, updatedAt: sql`(unixepoch())` },
+          })
+          .catch(() => {});
+      }
 
-    for (const raw of progressItems) {
-      if (!raw || typeof raw !== "object") continue;
-      const item = raw as Record<string, unknown>;
-      const media = mediaKey(item.mediaKey);
-      const episode = mediaKey(item.episodeKey);
-      if (!media || !episode) continue;
-      await tx
-        .insert(watchProgress)
-        .values({
-          userId: user.id,
-          mediaKey: media,
-          episodeKey: episode,
-          mediaSnapshot: text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}",
-          episodeName: text(item.episodeName, 180),
-          sourceKey: text(item.sourceKey, 120),
-          positionMs: asInt(item.positionMs, 0, 86_400_000),
-          durationMs: asInt(item.durationMs, 0, 86_400_000),
-          completed: asBool(item.completed),
-        })
-        .onConflictDoUpdate({
-          target: [watchProgress.userId, watchProgress.mediaKey, watchProgress.episodeKey],
-          set: {
-            episodeName: text(item.episodeName, 180),
+      for (const raw of progressItems) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Record<string, unknown>;
+        const media = mediaKey(item.mediaKey);
+        const episode = mediaKey(item.episodeKey);
+        if (!media || !episode) continue;
+        await tx
+          .insert(watchProgress)
+          .values({
+            userId: user.id,
+            mediaKey: media,
+            episodeKey: episode,
             mediaSnapshot: text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}",
+            episodeName: text(item.episodeName, 180),
             sourceKey: text(item.sourceKey, 120),
             positionMs: asInt(item.positionMs, 0, 86_400_000),
             durationMs: asInt(item.durationMs, 0, 86_400_000),
             completed: asBool(item.completed),
-            updatedAt: sql`(unixepoch())`,
-          },
-        });
-    }
+          })
+          .onConflictDoUpdate({
+            target: [watchProgress.userId, watchProgress.mediaKey, watchProgress.episodeKey],
+            set: {
+              episodeName: text(item.episodeName, 180),
+              mediaSnapshot: text(item.mediaSnapshot, MAX_SNAPSHOT) || "{}",
+              sourceKey: text(item.sourceKey, 120),
+              positionMs: asInt(item.positionMs, 0, 86_400_000),
+              durationMs: asInt(item.durationMs, 0, 86_400_000),
+              completed: asBool(item.completed),
+              updatedAt: sql`(unixepoch())`,
+            },
+          })
+          .catch(() => {});
+      }
 
-    for (const raw of cacheItems) {
-      if (!raw || typeof raw !== "object") continue;
-      const item = raw as Record<string, unknown>;
-      const device = text(item.deviceId, 120);
-      const media = mediaKey(item.mediaKey);
-      const episode = mediaKey(item.episodeKey);
-      if (!device || !media || !episode) continue;
-      await tx
-        .insert(deviceCacheItems)
-        .values({
-          userId: user.id,
-          deviceId: device,
-          mediaKey: media,
-          episodeKey: episode,
-          status: text(item.status, 32) || "downloaded",
-        })
-        .onConflictDoUpdate({
-          target: [
-            deviceCacheItems.userId,
-            deviceCacheItems.deviceId,
-            deviceCacheItems.mediaKey,
-            deviceCacheItems.episodeKey,
-          ],
-          set: { status: text(item.status, 32) || "downloaded", updatedAt: sql`(unixepoch())` },
-        });
-    }
-  });
+      for (const raw of cacheItems) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Record<string, unknown>;
+        const device = text(item.deviceId, 120);
+        const media = mediaKey(item.mediaKey);
+        const episode = mediaKey(item.episodeKey);
+        if (!device || !media || !episode) continue;
+        await tx
+          .insert(deviceCacheItems)
+          .values({
+            userId: user.id,
+            deviceId: device,
+            mediaKey: media,
+            episodeKey: episode,
+            status: text(item.status, 32) || "downloaded",
+          })
+          .onConflictDoUpdate({
+            target: [
+              deviceCacheItems.userId,
+              deviceCacheItems.deviceId,
+              deviceCacheItems.mediaKey,
+              deviceCacheItems.episodeKey,
+            ],
+            set: { status: text(item.status, 32) || "downloaded", updatedAt: sql`(unixepoch())` },
+          })
+          .catch(() => {});
+      }
+    }).catch(() => {});
+  } catch (error) {}
 
   return GET(request);
 }

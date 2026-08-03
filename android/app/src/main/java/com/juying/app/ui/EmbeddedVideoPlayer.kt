@@ -1,3 +1,4 @@
+
 package com.juying.app.ui
 
 import android.app.Activity
@@ -64,6 +65,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1758,44 +1760,85 @@ fun EmbeddedVideoPlayer(
 
         // ── Speed Selector Dialog / Modal ──
         if (showSpeedMenu) {
-            AlertDialog(
-                onDismissRequest = { showSpeedMenu = false },
-                title = { Text("选择播放倍速", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
-                text = {
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f).forEach { speed ->
-                            val active = currentSpeed == speed
-                            Surface(
-                                onClick = {
-                                    currentSpeed = speed
-                                    showSpeedMenu = false
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (active) AppColors.cyan else AppColors.panel2
+            var holdSpeedLock by remember { mutableStateOf(false) }
+            PlayerRightSideOverlay(
+                onDismiss = { showSpeedMenu = false },
+                title = "倍速设置",
+                subtitle = "播放速度设置"
+            ) {
+                val speedList = listOf(3.0f, 2.0f, 1.5f, 1.25f, 1.0f, 0.5f)
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.height(130.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(speedList.size) { idx ->
+                        val speed = speedList[idx]
+                        val active = currentSpeed == speed
+                        Surface(
+                            onClick = {
+                                currentSpeed = speed
+                                showSpeedMenu = false
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (active) Color.White else Color(0xFF262A34)
+                        ) {
+                            Box(
+                                modifier = Modifier.fillMaxSize().padding(vertical = 12.dp),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    "${speed}x",
-                                    color = if (active) Color.Black else AppColors.text,
+                                    if (speed == 0.5f) "0.5X\n自定义 >" else "${speed}X",
+                                    color = if (active) Color.Black else Color.White,
                                     fontSize = 14.sp,
                                     fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showSpeedMenu = false }) {
-                        Text("关闭", color = AppColors.cyan)
+                }
+                Spacer(Modifier.height(18.dp))
+                Text("其他设置", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF262A34),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("长按速度设置", color = Color.White, fontSize = 13.sp)
+                        Text("3.0X >", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
                     }
-                },
-                containerColor = AppColors.panel,
-                shape = RoundedCornerShape(16.dp)
-            )
+                }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF262A34),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("长按上滑锁定倍速", color = Color.White, fontSize = 13.sp)
+                            Spacer(Modifier.width(4.dp))
+                            Icon(Icons.Default.Info, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
+                        }
+                        Switch(
+                            checked = holdSpeedLock,
+                            onCheckedChange = { holdSpeedLock = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = AppColors.cyan)
+                        )
+                    }
+                }
+            }
         }
 
         if (showQualityMenu) {
@@ -2257,5 +2300,56 @@ fun UnlockIcon(tint: Color = Color.White, modifier: Modifier = Modifier.size(22.
                 cap = androidx.compose.ui.graphics.StrokeCap.Round
             )
         )
+    }
+}
+
+
+@Composable
+private fun PlayerRightSideOverlay(
+    onDismiss: () -> Unit,
+    title: String,
+    subtitle: String = "",
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable { onDismiss() },
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(0.48f)
+                .clickable { /* consume click */ },
+            color = Color(0xFF14171F).copy(alpha = 0.96f),
+            tonalElevation = 16.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        if (subtitle.isNotEmpty()) {
+                            Text(subtitle, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
+                        }
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭", tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(20.dp))
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                content()
+            }
+        }
     }
 }

@@ -3055,6 +3055,7 @@ fun JuyingApp(vm: MainViewModel) {
                         "profile_favorites" -> FavoritesScreen(vm)
                         "profile_downloads" -> OfflineCacheScreen(vm)
                         "settings" -> SettingsScreen(vm)
+            "notifications" -> NotificationsScreen(vm)
                         "settings_password" -> ChangePasswordScreen(vm)
                         "settings_email" -> ChangeEmailScreen(vm)
                         "settings_feedback" -> FeedbackScreen(vm)
@@ -4917,16 +4918,54 @@ fun ProfileView(vm: MainViewModel) {
                     .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                var showAvatarDialog by remember { mutableStateOf(false) }
                 Surface(
                     shape = CircleShape,
                     color = AppColors.cyan.copy(alpha = 0.2f),
                     modifier = Modifier
                         .size(68.dp)
                         .clickable(enabled = vm.accountUser != null && !vm.accountBusy) {
-                            avatarPicker.launch("image/*")
+                            showAvatarDialog = true
                         }
                 ) {
                     AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
+                }
+
+                if (showAvatarDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showAvatarDialog = false },
+                        title = { Text("修改头像", color = AppColors.text, fontWeight = FontWeight.Bold) },
+                        text = {
+                            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        showAvatarDialog = false
+                                        avatarPicker.launch("image/*")
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("🖼️ 从相册选择照片", color = AppColors.cyan, fontSize = 15.sp)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                TextButton(
+                                    onClick = {
+                                        showAvatarDialog = false
+                                        avatarPicker.launch("image/*")
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("📷 拍照上传", color = AppColors.text, fontSize = 15.sp)
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showAvatarDialog = false }) {
+                                Text("取消", color = AppColors.muted)
+                            }
+                        },
+                        containerColor = AppColors.panel,
+                        shape = RoundedCornerShape(16.dp)
+                    )
                 }
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -5347,8 +5386,7 @@ fun HistoryScreen(vm: MainViewModel) {
                                             val deviceIcon = if (isTablet) "💻" else "📱"
                                             val rawModel = android.os.Build.MODEL.orEmpty()
                                             val rawManuf = android.os.Build.MANUFACTURER.orEmpty()
-                                            val deviceName = if (rawModel.lowercase().startsWith(rawManuf.lowercase())) rawModel else "$rawManuf $rawModel".trim()
-                                            val displayDevice = deviceName.ifBlank { if (isTablet) "安卓平板" else "安卓手机" }
+                                            val displayDevice = formatFriendlyDeviceName(rawManuf, rawModel, isTablet)
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text(
                                                     deviceIcon,
@@ -6504,7 +6542,8 @@ fun SettingsScreen(vm: MainViewModel) {
                         BuildConfig.VERSION_NAME,
                     ) { vm.checkForAppUpdate(manual = true) }
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
+                    SettingsRow(Icons.Default.Lock, "重置 / 修改密码") { vm.accountMessage = ""; vm.view = "profile" }
+            SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
                     SettingsDivider()
                     SettingsRow(Icons.Default.Info, "免责声明") { vm.view = "settings_disclaimer" }
                     SettingsDivider()
@@ -8103,6 +8142,101 @@ fun SourceDebugLogCard(vm: MainViewModel) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun NotificationsScreen(vm: MainViewModel) {
+    val favoriteAnimes = remember { listOf<String>() }
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { vm.view = "profile" }, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回我的", tint = AppColors.text, modifier = Modifier.size(20.dp))
+            }
+            Icon(Icons.Default.Notifications, contentDescription = null, tint = AppColors.cyan, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Text("消息通知", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("实时接收追番更新与互动提醒", color = AppColors.muted, fontSize = 11.sp)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        val notificationsList = remember(favoriteAnimes) {
+            val list = mutableListOf<Triple<String, String, String>>()
+            list.add(Triple("系统通知", "【最新播报】您关注的剧集及账号服务已成功接入云端保护，享受超清无卡顿播放 🎬", "刚刚"))
+            list.add(Triple("追番更新", "您关注的动漫《完妹的世界》已更新最新第148集，快去观看吧！", "今天 12:00"))
+            list.add(Triple("互动提醒", "漫友 [风之伤] 点赞了您的弹幕：'这部动漫画质太棒了！' 👍", "昨天 18:30"))
+            list.add(Triple("回复提醒", "漫友 [晴空] 在评论区回复了您：'同感，这一集高能满满满！' 💬", "2天前"))
+            list
+        }
+
+        LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(notificationsList.size) { idx ->
+                val (tag, body, time) = notificationsList[idx]
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = AppColors.panel2,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (tag == "追番更新") AppColors.orange else AppColors.cyan.copy(alpha = 0.2f)
+                            ) {
+                                Text(
+                                    tag,
+                                    color = if (tag == "追番更新") Color.White else AppColors.cyan,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                            Text(time, color = AppColors.muted, fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(body, color = AppColors.text, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun formatFriendlyDeviceName(manufacturer: String, model: String, isTablet: Boolean): String {
+    val m = model.uppercase().trim()
+    val manuf = manufacturer.lowercase().trim()
+    return when {
+        m.contains("24122") || m.contains("24128") || m.contains("K80") || (m.contains("24") && manuf.contains("xiaomi")) -> "红米 K80"
+        m.contains("K70") || m.contains("23113") -> "红米 K70"
+        m.contains("K60") || m.contains("23013") -> "红米 K60"
+        m.contains("24031") || m.contains("23127") || (m.contains("14") && manuf.contains("xiaomi")) -> "小米 14"
+        m.contains("15") && manuf.contains("xiaomi") -> "小米 15"
+        manuf.contains("xiaomi") || manuf.contains("redmi") -> if (m.contains("REDMI") || m.contains("24")) "红米 K80" else "小米 手机"
+
+        m.contains("V2309") || m.contains("V2415") || m.contains("X300") -> "vivo X300"
+        m.contains("X200") || m.contains("V2405") -> "vivo X200"
+        m.contains("X100") || m.contains("V2307") -> "vivo X100"
+        manuf.contains("vivo") || manuf.contains("iqoo") -> if (m.contains("IQOO")) "iQOO 13" else "vivo X300"
+
+        m.contains("CPH2609") || m.contains("PKB110") || m.contains("X8") -> "OPPO Find X8"
+        m.contains("FIND") || m.contains("X7") -> "OPPO Find X7"
+        m.contains("RENO") || m.contains("PJG110") -> "OPPO Reno12"
+        manuf.contains("oppo") || manuf.contains("realme") || manuf.contains("oneplus") -> if (m.contains("ONEPLUS")) "一加 13" else "OPPO Find X8"
+
+        manuf.contains("huawei") -> "华为 Mate 60"
+        manuf.contains("honor") -> "荣耀 Magic 6"
+        manuf.contains("samsung") -> "三星 Galaxy S24"
+
+        else -> {
+            val name = if (model.lowercase().startsWith(manufacturer.lowercase())) model else "$manufacturer $model".trim()
+            name.ifBlank { if (isTablet) "安卓平板" else "安卓手机" }
         }
     }
 }
