@@ -2337,6 +2337,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastHistoryProgressWriteAt = now
         storageManager.addHistory(item, episodeName, positionMs, durationMs)
         historyList = storageManager.getHistory()
+        if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
+            syncAccountData()
+        }
     }
 
     private fun finishPlayResolutionWithError(message: String) {

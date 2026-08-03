@@ -282,25 +282,30 @@ class AccountRepository(context: Context) {
 
     private fun parseSync(jsonText: String): AccountSyncResult {
         val json = JSONObject(jsonText)
-        val remoteFavorites = gson.fromJson<List<Map<String, String>>>(
+        val remoteFavorites = gson.fromJson<List<Map<String, Any>>>(
             json.optJSONArray("favorites")?.toString() ?: "[]",
-            object : TypeToken<List<Map<String, String>>>() {}.type,
+            object : TypeToken<List<Map<String, Any>>>() {}.type,
         ).mapNotNull { row ->
-            runCatching { gson.fromJson(row["mediaSnapshot"] ?: "{}", SourceItem::class.java) }.getOrNull()
+            val snapshot = row["mediaSnapshot"]?.toString() ?: row["media_snapshot"]?.toString() ?: return@mapNotNull null
+            runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull()
         }
         val remoteHistory = gson.fromJson<List<Map<String, Any>>>(
             json.optJSONArray("progress")?.toString() ?: "[]",
             object : TypeToken<List<Map<String, Any>>>() {}.type,
         ).mapNotNull { row ->
-            val snapshot = row["mediaSnapshot"]?.toString() ?: return@mapNotNull null
+            val snapshot = row["mediaSnapshot"]?.toString() ?: row["media_snapshot"]?.toString() ?: return@mapNotNull null
             val item = runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull() ?: return@mapNotNull null
+            val epName = row["episodeName"]?.toString() ?: row["episode_name"]?.toString().orEmpty()
+            val pos = (row["positionMs"] as? Number ?: row["position_ms"] as? Number)?.toLong() ?: 0L
+            val dur = (row["durationMs"] as? Number ?: row["duration_ms"] as? Number)?.toLong() ?: 0L
+            val ts = (row["updatedAt"] as? Number ?: row["updated_at"] as? Number)?.toLong() ?: System.currentTimeMillis()
             HistoryItem(
                 item = item,
-                episodeName = row["episodeName"]?.toString().orEmpty(),
+                episodeName = epName,
                 playUrl = "",
-                timestamp = (row["updatedAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
-                positionMs = (row["positionMs"] as? Number)?.toLong() ?: 0L,
-                durationMs = (row["durationMs"] as? Number)?.toLong() ?: 0L
+                timestamp = ts,
+                positionMs = pos,
+                durationMs = dur
             )
         }
         val remoteDeviceCache = gson.fromJson<List<Map<String, Any>>>(
@@ -308,11 +313,11 @@ class AccountRepository(context: Context) {
             object : TypeToken<List<Map<String, Any>>>() {}.type,
         ).map { row ->
             CloudDeviceCacheItem(
-                deviceId = row["deviceId"]?.toString().orEmpty(),
-                mediaKey = row["mediaKey"]?.toString().orEmpty(),
-                episodeKey = row["episodeKey"]?.toString().orEmpty(),
+                deviceId = (row["deviceId"] ?: row["device_id"])?.toString().orEmpty(),
+                mediaKey = (row["mediaKey"] ?: row["media_key"])?.toString().orEmpty(),
+                episodeKey = (row["episodeKey"] ?: row["episode_key"])?.toString().orEmpty(),
                 status = row["status"]?.toString().orEmpty(),
-                updatedAt = ((row["updatedAt"] as? Number)?.toLong() ?: 0L) * 1000L,
+                updatedAt = (((row["updatedAt"] ?: row["updated_at"]) as? Number)?.toLong() ?: 0L) * 1000L,
             )
         }
         return AccountSyncResult(remoteFavorites, remoteHistory, remoteDeviceCache)

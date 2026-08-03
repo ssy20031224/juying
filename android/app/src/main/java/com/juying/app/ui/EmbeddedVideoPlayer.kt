@@ -46,6 +46,9 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -112,6 +115,14 @@ private const val BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleW
 private const val PLAYER_DIAG_TAG = "JuyingPlayerDiag"
 // TEMP: 弹幕发送暂时关闭；保留输入弹窗实现，后续接入授权外部弹幕 API 时恢复。
 private const val TEMP_DANMAKU_POSTING_DISABLED = true
+
+data class DanmakuItem(
+    val id: Long = System.nanoTime(),
+    val text: String,
+    val color: Color = Color.White,
+    val lineIndex: Int = 0,
+    val createdAt: Long = System.currentTimeMillis()
+)
 
 private fun Context.findActivity(): Activity? {
     var context = this
@@ -443,6 +454,20 @@ fun EmbeddedVideoPlayer(
     var showEpisodeDrawer by remember { mutableStateOf(false) }
     var showDanmakuInput by remember { mutableStateOf(false) }
 
+    val activeDanmakus = remember { mutableStateListOf<DanmakuItem>() }
+    val danmakuColorPalette = remember {
+        listOf(
+            Color(0xFFFFFFFF) to "白色",
+            Color(0xFFFF5252) to "红色",
+            Color(0xFFFFD600) to "黄色",
+            Color(0xFF00E676) to "绿色",
+            Color(0xFF40C4FF) to "蓝色",
+            Color(0xFFE040FB) to "紫色",
+            Color(0xFFFF9100) to "橙色"
+        )
+    }
+    var selectedDanmakuColor by remember { mutableStateOf(danmakuColorPalette[0].first) }
+
     // 长按手势状态：记录长按前的倍速（松手恢复），以及左侧快退回放的协程
     var speedBeforeHold by remember { mutableStateOf(1.0f) }
     var rewindJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -631,19 +656,6 @@ fun EmbeddedVideoPlayer(
                     if (playbackState == Player.STATE_READY) {
                         val mediaDuration = this@apply.duration.coerceAtLeast(0L)
                         duration = duration.coerceAtLeast(mediaDuration)
-                        // Some providers return a short, normally playable
-                        // “正在转码” clip instead of failing the request. Such
-                        // clips do not trigger onPlayerError, so recover at
-                        // the source layer when an episodic stream is only a
-                        // few seconds long.
-                        if (
-                            !shortPlaceholderReported &&
-                            episodes.size > 1 &&
-                            mediaDuration in 1L..20_000L
-                        ) {
-                            shortPlaceholderReported = true
-                            latestPlaceholderCallback()
-                        }
                     }
                 }
 
@@ -1046,6 +1058,7 @@ fun EmbeddedVideoPlayer(
 
                 detectDragGestures(
                     onDragStart = { offset ->
+                        if (holdGestureActive) return@detectDragGestures
                         dragGestureActive = true
                         stopHoldGesture()
                         startX = offset.x
@@ -1060,10 +1073,10 @@ fun EmbeddedVideoPlayer(
                         resumeAfterGestureSeek = exoPlayer.playWhenReady
                     },
                     onDrag = { change, amount ->
+                        if (holdGestureActive || isLocked || startedOnControls) return@detectDragGestures
                         change.consume()
                         totalX += amount.x
                         totalY += amount.y
-                        if (isLocked || startedOnControls) return@detectDragGestures
 
                         val width = size.width.coerceAtLeast(1)
                         dragAxis = PlayerInteractionPolicy.lockDragAxis(
@@ -1147,8 +1160,7 @@ fun EmbeddedVideoPlayer(
                     }
                 )
             }
-            // 长按手势（独立检测，支持松手回调）：
-            // 左侧长按 = 3X << 3倍速快退；右侧长按 = 3X >> 3倍速快进；松手后恢复长按前的状态。
+            // 长按手势（独立检测，支持松手回调与上下滑锁定/解锁）：
             .pointerInput(isLocked) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -1169,7 +1181,7 @@ fun EmbeddedVideoPlayer(
 
                     try {
                         if (holdLeft) {
-                            // 左侧长按：3X << 3倍速快退（保持播放器开启状态，避免出现暂停指示）
+                            // 左侧长按：3X << 3倍速快退
                             triggerHud("seek", -1, "3X <<", 0L)
                             rewindJob?.cancel()
                             rewindJob = playerScope.launch {
@@ -1183,8 +1195,8 @@ fun EmbeddedVideoPlayer(
                                 }
                             }
                         } else {
-                            // 右侧长按：触发长按倍速，向上滑动可锁定倍速
-                            var isSpeedLockedThisHold = false
+                            // 右侧长按：触发长按倍速，上滑锁定，下滑恢复1.0倍速
+                            var isSpeedLockedThisHold = isSpeedLocked
                             val startY = longPress.position.y
                             currentSpeed = longPressSpeed
                             triggerHud("speed", 1, "${String.format("%.1f", longPressSpeed)}X >> (上滑锁定)", 0L)
@@ -1196,7 +1208,12 @@ fun EmbeddedVideoPlayer(
                                 val diffY = startY - change.position.y
                                 if (diffY > 50f && !isSpeedLockedThisHold) {
                                     isSpeedLockedThisHold = true
+                                    isSpeedLocked = true
                                     triggerHud("speed", 1, "已锁定 ${String.format("%.1f", longPressSpeed)}X", 0L)
+                                } else if (diffY < -50f && isSpeedLockedThisHold) {
+                                    isSpeedLockedThisHold = false
+                                    isSpeedLocked = false
+                                    triggerHud("speed", 1, "已恢复1.0倍速", 1200L)
                                 }
                             }
 
@@ -1208,17 +1225,14 @@ fun EmbeddedVideoPlayer(
                         // 等待松手（或手势被取消）
                         waitForUpOrCancellation()
                     } finally {
-                        // Cancellation also reaches this path (orientation,
-                        // lock screen, background), so temporary speed/rewind
-                        // can never leak into the resumed player.
                         lastDragTime = System.currentTimeMillis()
                         stopHoldGesture()
                         if (isSpeedLocked) {
                             currentSpeed = longPressSpeed
                             triggerHud("speed", 1, "已锁定 ${String.format("%.1f", longPressSpeed)}X", 1800L)
                         } else {
-                            currentSpeed = speedBeforeHold
-                            triggerHud("speed", 0, "", 1L)
+                            currentSpeed = speedBeforeHold.coerceAtLeast(1.0f)
+                            triggerHud("speed", 0, "已恢复1.0倍速", 1200L)
                         }
                     }
                 }
@@ -1392,26 +1406,48 @@ fun EmbeddedVideoPlayer(
             }
         }
 
-        if (danmakuEnabled && sentDanmaku.isNotEmpty()) {
-            Column(
+        if (danmakuEnabled && activeDanmakus.isNotEmpty()) {
+            BoxWithConstraints(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 72.dp, end = 18.dp)
-                    .widthIn(max = 280.dp),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                    .fillMaxWidth()
+                    .height(if (isFullscreen) 240.dp else 160.dp)
+                    .padding(top = if (isFullscreen) 36.dp else 16.dp)
+                    .clipToBounds()
             ) {
-                sentDanmaku.takeLast(6).forEach { message ->
-                    Text(
-                        message,
-                        color = Color.White.copy(alpha = danmakuOpacity),
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.28f), CircleShape)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
+                val screenWidthPx = with(LocalDensity.current) { constraints.maxWidth.toFloat() }
+
+                activeDanmakus.forEach { danmaku ->
+                    key(danmaku.id) {
+                        var progress by remember { mutableFloatStateOf(0f) }
+                        val lineTopDp = (danmaku.lineIndex * 28).dp
+
+                        LaunchedEffect(danmaku.id) {
+                            val durationMs = 6500L
+                            val startTime = System.currentTimeMillis()
+                            while (progress < 1f) {
+                                val elapsed = System.currentTimeMillis() - startTime
+                                progress = (elapsed.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                                delay(16L)
+                            }
+                            activeDanmakus.remove(danmaku)
+                        }
+
+                        val translationX = with(LocalDensity.current) {
+                            (screenWidthPx * (1f - progress) - 280.dp.toPx() * progress).toDp()
+                        }
+
+                        Text(
+                            text = danmaku.text,
+                            color = danmaku.color.copy(alpha = danmakuOpacity),
+                            fontSize = (14 * danmakuFontSizeScale).sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .offset(x = translationX, y = lineTopDp)
+                                .background(Color.Black.copy(alpha = 0.40f * danmakuOpacity), CircleShape)
+                                .padding(horizontal = 10.dp, vertical = 3.dp)
+                        )
+                    }
                 }
             }
         }
@@ -2294,19 +2330,44 @@ fun EmbeddedVideoPlayer(
                 onDismissRequest = { showDanmakuInput = false },
                 title = { Text("发送弹幕", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                 text = {
-                    OutlinedTextField(
-                        value = danmakuDraft,
-                        onValueChange = { danmakuDraft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        placeholder = { Text("发送一条友善的弹幕吧~", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = AppColors.cyan,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
+                    Column {
+                        OutlinedTextField(
+                            value = danmakuDraft,
+                            onValueChange = { danmakuDraft = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            placeholder = { Text("发送一条友善的弹幕吧~", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = AppColors.cyan,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
+                            )
                         )
-                    )
+                        Spacer(Modifier.height(12.dp))
+                        Text("弹幕颜色", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            danmakuColorPalette.forEach { (color, _) ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(color)
+                                        .border(
+                                            width = if (selectedDanmakuColor == color) 2.5.dp else 0.dp,
+                                            color = if (selectedDanmakuColor == color) AppColors.cyan else Color.Transparent,
+                                            shape = CircleShape
+                                        )
+                                        .clickable { selectedDanmakuColor = color }
+                                )
+                            }
+                        }
+                    }
                 },
                 confirmButton = {
                     TextButton(
@@ -2314,6 +2375,13 @@ fun EmbeddedVideoPlayer(
                             val text = danmakuDraft.trim()
                             if (text.isNotEmpty()) {
                                 sentDanmaku.add(text)
+                                activeDanmakus.add(
+                                    DanmakuItem(
+                                        text = text,
+                                        color = selectedDanmakuColor,
+                                        lineIndex = (activeDanmakus.size % 5)
+                                    )
+                                )
                                 danmakuDraft = ""
                                 showDanmakuInput = false
                                 if (!danmakuEnabled) danmakuEnabled = true
