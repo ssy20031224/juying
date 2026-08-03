@@ -296,6 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Cloud account state. Anonymous local storage remains the default.
     var accountUser by mutableStateOf<AccountUser?>(null)
     var accountBusy by mutableStateOf(false)
+    var accountDialogVisible by mutableStateOf(false)
     var accountMessage by mutableStateOf("")
     var accountCodeCooldownSeconds by mutableIntStateOf(0)
         private set
@@ -950,10 +951,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isEmpty() || commentPosting) return
         val detail = displayedDetail ?: activeDetail ?: return
         val key = commentMediaKey(detail.item)
-        val nick = commentNick.ifBlank { storageManager.getCommentNick() }
+        val userNick = accountUser?.nickname?.ifBlank { accountUser?.email?.substringBefore('@') }
+        val nick = userNick?.ifBlank { null } ?: commentNick.ifBlank { storageManager.getCommentNick() }
+        val avatarUrl = accountUser?.avatarUrl.orEmpty()
         viewModelScope.launch {
             commentPosting = true
-            val result = commentRepository.post(key, nick, text)
+            val result = commentRepository.post(key, nick, text, avatarUrl)
             val remote = result.comments
             if (remote != null) {
                 commentDraft = ""
@@ -3157,6 +3160,10 @@ fun JuyingApp(vm: MainViewModel) {
                 }
             }
 
+            if (vm.accountDialogVisible) {
+                AccountDialog(vm) { vm.accountDialogVisible = false }
+            }
+
             if (vm.announcementDialogVisible && !vm.updateDialogVisible) {
                 vm.announcement?.let { notice ->
                     AlertDialog(
@@ -3775,6 +3782,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         vm.recoverFromLikelyTranscodingPlaceholder()
                     },
                     onFullscreenChanged = { playerFullscreen = it },
+                    onNavigateToLogin = { vm.accountDialogVisible = true },
                     onPlaybackProgress = { positionMs, durationMs ->
                         vm.updatePlaybackProgress(
                             item = detail.item,
@@ -4175,16 +4183,24 @@ fun PlayerViewScreen(vm: MainViewModel) {
             Column(Modifier.fillMaxSize().padding(16.dp)) {
                 if (vm.accountUser == null) {
                     Surface(
-                        color = AppColors.cyan.copy(alpha = 0.10f),
+                        color = AppColors.cyan.copy(alpha = 0.12f),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
                     ) {
-                        Text(
-                            "登录后即可发表评论；未登录仍可浏览全部评论。",
-                            color = AppColors.muted,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("请先“登录”后发表评论", color = AppColors.text, fontSize = 13.sp)
+                            Button(
+                                onClick = { vm.accountDialogVisible = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("登录", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        }
                     }
                 } else {
                     Row(
@@ -4222,15 +4238,10 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                     modifier = Modifier.padding(12.dp),
                                     verticalAlignment = Alignment.Top
                                 ) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = AppColors.cyan.copy(alpha = 0.2f),
+                                    AccountAvatar(
+                                        avatarUrl = comment.avatarUrl,
                                         modifier = Modifier.size(36.dp)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text("👤", fontSize = 18.sp)
-                                        }
-                                    }
+                                    )
                                     Spacer(Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(

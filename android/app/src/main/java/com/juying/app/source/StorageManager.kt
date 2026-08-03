@@ -220,4 +220,10 @@ class StorageManager(context: Context) {
     fun dismissAnnouncementUntil(id: String, until: Long) {
         prefs.edit().putLong("announcement_dismissed_until_$id", until).apply()
     }
+
+    fun getLongPressSpeed(): Float = prefs.getFloat("long_press_speed", 3.0f)
+    fun setLongPressSpeed(speed: Float) { prefs.edit().putFloat("long_press_speed", speed.coerceIn(0.25f, 4.0f)).apply() }
+
+    fun getCustomSpeed(): Float = prefs.getFloat("custom_speed", 1.0f)
+    fun setCustomSpeed(speed: Float) { prefs.edit().putFloat("custom_speed", speed.coerceIn(0.25f, 4.0f)).apply() }
 }

@@ -13,7 +13,8 @@ import org.json.JSONObject
 data class CloudComment(
     val nick: String,
     val text: String,
-    val ts: Long = 0L
+    val ts: Long = 0L,
+    val avatarUrl: String = ""
 )
 
 data class CommentPostResult(
@@ -49,12 +50,19 @@ class CommentRepository(context: Context) {
         }
     }
 
-    suspend fun post(mediaKey: String, nick: String, text: String): CommentPostResult = withContext(Dispatchers.IO) {
+    suspend fun post(mediaKey: String, nick: String, text: String, avatarUrl: String = ""): CommentPostResult = withContext(Dispatchers.IO) {
         try {
             val payload = JSONObject()
                 .put("media", mediaKey)
                 .put("nick", nick)
                 .put("text", text)
+                .apply {
+                    if (avatarUrl.isNotBlank()) {
+                        put("avatarUrl", avatarUrl)
+                        put("avatar", avatarUrl)
+                        put("avatar_url", avatarUrl)
+                    }
+                }
                 .toString()
                 .toRequestBody("application/json; charset=utf-8".toMediaType())
             val builder = Request.Builder()
@@ -91,10 +99,14 @@ class CommentRepository(context: Context) {
             val obj = array.optJSONObject(index) ?: continue
             val text = obj.optString("text").trim()
             if (text.isEmpty()) continue
+            val avatarUrl = obj.optString("avatarUrl")
+                .ifBlank { obj.optString("avatar") }
+                .ifBlank { obj.optString("avatar_url") }
             list += CloudComment(
                 nick = obj.optString("nick").ifBlank { "漫友" },
                 text = text,
-                ts = obj.optLong("ts", 0L)
+                ts = obj.optLong("ts", 0L),
+                avatarUrl = avatarUrl
             )
         }
         return list
