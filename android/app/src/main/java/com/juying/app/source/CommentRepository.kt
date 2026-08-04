@@ -218,7 +218,12 @@ class CommentRepository(context: Context) {
         for (index in 0 until array.length()) {
             val obj = array.optJSONObject(index) ?: continue
             val text = obj.optString("text").trim()
-            if (text.isEmpty()) continue
+            // 纯图片评论 text 为空，但 image_url 非空时仍应展示
+            val imageUrl = obj.optString("imageUrl")
+                .ifBlank { obj.optString("image_url") }
+                .takeIf { it.isNotBlank() && it != "null" }
+                .orEmpty()
+            if (text.isEmpty() && imageUrl.isEmpty()) continue
 
             val userObj = obj.optJSONObject("user")
             val avatarUrl = obj.optString("avatarUrl")
@@ -228,12 +233,6 @@ class CommentRepository(context: Context) {
                 .ifBlank { userObj?.optString("avatarUrl").orEmpty() }
                 .ifBlank { userObj?.optString("avatar_url").orEmpty() }
                 .ifBlank { userObj?.optString("avatar").orEmpty() }
-
-            // org.json 对 JSON null 返回字符串 "null"，需要显式过滤
-            val imageUrl = obj.optString("imageUrl")
-                .ifBlank { obj.optString("image_url") }
-                .takeIf { it.isNotBlank() && it != "null" }
-                .orEmpty()
 
             val id = obj.optString("id").ifBlank { obj.optString("_id") }.ifBlank { "${obj.optString("nick")}_${obj.optLong("ts")}" }
             val userId = obj.optString("userId").ifBlank { obj.optString("user_id") }

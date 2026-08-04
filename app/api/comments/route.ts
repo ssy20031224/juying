@@ -79,7 +79,10 @@ async function readComments(cfg: OssConfig, objectKey: string): Promise<CloudCom
     const data = (await response.json()) as { comments?: unknown };
     if (!Array.isArray(data?.comments)) return [];
     return (data.comments as CloudComment[]).filter(
-      (item) => item && typeof item.text === "string" && item.text.trim().length > 0,
+      (item) =>
+        item &&
+        ((typeof item.text === "string" && item.text.trim().length > 0) ||
+          (typeof item.imageUrl === "string" && item.imageUrl.trim().length > 0)),
     );
   } catch {
     return [];
@@ -202,7 +205,7 @@ async function writeDbComment(
         userId: parentAuthorId,
         type: "comment_reply",
         title: "评论回复提醒",
-        body: `@${String(replyAuthorNick || "").trim().slice(0, MAX_NICK_LEN) || "漫友"} 回复了你：${text.slice(0, 50)}`,
+        body: `@${String(replyAuthorNick || "").trim().slice(0, MAX_NICK_LEN) || "漫友"} 回复了你：${(text || "分享了一张图片").slice(0, 50)}`,
         mediaKey: media,
         commentId: validParentId,
       });
@@ -244,13 +247,16 @@ export async function POST(request: Request) {
 
   const media = sanitizeMediaKey(String(body.media || ""));
   const text = String(body.text || "").trim().slice(0, MAX_TEXT_LEN);
-  if (!media || !text) return NextResponse.json({ error: "missing media or text" }, { status: 400 });
+  const imageUrl = sanitizeImageUrl(body.imageUrl);
+  // 允许纯图片评论（text 为空但 imageUrl 非空）
+  if (!media || (!text && !imageUrl)) {
+    return NextResponse.json({ error: "missing media or text" }, { status: 400 });
+  }
 
   const currentUser = await getCurrentUser(request);
   if (!currentUser && process.env.COMMENTS_REQUIRE_ACCOUNT !== "false") {
     return NextResponse.json({ error: "authentication required" }, { status: 401 });
   }
-  const imageUrl = sanitizeImageUrl(body.imageUrl);
   if (currentUser) {
     try {
       const comments = await writeDbComment(

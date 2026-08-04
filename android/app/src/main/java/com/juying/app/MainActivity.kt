@@ -20,6 +20,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.window.Dialog
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -72,6 +73,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.core.content.FileProvider
+import com.yalantis.ucrop.UCrop
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -211,9 +214,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val gson = Gson()
     private var commentsLoadedFor: String? = null
     private var isAppInitialized = false
-    private var notificationPromptShownThisSession = false
     private var playerReturnView = "home"
     private var pendingEpisodeName: String? = null
+    // 拍照返回时 Activity 可能被重建（remember 状态丢失），故放入 ViewModel 暂存
+    var pendingAvatarPhotoUri: Uri? = null
     private data class PlayerNavigationState(
         val activeDetail: DetailResult?,
         val currentEpisodeIndex: Int,
@@ -339,22 +343,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── 消息通知（追番更新 / 评论回复）──
     var notifications by mutableStateOf<List<CloudNotification>>(emptyList())
         private set
-    var notificationPromptVisible by mutableStateOf(false)
-        private set
     val unreadNotificationCount: Int
         get() = notifications.count { !it.read }
 
     fun openNotificationsScreen() {
-        notificationPromptVisible = false
         view = "notifications"
         viewModelScope.launch {
             val fresh = notificationRepository.load()
             if (fresh != null) notifications = fresh
         }
-    }
-
-    fun dismissNotificationPrompt() {
-        notificationPromptVisible = false
     }
 
     fun closeNotificationsScreen() {
@@ -370,10 +367,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val fresh = runCatching { notificationRepository.load() }.getOrNull() ?: return@launch
             notifications = fresh
-            if (fresh.any { !it.read } && !notificationPromptShownThisSession) {
-                notificationPromptShownThisSession = true
-                notificationPromptVisible = true
-            }
         }
     }
 
@@ -405,10 +398,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             val fresh = notificationRepository.load()
             if (fresh != null) notifications = fresh
-            if (notifications.any { !it.read } && !notificationPromptShownThisSession) {
-                notificationPromptShownThisSession = true
-                notificationPromptVisible = true
-            }
         }
     }
 
@@ -903,6 +892,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 lanercSchedule = snapshot.schedule
                 lanercSeasons = snapshot.seasons
+                // lanerc 只给季度新番提供评分，其余条目（如新开播的当前季新番）
+                // 异步用 bgm.tv 补全，不阻塞刷新提示
+                viewModelScope.launch {
+                    val enriched = enrichSeasonScores(snapshot.seasons)
+                    if (enriched != snapshot.seasons) lanercSeasons = enriched
+                }
                 lanercDiscoveryUpdatedAt = snapshot.fetchedAt
                 lanercDiscoveryError = null
                 if (force) {
@@ -1009,7 +1004,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // metadata; this never participates in playback resolution.
             val metadataByTitle = withContext(Dispatchers.IO) {
                 coroutineScope {
-                    sourceEnriched
+                    (sourceEnriched + baseline)
                         .groupBy { normalizeDiscoveryTitle(it.item.title) }
                         .entries
                         .sortedWith(
@@ -1039,6 +1034,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .filter { matchesAnimeRankingCategory(it.item, it.sourceSection, category) }
                 .distinctBy { normalizeDiscoveryTitle(it.item.title) }
+            // lanerc 分类接口不带评分，baseline 排在前面的热门作品单独查 bgm.tv 补全
+            val baselineScoresByTitle = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    baseline.filter { it.item.score.isBlank() }
+                        .take(24)
+                        .map { entry ->
+                            async {
+                                entry.item.title to runCatching {
+                                    animeMetadataRepository.lookup(entry.item.title)
+                                }.getOrNull()
+                            }
+                        }
+                        .awaitAll()
+                        .mapNotNull { (title, metadata) ->
+                            metadata?.takeIf { it.score.isNotBlank() }?.let {
+                                normalizeDiscoveryTitle(title) to it
+                            }
+                        }
+                        .toMap()
+                }
+            }
             val realScoresByTitle = (baseline + fetched)
                 .mapNotNull { entry ->
                     entry.item.score.toDoubleOrNull()?.takeIf { it > 0.0 }?.let {
@@ -1049,10 +1065,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val finalEntries = (baseline + fetched)
                 .distinctBy { normalizeDiscoveryTitle(it.item.title) }
                 .map { entry ->
-                    val score = realScoresByTitle[normalizeDiscoveryTitle(entry.item.title)].orEmpty()
-                    if (entry.item.score.isBlank() && score.isNotBlank()) {
-                        entry.copy(item = entry.item.copy(score = score))
-                    } else entry
+                    val titleKey = normalizeDiscoveryTitle(entry.item.title)
+                    // lanerc filter 接口无评分，用 bgm.tv 元数据补全
+                    val withMetadata = (metadataByTitle[titleKey] ?: baselineScoresByTitle[titleKey])?.let { metadata ->
+                        if (entry.item.score.isBlank()) {
+                            entry.copy(item = mergeAnimeMetadata(entry.item, metadata))
+                        } else entry
+                    } ?: entry
+                    val score = realScoresByTitle[titleKey].orEmpty()
+                    if (withMetadata.item.score.isBlank() && score.isNotBlank()) {
+                        withMetadata.copy(item = withMetadata.item.copy(score = score))
+                    } else withMetadata
                 }
             discoverySnapshot?.let { snapshot ->
                 lanercRankings = snapshot.rankings
@@ -1069,6 +1092,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             animeCategoryRankingJobs.remove(category)
         }
     }
+
+    /** 为无评分的季度新番条目异步补全 bgm.tv 评分（每季限量，避免拖慢刷新） */
+    private suspend fun enrichSeasonScores(seasons: List<SeasonalRecommendation>): List<SeasonalRecommendation> =
+        withContext(Dispatchers.IO) {
+            coroutineScope {
+                seasons.map { season ->
+                    async {
+                        season.copy(
+                            entries = season.entries.mapIndexed { index, entry ->
+                                if (entry.item.score.isNotBlank() || index >= 25) {
+                                    entry
+                                } else {
+                                    val metadata = runCatching {
+                                        animeMetadataRepository.lookup(entry.item.title)
+                                    }.getOrNull()
+                                    if (metadata != null && metadata.score.isNotBlank()) {
+                                        entry.copy(item = entry.item.copy(score = metadata.score))
+                                    } else entry
+                                }
+                            }
+                        )
+                    }
+                }.awaitAll()
+            }
+        }
 
     private fun mergeRankingMetadata(summary: SourceItem, detail: SourceItem): SourceItem = summary.copy(
         title = detail.title.ifBlank { summary.title },
@@ -1126,7 +1174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val text = commentDraft.trim()
-        if (text.isEmpty() || commentPosting) return
+        if ((text.isEmpty() && commentImageUrl.isEmpty()) || commentPosting) return
         val detail = displayedDetail ?: activeDetail ?: return
         val key = commentMediaKey(detail.item)
         val userNick = accountUser?.nickname?.ifBlank { accountUser?.email?.substringBefore('@') }
@@ -4577,73 +4625,87 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                "😀",
-                                fontSize = 20.sp,
+                            Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { showEmojiPanel = !showEmojiPanel }
-                                    .padding(horizontal = 4.dp, vertical = 4.dp)
-                            )
-                            OutlinedTextField(
-                                value = vm.commentDraft,
-                                onValueChange = { vm.commentDraft = it.take(200) },
-                                modifier = Modifier.weight(1f),
-                                placeholder = {
-                                    Text(
-                                        if (replyTarget != null) "回复 @${replyTarget.nick}" else "友善评论，分享你的观后感",
-                                        maxLines = 1
-                                    )
-                                },
-                                singleLine = true
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            when {
-                                vm.commentImageUploading -> {
-                                    Text("上传中…", color = AppColors.muted, fontSize = 11.sp)
-                                }
-                                vm.commentImageUrl.isNotEmpty() -> {
-                                    Box {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(LocalContext.current)
-                                                .data(vm.commentImageUrl)
-                                                .crossfade(true)
-                                                .build(),
-                                            contentDescription = "评论图片",
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .size(34.dp)
-                                                .clip(RoundedCornerShape(6.dp))
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(22.dp))
+                                    .background(AppColors.panel2)
+                                    .padding(start = 12.dp, end = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(Modifier.weight(1f)) {
+                                    if (vm.commentDraft.isEmpty()) {
+                                        Text(
+                                            if (replyTarget != null) "回复 @${replyTarget.nick}" else "友善评论，分享你的观后感",
+                                            color = AppColors.muted,
+                                            fontSize = 14.sp,
+                                            maxLines = 1
                                         )
-                                        Box(
-                                            modifier = Modifier
-                                                .size(16.dp)
-                                                .align(Alignment.TopEnd)
-                                                .clip(CircleShape)
-                                                .background(Color.Black.copy(alpha = 0.7f))
-                                                .clickable { vm.commentImageUrl = "" }
-                                                .padding(2.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text("×", color = Color.White, fontSize = 11.sp)
+                                    }
+                                    BasicTextField(
+                                        value = vm.commentDraft,
+                                        onValueChange = { vm.commentDraft = it.take(200) },
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                        singleLine = true,
+                                        textStyle = TextStyle(color = AppColors.text, fontSize = 15.sp),
+                                        cursorBrush = SolidColor(AppColors.cyan)
+                                    )
+                                }
+                                Text(
+                                    "😀",
+                                    fontSize = 18.sp,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showEmojiPanel = !showEmojiPanel }
+                                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                                )
+                                when {
+                                    vm.commentImageUploading -> {
+                                        Text("上传中…", color = AppColors.muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
+                                    }
+                                    vm.commentImageUrl.isNotEmpty() -> {
+                                        Box(Modifier.padding(horizontal = 4.dp)) {
+                                            AsyncImage(
+                                                model = ImageRequest.Builder(LocalContext.current)
+                                                    .data(vm.commentImageUrl)
+                                                    .crossfade(true)
+                                                    .build(),
+                                                contentDescription = "评论图片",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(RoundedCornerShape(6.dp))
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .align(Alignment.TopEnd)
+                                                    .clip(CircleShape)
+                                                    .background(Color.Black.copy(alpha = 0.7f))
+                                                    .clickable { vm.commentImageUrl = "" }
+                                                    .padding(2.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text("×", color = Color.White, fontSize = 11.sp)
+                                            }
                                         }
                                     }
-                                }
-                                else -> {
-                                    Text(
-                                        "📷",
-                                        fontSize = 18.sp,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable { commentImagePicker.launch("image/*") }
-                                            .padding(horizontal = 4.dp, vertical = 4.dp)
-                                    )
+                                    else -> {
+                                        Text(
+                                            "🖼️",
+                                            fontSize = 18.sp,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { commentImagePicker.launch("image/*") }
+                                                .padding(horizontal = 6.dp, vertical = 6.dp)
+                                        )
+                                    }
                                 }
                             }
                             Spacer(Modifier.width(8.dp))
                             Button(
                                 onClick = vm::addComment,
-                                enabled = vm.commentDraft.trim().isNotEmpty() && !vm.commentPosting,
+                                enabled = (vm.commentDraft.trim().isNotEmpty() || vm.commentImageUrl.isNotEmpty()) && !vm.commentPosting,
                                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan)
                             ) { Text(if (vm.commentPosting) "发布中" else "发布") }
                         }
@@ -4763,6 +4825,34 @@ private fun CommentActionRow(
     }
 }
 
+/** 点击评论图片后全屏查看，点击任意处关闭 */
+@Composable
+private fun CommentImageViewer(url: String?, onDismiss: () -> Unit) {
+    if (url.isNullOrBlank()) return
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.92f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(url)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = "评论图片大图",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().padding(12.dp)
+            )
+        }
+    }
+}
+
 @Composable
 private fun CommentReplyRow(
     reply: CloudComment,
@@ -4770,6 +4860,7 @@ private fun CommentReplyRow(
     onLike: () -> Unit,
     onDelete: () -> Unit
 ) {
+    var previewUrl by remember { mutableStateOf<String?>(null) }
     Row(verticalAlignment = Alignment.Top) {
         AccountAvatar(avatarUrl = reply.avatarUrl, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(8.dp))
@@ -4802,6 +4893,7 @@ private fun CommentReplyRow(
                         .fillMaxWidth(0.6f)
                         .height(120.dp)
                         .clip(RoundedCornerShape(8.dp))
+                        .clickable { previewUrl = reply.imageUrl }
                 )
             }
             Spacer(Modifier.height(4.dp))
@@ -4815,6 +4907,7 @@ private fun CommentReplyRow(
             )
         }
     }
+    CommentImageViewer(previewUrl, onDismiss = { previewUrl = null })
 }
 
 @Composable
@@ -4825,6 +4918,7 @@ private fun CommentCard(
     onReply: (CloudComment) -> Unit,
     onDelete: (CloudComment) -> Unit
 ) {
+    var previewUrl by remember { mutableStateOf<String?>(null) }
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
@@ -4863,6 +4957,7 @@ private fun CommentCard(
                                 .fillMaxWidth(0.6f)
                                 .height(140.dp)
                                 .clip(RoundedCornerShape(8.dp))
+                                .clickable { previewUrl = comment.imageUrl }
                         )
                     }
                     Spacer(Modifier.height(6.dp))
@@ -4899,6 +4994,7 @@ private fun CommentCard(
             }
         }
     }
+    CommentImageViewer(previewUrl, onDismiss = { previewUrl = null })
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -5503,12 +5599,52 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     }
 }
 
+private class AvatarCropActions(
+    val pickFromGallery: () -> Unit,
+    val takePhoto: () -> Unit
+)
+
+/** 相册/拍照 → UCrop 1:1 裁剪 → 回调裁剪后的 Uri（app cache 内临时文件） */
+@Composable
+private fun rememberAvatarCropActions(vm: MainViewModel, onCropped: (Uri) -> Unit): AvatarCropActions {
+    val context = LocalContext.current
+
+    val cropLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            UCrop.getOutput(result.data!!)?.let(onCropped)
+        }
+    }
+    fun startCrop(source: Uri) {
+        val dest = File(context.cacheDir, "avatar_crop_${System.currentTimeMillis()}.jpg")
+        cropLauncher.launch(
+            UCrop.of(source, Uri.fromFile(dest))
+                .withAspectRatio(1f, 1f)
+                .withMaxResultSize(1024, 1024)
+                .getIntent(context)
+        )
+    }
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) startCrop(uri)
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val photoUri = vm.pendingAvatarPhotoUri
+        vm.pendingAvatarPhotoUri = null
+        if (success && photoUri != null) startCrop(photoUri)
+    }
+    return AvatarCropActions(
+        pickFromGallery = { galleryLauncher.launch("image/*") },
+        takePhoto = {
+            val photoFile = File(context.cacheDir, "avatar_photo_${System.currentTimeMillis()}.jpg")
+            val photoUri = FileProvider.getUriForFile(context, "${context.packageName}.update.fileprovider", photoFile)
+            vm.pendingAvatarPhotoUri = photoUri
+            cameraLauncher.launch(photoUri)
+        }
+    )
+}
+
 @Composable
 fun ProfileView(vm: MainViewModel) {
     var accountDialogVisible by remember { mutableStateOf(false) }
-    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) vm.uploadAccountAvatar(uri)
-    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -5550,6 +5686,7 @@ fun ProfileView(vm: MainViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 var showAvatarDialog by remember { mutableStateOf(false) }
+                val avatarActions = rememberAvatarCropActions(vm) { uri -> vm.uploadAccountAvatar(uri) }
                 Surface(
                     shape = CircleShape,
                     color = AppColors.cyan.copy(alpha = 0.2f),
@@ -5563,40 +5700,51 @@ fun ProfileView(vm: MainViewModel) {
                 }
 
                 if (showAvatarDialog) {
-                    AlertDialog(
+                    Dialog(
                         onDismissRequest = { showAvatarDialog = false },
-                        title = { Text("修改头像", color = AppColors.text, fontWeight = FontWeight.Bold) },
-                        text = {
-                            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = AppColors.panel,
+                            modifier = Modifier.width(260.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(vertical = 10.dp)) {
+                                Text(
+                                    "修改头像",
+                                    color = AppColors.text,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                )
                                 TextButton(
                                     onClick = {
                                         showAvatarDialog = false
-                                        avatarPicker.launch("image/*")
+                                        avatarActions.pickFromGallery()
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text("🖼️ 从相册选择照片", color = AppColors.cyan, fontSize = 15.sp)
+                                    Text("🖼️ 从相册选择", color = AppColors.cyan, fontSize = 15.sp)
                                 }
-                                Spacer(Modifier.height(4.dp))
                                 TextButton(
                                     onClick = {
                                         showAvatarDialog = false
-                                        avatarPicker.launch("image/*")
+                                        avatarActions.takePhoto()
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text("📷 拍照上传", color = AppColors.text, fontSize = 15.sp)
                                 }
+                                TextButton(
+                                    onClick = { showAvatarDialog = false },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("取消", color = AppColors.muted, fontSize = 14.sp)
+                                }
                             }
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { showAvatarDialog = false }) {
-                                Text("取消", color = AppColors.muted)
-                            }
-                        },
-                        containerColor = AppColors.panel,
-                        shape = RoundedCornerShape(16.dp)
-                    )
+                        }
+                    }
                 }
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -5813,42 +5961,6 @@ fun ProfileView(vm: MainViewModel) {
     }
     if (accountDialogVisible) {
         AccountDialog(vm) { accountDialogVisible = false }
-    }
-    if (vm.notificationPromptVisible) {
-        AlertDialog(
-            onDismissRequest = { vm.dismissNotificationPrompt() },
-            title = { Text("消息提醒", color = AppColors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        "您有 ${vm.unreadNotificationCount} 条新消息",
-                        color = AppColors.text,
-                        fontSize = 14.sp
-                    )
-                    vm.notifications.firstOrNull { !it.read }?.let { latest ->
-                        Text(
-                            latest.body,
-                            color = AppColors.muted,
-                            fontSize = 13.sp,
-                            maxLines = 3,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { vm.openNotificationsScreen() }) {
-                    Text("查看", color = AppColors.cyan, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { vm.dismissNotificationPrompt() }) {
-                    Text("知道了", color = AppColors.muted)
-                }
-            },
-            containerColor = AppColors.panel,
-            shape = RoundedCornerShape(16.dp)
-        )
     }
 }
 
@@ -6933,9 +7045,7 @@ private fun LegacySettingsScreen(vm: MainViewModel) {
     var nicknameInput by remember(vm.accountUser?.nickname) {
         mutableStateOf(vm.accountUser?.nickname.orEmpty())
     }
-    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) vm.uploadAccountAvatar(uri)
-    }
+    val avatarActions = rememberAvatarCropActions(vm) { uri -> vm.uploadAccountAvatar(uri) }
 
     var oldPassInput by remember { mutableStateOf("") }
     var newPassInput by remember { mutableStateOf("") }
@@ -7121,7 +7231,7 @@ private fun LegacySettingsScreen(vm: MainViewModel) {
                     }
                     Spacer(Modifier.height(12.dp))
                     Button(
-                        onClick = { avatarPicker.launch("image/*") },
+                        onClick = { avatarActions.pickFromGallery() },
                         enabled = vm.accountUser != null && !vm.accountBusy,
                         colors = ButtonDefaults.buttonColors(containerColor = AppColors.cyan),
                         modifier = Modifier.fillMaxWidth()

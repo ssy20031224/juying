@@ -1234,7 +1234,9 @@ fun EmbeddedVideoPlayer(
 
                     val width = size.width.coerceAtLeast(1)
                     val holdLeft = longPress!!.position.x < width * 0.5f
-                    speedBeforeHold = currentSpeed
+                    // 已锁定倍速时 currentSpeed 是锁定值而非正常倍速，
+                    // 保持上次记录的 speedBeforeHold，下滑才能恢复到锁定前的倍速
+                    if (!isSpeedLocked) speedBeforeHold = currentSpeed
                     holdGestureActive = true
 
                     try {

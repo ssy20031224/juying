@@ -146,6 +146,9 @@ dependencies {
     // Image loading
     implementation("io.coil-kt:coil-compose:2.5.0")
 
+    // Image cropping for avatar upload
+    implementation("com.github.yalantis:ucrop:2.2.8")
+
     // Android 12+ compatible animated system splash screen
     implementation("androidx.core:core-splashscreen:1.0.1")
 

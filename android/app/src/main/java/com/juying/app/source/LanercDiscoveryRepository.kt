@@ -69,9 +69,12 @@ class LanercDiscoveryRepository {
 
             val previous = cached
             val rankingResult = runCatching { fetchRankings() }
-            val categoryResult = runCatching { fetchCategoryRankings() }
+            // rank 接口是全站唯一带评分的接口，用它补全无评分的分类/周表条目
+            val scoreByTitle = rankingResult.getOrNull()?.second.orEmpty()
+            val categoryResult = runCatching { fetchCategoryRankings(scoreByTitle) }
             val scheduleResult = runCatching { fetchSchedule() }
             val rankings = rankingResult.getOrNull()
+                ?.first
                 ?.takeIf { it.values.any(List<SourceRankingEntry>::isNotEmpty) }
                 ?: previous?.rankings
                 ?: emptyMap()
@@ -84,7 +87,7 @@ class LanercDiscoveryRepository {
                 ?: previous?.categoryRankings
                 ?: emptyMap()
             val seasons = runCatching {
-                fetchSeasonalRecommendations(rankings, schedule, now)
+                fetchSeasonalRecommendations(rankings, schedule, now, scoreByTitle)
             }.getOrNull()
                 ?.takeIf(List<SeasonalRecommendation>::isNotEmpty)
                 ?: previous?.seasons
@@ -106,12 +109,12 @@ class LanercDiscoveryRepository {
         }
     }
 
-    private fun fetchRankings(): Map<RankingKind, List<SourceRankingEntry>> {
+    private fun fetchRankings(): Pair<Map<RankingKind, List<SourceRankingEntry>>, Map<String, String>> {
         val payload = fetchDecodedJson("app/rank")
         val groups = payload.getAsJsonArray("rank_list")
             ?.mapNotNull { it.takeIf(JsonElement::isJsonObject)?.asJsonObject }
             .orEmpty()
-        if (groups.isEmpty()) return emptyMap()
+        if (groups.isEmpty()) return emptyMap<RankingKind, List<SourceRankingEntry>>() to emptyMap()
 
         fun groupEntries(groupIndex: Int): List<SourceRankingEntry> {
             val group = groups.getOrNull(groupIndex.coerceAtMost(groups.lastIndex)) ?: return emptyList()
@@ -155,11 +158,28 @@ class LanercDiscoveryRepository {
             }
             .toList()
 
+        val scoreByTitle = buildMap {
+            groups.asSequence()
+                .flatMap { group ->
+                    group.getAsJsonArray("vods")
+                        ?.asSequence()
+                        ?.mapNotNull { it.takeIf(JsonElement::isJsonObject)?.asJsonObject }
+                        ?: emptySequence()
+                }
+                .mapNotNull { vod ->
+                    val item = rankItem(vod)
+                    val score = item.score.takeIf { it.toDoubleOrNull()?.let { value -> value > 0.0 } == true }
+                        ?: return@mapNotNull null
+                    normalizeDiscoveryTitle(item.title) to score
+                }
+                .forEach { (key, score) -> put(key, score) }
+        }
+
         return mapOf(
             RankingKind.HOT to groupEntries(0),
             RankingKind.POPULARITY to groupEntries(1),
             RankingKind.SCORE to allScored
-        )
+        ) to scoreByTitle
     }
 
     /**
@@ -168,21 +188,24 @@ class LanercDiscoveryRepository {
      * 22=Japanese theatrical anime, 24=Chinese anime. Preserve endpoint order
      * and attach explicit region/format evidence before the shared classifier.
      */
-    private fun fetchCategoryRankings(): Map<AnimeRankingCategory, List<SourceRankingEntry>> {
+    private fun fetchCategoryRankings(scoreByTitle: Map<String, String>): Map<AnimeRankingCategory, List<SourceRankingEntry>> {
         val japaneseTv = fetchCatalogClass(
             classId = 20,
             section = "Lanerc 日漫",
-            fallbackKind = "日漫 TV动画"
+            fallbackKind = "日漫 TV动画",
+            scoreByTitle = scoreByTitle
         ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_TV) }
         val japaneseMovies = fetchCatalogClass(
             classId = 22,
             section = "Lanerc 剧场版",
-            fallbackKind = "日漫 剧场版 动画电影"
+            fallbackKind = "日漫 剧场版 动画电影",
+            scoreByTitle = scoreByTitle
         ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_MOVIE) }
         val chinese = fetchCatalogClass(
             classId = 24,
             section = "Lanerc 国漫",
-            fallbackKind = "国漫 国产动画"
+            fallbackKind = "国漫 国产动画",
+            scoreByTitle = scoreByTitle
         )
         return mapOf(
             AnimeRankingCategory.JAPANESE_TV to japaneseTv,
@@ -200,7 +223,8 @@ class LanercDiscoveryRepository {
         classId: Int,
         section: String,
         fallbackKind: String,
-        maxPages: Int = 6
+        maxPages: Int = 6,
+        scoreByTitle: Map<String, String> = emptyMap()
     ): List<SourceRankingEntry> {
         val result = mutableListOf<SourceRankingEntry>()
         val seen = HashSet<String>()
@@ -220,7 +244,13 @@ class LanercDiscoveryRepository {
                     vod = vod,
                     fallbackStatus = currentCatalogStatus(vod),
                     fallbackKind = fallbackKind
-                )
+                ).let { base ->
+                    // filter 接口不返回评分，用 rank 接口的同标题评分补全
+                    val key = normalizeDiscoveryTitle(base.title)
+                    if (base.score.isBlank() && key.isNotEmpty()) {
+                        base.copy(score = scoreByTitle[key].orEmpty())
+                    } else base
+                }
                 val key = normalizeDiscoveryTitle(item.title)
                 if (key.isNotEmpty() && seen.add(key)) {
                     result += SourceRankingEntry(
@@ -239,7 +269,8 @@ class LanercDiscoveryRepository {
     private fun fetchSeasonalRecommendations(
         rankings: Map<RankingKind, List<SourceRankingEntry>>,
         schedule: List<ScheduleEntry>,
-        nowMillis: Long
+        nowMillis: Long,
+        scoreByTitle: Map<String, String> = emptyMap()
     ): List<SeasonalRecommendation> {
         val targetSeasons = beijingSeasonWindow(nowMillis)
         val currentYear = targetSeasons.firstOrNull()?.year ?: return emptyList()
@@ -267,7 +298,8 @@ class LanercDiscoveryRepository {
                 explicit.mapIndexed { index, entry ->
                     entry.copy(
                         item = entry.item.copy(
-                            status = entry.item.status.ifBlank { season.label }
+                            status = entry.item.status.ifBlank { season.label },
+                            score = entry.item.score.ifBlank { scoreByTitle[normalizeDiscoveryTitle(entry.item.title)].orEmpty() }
                         ),
                         sourceSection = season.label,
                         sourcePosition = index + 1
@@ -289,7 +321,8 @@ class LanercDiscoveryRepository {
                             kind = scheduled.item.kind.ifBlank { catalogItem.kind },
                             tags = (scheduled.item.tags + catalogItem.tags).distinct(),
                             status = scheduled.item.status.ifBlank { catalogItem.status },
-                            score = scheduled.item.score.ifBlank { catalogItem.score },
+                            score = scheduled.item.score.ifBlank { catalogItem.score }
+                                .ifBlank { scoreByTitle[titleKey].orEmpty() },
                             cover = scheduled.item.cover.ifBlank { catalogItem.cover },
                             description = scheduled.item.description.ifBlank { catalogItem.description }
                         )
