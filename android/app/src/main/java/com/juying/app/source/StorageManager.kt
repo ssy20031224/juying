@@ -11,7 +11,8 @@ data class HistoryItem(
     val playUrl: String,
     val timestamp: Long = System.currentTimeMillis(),
     val positionMs: Long = 0L,
-    val durationMs: Long = 0L
+    val durationMs: Long = 0L,
+    val deviceName: String = ""
 )
 
 data class SearchHistoryEntry(
@@ -207,16 +208,24 @@ class StorageManager(context: Context) {
 
     fun mergeCloudData(remoteFavorites: List<SourceItem>, remoteHistory: List<HistoryItem>) {
         val mergedFavorites = getFavorites().toMutableList()
+        // 云端收藏已按收藏时间倒序返回，新同步的插入头部，保持"最新在前"
         remoteFavorites.forEach { remote ->
-            if (mergedFavorites.none { isMatch(it, remote) }) mergedFavorites.add(remote)
+            if (mergedFavorites.none { isMatch(it, remote) }) mergedFavorites.add(0, remote)
         }
         val mergedHistory = getHistory().toMutableList()
         remoteHistory.forEach { remote ->
             val index = mergedHistory.indexOfFirst {
                 itemKey(it.item) == itemKey(remote.item) && it.episodeName == remote.episodeName
             }
-            if (index >= 0) mergedHistory[index] = remote else mergedHistory.add(remote)
+            if (index >= 0) {
+                // 两端都有记录时保留观看时间较新的一条，避免旧记录覆盖新进度
+                if (remote.timestamp >= mergedHistory[index].timestamp) mergedHistory[index] = remote
+            } else {
+                mergedHistory.add(remote)
+            }
         }
+        // 历史记录按观看时间倒序，"最新看的在最上方"
+        mergedHistory.sortByDescending { it.timestamp }
         prefs.edit()
             .putString("favorites", gson.toJson(mergedFavorites.take(200)))
             .putString("watch_history", gson.toJson(mergedHistory.take(50)))

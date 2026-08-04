@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
 import android.media.AudioManager
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
@@ -66,6 +67,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -534,6 +536,24 @@ fun EmbeddedVideoPlayer(
         }
     }
 
+    // 自然横屏（未点全屏）的分屏布局下同样隐藏系统栏，
+    // 否则播放器上方会露出系统栏，产生明显的视觉不均。
+    val isLandscapeNow = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    fun hideSystemBars(act: Activity) {
+        val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    fun showSystemBars(act: Activity) {
+        WindowCompat.getInsetsController(act.window, act.window.decorView)
+            .show(WindowInsetsCompat.Type.systemBars())
+    }
+
+    // 进出全屏的方向旋转动画完成后系统栏可能重新出现，动画结束后再隐藏一次
+    val hideBarsRunnable = Runnable { activity?.let(::hideSystemBars) }
+
     // Unified fullscreen window handling: orientation + system bars + display cutout.
     // SHORT_EDGES lets the window extend into the cutout area on punch-hole devices,
     // otherwise the system letterboxes the player and control bars can be pushed off-screen.
@@ -542,11 +562,10 @@ fun EmbeddedVideoPlayer(
         onFullscreenChanged(targetFullscreen)
         activity?.let { act ->
             val window = act.window
-            val controller = WindowCompat.getInsetsController(window, window.decorView)
             if (targetFullscreen) {
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                controller.hide(WindowInsetsCompat.Type.systemBars())
-                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hideSystemBars(act)
+                window.decorView.postDelayed(hideBarsRunnable, 350L)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     val lp = window.attributes
                     lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -556,7 +575,13 @@ fun EmbeddedVideoPlayer(
                 // Give orientation control back to the user/system. A natural
                 // landscape rotation uses the app's split player layout.
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                controller.show(WindowInsetsCompat.Type.systemBars())
+                window.decorView.removeCallbacks(hideBarsRunnable)
+                if (isLandscapeNow) {
+                    // 退出全屏但仍停留在横屏分屏布局时保持沉浸
+                    hideSystemBars(act)
+                } else {
+                    showSystemBars(act)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     val lp = window.attributes
                     lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
@@ -567,11 +592,29 @@ fun EmbeddedVideoPlayer(
     }
     val toggleFullscreen = { applyFullscreen(!isFullscreen) }
 
+    // 自然横屏/竖屏切换时同步系统栏：横屏沉浸（含分屏布局），竖屏恢复
+    LaunchedEffect(isLandscapeNow) {
+        activity?.let { act ->
+            if (isLandscapeNow) {
+                hideSystemBars(act)
+            } else {
+                act.window.decorView.removeCallbacks(hideBarsRunnable)
+                showSystemBars(act)
+            }
+        }
+    }
+
     // Safety net: if the player leaves composition while still fullscreen
     // (e.g. external navigation), always restore portrait/system bars/cutout mode.
     DisposableEffect(Unit) {
         onDispose {
             if (isFullscreen) applyFullscreen(false)
+            // 离开播放器页面时恢复系统栏；若仍处于自然横屏（分屏布局）则保持沉浸
+            activity?.let { act ->
+                if (act.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
+                    showSystemBars(act)
+                }
+            }
         }
     }
 

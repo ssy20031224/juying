@@ -5006,8 +5006,9 @@ private fun LandscapePlayerSidePanel(
     genreSummary: String,
     modifier: Modifier = Modifier
 ) {
+    // 默认展示"动漫"详情（名称/番剧/类型/年份/简介），对应竖屏播放器下方的内容
     var selectedTab by remember(detail.item.sourceKey, detail.item.id) {
-        mutableStateOf("episodes")
+        mutableStateOf("info")
     }
     val isFavorite = vm.isFavorite(detail.item)
 
@@ -5976,8 +5977,15 @@ private fun NotificationCard(notification: CloudNotification, vm: MainViewModel)
                     val item = runCatching {
                         Gson().fromJson(notification.mediaSnapshot, SourceItem::class.java)
                     }.getOrNull()
-                    if (item != null && item.id.isNotBlank()) {
-                        vm.openMovie(item)
+                    // 快照缺失/损坏时，回退按作品标识在收藏中匹配打开
+                    val fallback = if (item != null && item.id.isNotBlank()) {
+                        null
+                    } else {
+                        vm.favoritesList.firstOrNull { vm.commentMediaKey(it) == notification.mediaKey }
+                    }
+                    val target = item?.takeIf { it.id.isNotBlank() } ?: fallback
+                    if (target != null) {
+                        vm.openMovie(target)
                         vm.closeNotificationsScreen()
                     } else {
                         android.widget.Toast.makeText(
@@ -6197,14 +6205,14 @@ fun HistoryScreen(vm: MainViewModel) {
                             "${it.item.sourceKey}:${it.item.id}:${it.timestamp}"
                         }
                     ) { history ->
+                        // 左滑仅弹出确认，点击"删除"才真正删除，避免误删
+                        var pendingDelete by remember { mutableStateOf(false) }
                         val dismissState = rememberDismissState(
                             confirmStateChange = { value ->
                                 if (value == DismissValue.DismissedToStart) {
-                                    vm.removeHistory(history.item)
-                                    true
-                                } else {
-                                    false
+                                    pendingDelete = true
                                 }
+                                false
                             }
                         )
                         val progress = historyProgressPercent(history.positionMs, history.durationMs)
@@ -6293,28 +6301,41 @@ fun HistoryScreen(vm: MainViewModel) {
                                             val context = LocalContext.current
                                             val config = context.resources.configuration
                                             val isTablet = (config.screenLayout and android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK) >= android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
-                                            val deviceIcon = if (isTablet) "💻" else "📱"
                                             val rawModel = android.os.Build.MODEL.orEmpty()
                                             val rawManuf = android.os.Build.MANUFACTURER.orEmpty()
-                                            val displayDevice = formatFriendlyDeviceName(rawManuf, rawModel, isTablet)
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    deviceIcon,
-                                                    fontSize = 11.sp
-                                                )
-                                                Spacer(Modifier.width(4.dp))
-                                                Text(
-                                                    "$displayDevice  ${formatHistoryTimestamp(history.timestamp)}",
-                                                    color = AppColors.muted,
-                                                    fontSize = 11.sp
-                                                )
+                                            // 云端记录显示其来源设备；旧数据无设备信息时回退为当前设备
+                                            val displayDevice = history.deviceName.ifBlank {
+                                                formatFriendlyDeviceName(rawManuf, rawModel, isTablet)
                                             }
+                                            Text(
+                                                "$displayDevice  ${formatHistoryTimestamp(history.timestamp)}",
+                                                color = AppColors.muted,
+                                                fontSize = 11.sp
+                                            )
                                         }
                                     }
                                 }
                             }
                             }
                         )
+                        if (pendingDelete) {
+                            AlertDialog(
+                                onDismissRequest = { pendingDelete = false },
+                                title = { Text("删除观看记录") },
+                                text = { Text("确定删除「${history.item.title}」的观看记录吗？") },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        pendingDelete = false
+                                        vm.removeHistory(history.item)
+                                    }) {
+                                        Text("删除", color = AppColors.rose)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { pendingDelete = false }) { Text("取消") }
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -6441,6 +6462,19 @@ fun FavoritesScreen(vm: MainViewModel) {
                                                 .fillMaxWidth(progress.coerceIn(0, 100) / 100f)
                                                 .background(Color(0xFF7DD3FC))
                                         )
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(end = 10.dp, bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    TextButton(
+                                        onClick = { vm.toggleFavorite(favorite, null) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("取消收藏", color = AppColors.rose, fontSize = 12.sp)
                                     }
                                 }
                             }
@@ -7460,7 +7494,7 @@ fun SettingsScreen(vm: MainViewModel) {
                             putExtra(Intent.EXTRA_SUBJECT, "聚映 · 多源动漫播放器")
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "我正在使用聚映观看动漫，推荐给你：\nhttps://github.com/ssy20031224/juying/releases/latest",
+                                "我正在使用聚映观看动漫，推荐给你：\n${BuildConfig.ACCOUNT_API_BASE}/api/android/latest",
                             )
                         }
                         context.startActivity(Intent.createChooser(share, "分享聚映"))

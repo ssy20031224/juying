@@ -173,7 +173,13 @@ jobs:
           elif [[ "$GITHUB_EVENT_NAME" == "push" ]] && [[ "$(git cat-file -t "$TAG_NAME" 2>/dev/null || true)" == "tag" ]]; then
             git for-each-ref "refs/tags/$TAG_NAME" --format='%(contents)' > release/release-notes.md
           else
-            printf '%s\n' "性能优化、问题修复与稳定性提升。" > release/release-notes.md
+            # 兜底：从提交历史自动生成更新内容，避免每次发布都显示默认文案
+            PREV_TAG=$(git describe --tags --abbrev=0 "$TAG_NAME^" 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || true)
+            if [[ -n "$PREV_TAG" ]]; then
+              git log --oneline --no-merges "$PREV_TAG..HEAD" | head -40 > release/release-notes.md
+            else
+              git log --oneline --no-merges -20 | head -40 > release/release-notes.md
+            fi
           fi
 
           if [[ ! -s release/release-notes.md ]]; then

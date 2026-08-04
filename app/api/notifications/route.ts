@@ -116,3 +116,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "internal server error" }, { status: 500 });
   }
 }
+
+export async function DELETE(request: Request) {
+  const user = await getCurrentUser(request);
+  if (!user) return NextResponse.json({ error: "authentication required" }, { status: 401 });
+  const id = text(new URL(request.url).searchParams.get("id"), 64);
+  if (!id) return NextResponse.json({ error: "missing id" }, { status: 400 });
+  try {
+    const db = await getDb();
+    await db.delete(notifications).where(and(eq(notifications.id, id), eq(notifications.userId, user.id)));
+    return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+  } catch {
+    return NextResponse.json({ error: "internal server error" }, { status: 500 });
+  }
+}

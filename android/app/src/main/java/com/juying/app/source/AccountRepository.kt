@@ -6,6 +6,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.juying.app.BuildConfig
 import com.juying.app.engine.NetworkClient
+import com.juying.app.formatFriendlyDeviceName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -207,6 +208,9 @@ class AccountRepository(context: Context) {
                         it.durationMs > 0L &&
                             it.positionMs >= (it.durationMs * 95L / 100L)
                         ),
+                    // 上传真实观看时间与服务端字段名对齐（unix 秒），避免每次同步都被刷新为同步时刻
+                    "updatedAt" to (it.timestamp / 1000L).coerceAtLeast(0L),
+                    "deviceName" to currentDeviceName(),
                 )
             }
             val payload = gson.toJson(
@@ -282,13 +286,18 @@ class AccountRepository(context: Context) {
 
     private fun parseSync(jsonText: String): AccountSyncResult {
         val json = JSONObject(jsonText)
+        // 收藏带云端 created_at，按收藏时间倒序（新收藏在前），用于本地合并时的相对顺序
         val remoteFavorites = gson.fromJson<List<Map<String, Any>>>(
             json.optJSONArray("favorites")?.toString() ?: "[]",
             object : TypeToken<List<Map<String, Any>>>() {}.type,
         ).mapNotNull { row ->
             val snapshot = row["mediaSnapshot"]?.toString() ?: row["media_snapshot"]?.toString() ?: return@mapNotNull null
-            runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull()
+            val item = runCatching { gson.fromJson(snapshot, SourceItem::class.java) }.getOrNull() ?: return@mapNotNull null
+            val createdAt = ((row["createdAt"] ?: row["created_at"]) as? Number)?.toLong() ?: 0L
+            item to createdAt
         }
+            .sortedByDescending { it.second }
+            .map { it.first }
         val remoteHistory = gson.fromJson<List<Map<String, Any>>>(
             json.optJSONArray("progress")?.toString() ?: "[]",
             object : TypeToken<List<Map<String, Any>>>() {}.type,
@@ -311,7 +320,8 @@ class AccountRepository(context: Context) {
                 playUrl = "",
                 timestamp = ts,
                 positionMs = pos,
-                durationMs = dur
+                durationMs = dur,
+                deviceName = row["deviceName"]?.toString() ?: row["device_name"]?.toString().orEmpty()
             )
         }
         val remoteDeviceCache = gson.fromJson<List<Map<String, Any>>>(
@@ -334,6 +344,14 @@ class AccountRepository(context: Context) {
             .orEmpty()
             .ifBlank { "android-device" }
         return "android-${stableKey(raw).take(20)}"
+    }
+
+    // 与历史记录展示一致的设备友好名，随进度一起上传云端
+    private fun currentDeviceName(): String {
+        val config = appContext.resources.configuration
+        val isTablet = (config.screenLayout and android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK) >=
+            android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
+        return formatFriendlyDeviceName(android.os.Build.MANUFACTURER, android.os.Build.MODEL, isTablet)
     }
 
     private fun stableKey(value: String): String = MessageDigest.getInstance("SHA-256")

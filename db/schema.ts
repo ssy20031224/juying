@@ -90,6 +90,7 @@ export const watchProgress = sqliteTable(
     positionMs: integer("position_ms").notNull().default(0),
     durationMs: integer("duration_ms").notNull().default(0),
     completed: integer("completed", { mode: "boolean" }).notNull().default(false),
+    deviceName: text("device_name").notNull().default(""),
     updatedAt: integer("updated_at").notNull().default(now()),
   },
   (table) => [

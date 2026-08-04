@@ -144,6 +144,11 @@ export async function POST(request: Request) {
       const media = mediaKey(item.mediaKey);
       const episode = mediaKey(item.episodeKey);
       if (!media || !episode) continue;
+      // 客户端上传真实观看时间（unix 秒）；旧客户端不传则回退为当前时间。
+      // 兼容老客户端可能上传毫秒，做一次范围判断。
+      const rawUpdated = asInt(item.updatedAt, 0);
+      const watchedAt = rawUpdated > 1_000_000_000_000 ? Math.floor(rawUpdated / 1000) : rawUpdated;
+      const updatedAt = watchedAt > 0 ? watchedAt : Math.floor(Date.now() / 1000);
       await db
         .insert(watchProgress)
         .values({
@@ -156,6 +161,8 @@ export async function POST(request: Request) {
           positionMs: asInt(item.positionMs, 0, 86_400_000),
           durationMs: asInt(item.durationMs, 0, 86_400_000),
           completed: asBool(item.completed),
+          deviceName: text(item.deviceName, 120),
+          updatedAt,
         })
         .onConflictDoUpdate({
           target: [watchProgress.userId, watchProgress.mediaKey, watchProgress.episodeKey],
@@ -166,7 +173,8 @@ export async function POST(request: Request) {
             positionMs: asInt(item.positionMs, 0, 86_400_000),
             durationMs: asInt(item.durationMs, 0, 86_400_000),
             completed: asBool(item.completed),
-            updatedAt: sql`(unixepoch())`,
+            deviceName: text(item.deviceName, 120),
+            updatedAt,
           },
         })
         .catch(() => {});
