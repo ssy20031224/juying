@@ -8,9 +8,7 @@ enum class RankingKind(val label: String) {
 
 enum class AnimeRankingCategory(val label: String) {
     JAPANESE_TV("日漫TV番剧"),
-    JAPANESE_MOVIE("日漫剧场版"),
-    CHINESE_TV("国漫动画"),
-    CHINESE_MOVIE("国漫剧场版")
+    CHINESE_TV("国漫动画")
 }
 
 data class SourceRankingEntry(
@@ -229,9 +227,7 @@ internal fun matchesAnimeRankingCategory(
 
     return when (category) {
         AnimeRankingCategory.JAPANESE_TV -> japanese && !theatrical
-        AnimeRankingCategory.JAPANESE_MOVIE -> japanese && theatrical
         AnimeRankingCategory.CHINESE_TV -> chinese && !theatrical
-        AnimeRankingCategory.CHINESE_MOVIE -> chinese && theatrical
     }
 }
 

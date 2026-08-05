@@ -76,9 +76,15 @@ fun buildSearchRecommendations(
         )
         .map(Pair<SourceItem, Double>::first)
 
-    return (related + fallback)
+    val combined = (related + fallback)
         .distinctBy { normalizeRecommendationText(it.title) }
         .take(limit)
+
+    // "换一批"：按 seed 整体轮转展示顺序（related 存在时其顺序固定，
+    // 不轮转的话每次点击结果完全一样，用户感知为"无反应"）。
+    if (combined.size <= 1) return combined
+    val offset = (rotationSeed % combined.size + combined.size) % combined.size
+    return combined.drop(offset) + combined.take(offset)
 }
 
 private fun itemSignals(item: SourceItem): Set<String> = textSignals(

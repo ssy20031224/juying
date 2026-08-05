@@ -944,9 +944,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ?: animeCategoryRankings[category].orEmpty()
             val keywords = when (category) {
                 AnimeRankingCategory.JAPANESE_TV -> listOf("日本新番", "日漫")
-                AnimeRankingCategory.JAPANESE_MOVIE -> listOf("动漫剧场版", "日本动画电影")
                 AnimeRankingCategory.CHINESE_TV -> listOf("国漫", "国产动画")
-                AnimeRankingCategory.CHINESE_MOVIE -> listOf("国漫剧场版", "国产动画电影")
             }
             val sourceEnriched = withContext(Dispatchers.IO) {
                 coroutineScope {
@@ -3319,7 +3317,7 @@ fun JuyingApp(vm: MainViewModel) {
                             NavigationBarItem(
                                 selected = vm.view == "leaderboard",
                                 onClick = { vm.view = "leaderboard" },
-                                icon = { Icon(Icons.Default.Star, null) },
+                                icon = { Icon(painterResource(R.drawable.ic_leaderboard), null) },
                                 label = { Text("排行榜") }
                             )
                             NavigationBarItem(
@@ -3575,8 +3573,43 @@ fun HomeView(vm: MainViewModel) {
         }
         .orEmpty()
 
-    val featuredItems = remember(vm.homeSections.firstOrNull()?.items?.firstOrNull()?.id) {
-        vm.homeSections.flatMap { it.items }.distinctBy { SourceManager.normalizeTitle(it.title) }.take(5)
+    val featuredItems = remember(vm.homeSections.firstOrNull()?.items?.firstOrNull()?.id, selectedCategory) {
+        val filteredSections = if (selectedCategory == "精选") {
+            vm.homeSections
+        } else {
+            vm.homeSections.filter { section ->
+                val sectionKind = when {
+                    section.title.contains("国漫") || section.key.contains("guo") -> "国漫"
+                    section.title.contains("日漫") || section.title.contains("日本") || section.title.contains("番") -> "日漫"
+                    section.title.contains("剧场") || section.title.contains("电影") -> "剧场版"
+                    section.title.contains("欧美") -> "欧美"
+                    else -> "全部"
+                }
+                sectionKind == selectedCategory
+            }
+        }
+        filteredSections.flatMap { it.items }.distinctBy { SourceManager.normalizeTitle(it.title) }.take(5)
+    }
+
+    // 分类页签（日漫/国漫/剧场版）专用内容：严格按分类聚合全部首页作品，
+    // 轮播图与热门推荐 3x3 网格每 10 秒轮换展示，不固定同一批内容。
+    var categoryRotation by remember(selectedCategory) { mutableStateOf(0L) }
+    LaunchedEffect(selectedCategory) {
+        if (selectedCategory != "精选") {
+            while (true) {
+                delay(10_000L)
+                categoryRotation++
+            }
+        }
+    }
+    val categoryAllItems = remember(vm.homeSections, selectedCategory) {
+        if (selectedCategory == "精选") emptyList() else categoryHomeItems(vm, selectedCategory)
+    }
+    val categoryCarouselItems = remember(categoryAllItems, categoryRotation) {
+        rotateWindow(categoryAllItems, (categoryRotation * 5L).toInt(), 5)
+    }
+    val categoryHotItems = remember(categoryAllItems, categoryRotation) {
+        rotateWindow(categoryAllItems, (categoryRotation * 3L).toInt(), 9)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -3648,7 +3681,12 @@ fun HomeView(vm: MainViewModel) {
                     onClick = { vm.openNotificationsScreen() },
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    Text("🔔", fontSize = 18.sp)
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_notification),
+                        contentDescription = "消息通知",
+                        tint = AppColors.text,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
                 if (vm.unreadNotificationCount > 0) {
                     Box(
@@ -3674,7 +3712,12 @@ fun HomeView(vm: MainViewModel) {
                 onClick = { vm.view = "profile_history" },
                 modifier = Modifier.size(36.dp)
             ) {
-                Text("🕒", fontSize = 20.sp)
+                Icon(
+                    painter = androidx.compose.ui.res.painterResource(R.drawable.ic_history),
+                    contentDescription = "观看历史",
+                    tint = AppColors.text,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
 
@@ -3685,16 +3728,12 @@ fun HomeView(vm: MainViewModel) {
                 .padding(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            listOf("精选", "日漫", "剧场版").forEach { category ->
+            listOf("精选", "日漫", "国漫", "剧场版").forEach { category ->
                 val isSelected = selectedCategory == category
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.clickable {
                         selectedCategory = category
-                        if (category != "精选") {
-                            vm.applyFilter(kind = category)
-                            vm.view = "library"
-                        }
                     }
                 ) {
                     Text(
@@ -3810,10 +3849,15 @@ fun HomeView(vm: MainViewModel) {
                 }
             } else {
                 LazyColumn {
+                    // ── 精选页签：轮播 + 快捷入口 + 公告 + 全部分区；分类页签只显示当前分类内容 ──
+                    if (selectedCategory == "精选") {
                     // ── CAROUSEL BANNER CARD (截图2 风格) ──
                     if (featuredItems.isNotEmpty()) {
                         item(key = "home_carousel_banner") {
-                            HomeCarouselBanner(featuredItems) { vm.openMovie(it) }
+                            HomeCarouselBanner(
+                                items = featuredItems,
+                                onSelect = { vm.openMovie(it) }
+                            )
                         }
                     }
 
@@ -3959,9 +4003,97 @@ fun HomeView(vm: MainViewModel) {
                             }
                         }
                 }
+                    } else {
+                        // ── 分类页签内容（日漫/国漫/剧场版）──
+                        if (categoryAllItems.isEmpty()) {
+                            item(key = "category_empty_${selectedCategory}") {
+                                Box(
+                                    Modifier.fillMaxWidth().padding(vertical = 60.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("暂未加载到${selectedCategory}推荐内容", color = AppColors.muted, fontSize = 13.sp)
+                                }
+                            }
+                        } else {
+                            if (categoryCarouselItems.isNotEmpty()) {
+                                item(key = "category_carousel_${selectedCategory}") {
+                                    HomeCarouselBanner(
+                                        items = categoryCarouselItems,
+                                        label = "${selectedCategory}内容",
+                                        onSelect = { vm.openMovie(it) }
+                                    )
+                                }
+                            }
+                            item(key = "category_hot_header_${selectedCategory}") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("热门推荐", color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                    TextButton(onClick = {
+                                        vm.applyFilter(kind = selectedCategory)
+                                        vm.view = "library"
+                                    }) {
+                                        Text("查看更多", color = AppColors.cyan, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                            item(key = "category_hot_grid_${selectedCategory}") {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    categoryHotItems.chunked(3).forEach { rowItems ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            rowItems.forEach { item ->
+                                                MovieCard(item, Modifier.weight(1f).padding(4.dp)) { vm.openMovie(item) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
             }
         }
     }
+}
+
+/**
+ * 严格区分日漫/国漫/剧场版：标题、分类与标签同时作为证据；
+ * 日漫与国漫互斥，带剧场版/电影证据的作品只归入剧场版分类，避免分类互相混入。
+ */
+private fun strictCategoryMatch(item: SourceItem, category: String): Boolean {
+    val evidence = "${item.title} ${item.kind} ${item.tags.joinToString(" ")}".lowercase()
+    val chinese = listOf("国漫", "国产动画", "国产动漫", "国创", "中国动漫", "中国动画", "大陆动漫", "大陆", "华语")
+        .any(evidence::contains)
+    val japanese = listOf("日漫", "日本动画", "日本动漫", "日本番剧", "anime", "日剧")
+        .any(evidence::contains)
+    val theatrical = listOf("剧场版", "动画电影", "动漫电影", "电影")
+        .any(evidence::contains)
+    return when (category) {
+        "日漫" -> japanese && !chinese && !theatrical
+        "国漫" -> chinese && !japanese && !theatrical
+        else -> theatrical
+    }
+}
+
+private fun categoryHomeItems(vm: MainViewModel, category: String): List<SourceItem> {
+    return vm.homeSections
+        .flatMap { it.items }
+        .distinctBy { SourceManager.normalizeTitle(it.title) }
+        .filter { strictCategoryMatch(it, category) }
+}
+
+/** 把作品池按偏移量循环平移后取前 size 个，保证分类轮播/热门推荐定期轮换内容。 */
+private fun rotateWindow(items: List<SourceItem>, offset: Int, size: Int): List<SourceItem> {
+    if (items.size <= size) return items
+    val start = ((offset % items.size) + items.size) % items.size
+    return (items.drop(start) + items.take(start)).take(size)
 }
 
 @Composable
@@ -4305,7 +4437,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         horizontalArrangement = Arrangement.SpaceAround
                     ) {
                         ActionButton(
-                            Icons.Default.Refresh, "换源",
+                            androidx.compose.ui.res.painterResource(R.drawable.ic_switch_source), "换源",
                             enabled = totalSources > 1,
                             tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
                         ) { vm.switchSource() }
@@ -4935,9 +5067,7 @@ private fun CommentCard(
                     ) {
                         Text(comment.nick, color = AppColors.cyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         Text(
-                            if (comment.ts > 0L) {
-                                android.text.format.DateUtils.getRelativeTimeSpanString(comment.ts).toString()
-                            } else "刚刚",
+                            formatRelativeTime(comment.ts),
                             color = AppColors.muted,
                             fontSize = 11.sp
                         )
@@ -5106,7 +5236,11 @@ private fun LandscapePlayerSidePanel(
                             onClick = { vm.switchSource() },
                             enabled = vm.availableSourceLabels.size > 1
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Icon(
+                                painterResource(R.drawable.ic_switch_source),
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp)
+                            )
                             Spacer(Modifier.width(4.dp))
                             Text("换源", fontSize = 11.sp)
                         }
@@ -5387,6 +5521,35 @@ fun ActionButton(
 }
 
 @Composable
+fun ActionButton(
+    icon: androidx.compose.ui.graphics.painter.Painter,
+    label: String,
+    tint: Color = AppColors.text,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable(enabled = enabled) { onClick() }
+            .padding(4.dp)
+            .then(if (!enabled) Modifier.graphicsLayer { alpha = 0.4f } else Modifier)
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = AppColors.panel2,
+            modifier = Modifier.size(44.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(label, color = if (enabled) AppColors.muted else AppColors.muted.copy(alpha = 0.4f), fontSize = 11.sp)
+    }
+}
+
+@Composable
 fun AccountEntryCard(vm: MainViewModel) {
     var dialogVisible by remember { mutableStateOf(false) }
     Card(
@@ -5439,6 +5602,8 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var confirmPasswordVisible by remember { mutableStateOf(false) }
     var nickname by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
     val passwordMismatch = (registering || forgot) &&
@@ -5521,7 +5686,19 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                     value = password,
                     onValueChange = { password = it },
                     label = { Text(if (forgot) "新密码" else "密码") },
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Icon(
+                                painter = androidx.compose.ui.res.painterResource(
+                                    if (passwordVisible) R.drawable.ic_visibility else R.drawable.ic_visibility_off
+                                ),
+                                contentDescription = if (passwordVisible) "隐藏密码" else "显示密码",
+                                modifier = Modifier.size(20.dp),
+                                tint = AppColors.muted
+                            )
+                        }
+                    },
                     supportingText = {
                         if (registering || forgot) {
                             val isStrong = isPasswordStrong(password)
@@ -5540,7 +5717,19 @@ fun AccountDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                         value = confirmPassword,
                         onValueChange = { confirmPassword = it },
                         label = { Text("确认密码") },
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (confirmPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { confirmPasswordVisible = !confirmPasswordVisible }) {
+                                Icon(
+                                    painter = androidx.compose.ui.res.painterResource(
+                                        if (confirmPasswordVisible) R.drawable.ic_visibility else R.drawable.ic_visibility_off
+                                    ),
+                                    contentDescription = if (confirmPasswordVisible) "隐藏密码" else "显示密码",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = AppColors.muted
+                                )
+                            }
+                        },
                         isError = passwordMismatch,
                         supportingText = {
                             if (passwordMismatch) Text("两次输入的密码不一致")
@@ -5726,7 +5915,14 @@ fun ProfileView(vm: MainViewModel) {
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text("🖼️ 从相册选择", color = AppColors.cyan, fontSize = 15.sp)
+                                    Icon(
+                                        painterResource(R.drawable.ic_gallery),
+                                        contentDescription = null,
+                                        tint = AppColors.cyan,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("从相册选择", color = AppColors.cyan, fontSize = 15.sp)
                                 }
                                 TextButton(
                                     onClick = {
@@ -5735,7 +5931,14 @@ fun ProfileView(vm: MainViewModel) {
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text("📷 拍照上传", color = AppColors.text, fontSize = 15.sp)
+                                    Icon(
+                                        painterResource(R.drawable.ic_camera),
+                                        contentDescription = null,
+                                        tint = AppColors.text,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("拍照上传", color = AppColors.text, fontSize = 15.sp)
                                 }
                                 TextButton(
                                     onClick = { showAvatarDialog = false },
@@ -6041,9 +6244,7 @@ private fun NotificationCard(notification: CloudNotification, vm: MainViewModel)
                             Spacer(Modifier.width(6.dp))
                         }
                         Text(
-                            if (notification.ts > 0L) {
-                                android.text.format.DateUtils.getRelativeTimeSpanString(notification.ts).toString()
-                            } else "刚刚",
+                            formatRelativeTime(notification.ts),
                             color = AppColors.muted,
                             fontSize = 11.sp
                         )
@@ -7685,7 +7886,14 @@ private fun PasswordSettingField(
             },
         )
         IconButton(onClick = onToggle) {
-            Text(if (visible) "隐藏" else "显示", color = AppColors.text, fontSize = 12.sp)
+            Icon(
+                painter = androidx.compose.ui.res.painterResource(
+                    if (visible) R.drawable.ic_visibility else R.drawable.ic_visibility_off
+                ),
+                contentDescription = if (visible) "隐藏" else "显示",
+                modifier = Modifier.size(20.dp),
+                tint = AppColors.muted
+            )
         }
     }
 }
@@ -8111,6 +8319,48 @@ private fun discoveryUpdatedLabel(timestamp: Long): String {
     }.format(java.util.Date(timestamp)) + " 同步"
 }
 
+fun formatRelativeTime(timestamp: Long): String {
+    if (timestamp <= 0L) return "刚刚"
+    
+    val now = java.util.Calendar.getInstance()
+    val time = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }
+    val nowYear = now.get(java.util.Calendar.YEAR)
+    val timeYear = time.get(java.util.Calendar.YEAR)
+    
+    val timeFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+    val mdFormat = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.CHINA)
+    val ymdFormat = java.text.SimpleDateFormat("yyyy年MM/dd HH:mm", java.util.Locale.CHINA)
+
+    val nowStart = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }
+    val timeStart = java.util.Calendar.getInstance().apply {
+        timeInMillis = timestamp
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }
+    
+    val daysBetween = ((nowStart.timeInMillis - timeStart.timeInMillis) / (1000 * 60 * 60 * 24)).toInt()
+    
+    return when (daysBetween) {
+        0 -> android.text.format.DateUtils.getRelativeTimeSpanString(timestamp).toString()
+        1 -> "昨天 ${timeFormat.format(time.time)}"
+        2 -> "前天 ${timeFormat.format(time.time)}"
+        else -> {
+            if (nowYear == timeYear) {
+                mdFormat.format(time.time)
+            } else {
+                ymdFormat.format(time.time)
+            }
+        }
+    }
+}
+
 @Composable
 fun LeaderboardScreen(vm: MainViewModel) {
     val categories = AnimeRankingCategory.entries
@@ -8374,11 +8624,13 @@ fun SeasonalRankingScreen(vm: MainViewModel) {
                                 Text(item.title, color = AppColors.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.height(3.dp))
                                 val validScore = item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
-                                Text(
-                                    validScore?.let { "★ ${item.score}" } ?: "☆ 来源未提供评分",
-                                    color = if (validScore != null) AppColors.orange else AppColors.muted,
-                                    fontSize = 12.sp
-                                )
+                                if (validScore != null) {
+                                    Text(
+                                        "★ ${item.score}",
+                                        color = AppColors.orange,
+                                        fontSize = 12.sp
+                                    )
+                                }
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     listOf(item.year, item.kind).filter { it.isNotBlank() }.joinToString(" · ")
@@ -8487,11 +8739,13 @@ private fun RankingEntriesList(
                         )
                         Spacer(Modifier.height(3.dp))
                         val validScore = item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
-                        Text(
-                            validScore?.let { "★ ${item.score}" } ?: "☆ 来源未提供评分",
-                            color = if (validScore != null) AppColors.orange else AppColors.muted,
-                            fontSize = 12.sp
-                        )
+                        if (validScore != null) {
+                            Text(
+                                "★ ${item.score}",
+                                color = AppColors.orange,
+                                fontSize = 12.sp
+                            )
+                        }
                         Spacer(Modifier.height(2.dp))
                         Text(
                             listOf(item.year, item.kind)
@@ -8578,12 +8832,14 @@ private fun RankingPodium(
                     modifier = Modifier.fillMaxWidth().heightIn(min = 34.dp)
                 )
                 val validScore = entry.item.score.toDoubleOrNull()?.takeIf { it > 0.0 }
-                Text(
-                    validScore?.let { "★ ${entry.item.score}" } ?: "☆ 来源未提供评分",
-                    color = if (validScore != null) AppColors.orange else AppColors.muted,
-                    fontSize = 11.sp,
-                    maxLines = 1
-                )
+                if (validScore != null) {
+                    Text(
+                        "★ ${entry.item.score}",
+                        color = AppColors.orange,
+                        fontSize = 11.sp,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }
@@ -8705,7 +8961,11 @@ fun AvatarImage(avatarIndex: Int, modifier: Modifier = Modifier) {
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) {
+fun HomeCarouselBanner(
+    items: List<SourceItem>,
+    onSelect: (SourceItem) -> Unit,
+    label: String = "精选内容"
+) {
     if (items.isEmpty()) return
     val pagerState = rememberPagerState(pageCount = { items.size })
 
@@ -8784,7 +9044,7 @@ fun HomeCarouselBanner(items: List<SourceItem>, onSelect: (SourceItem) -> Unit) 
                                 color = AppColors.cyan.copy(alpha = 0.25f)
                             ) {
                                 Text(
-                                    "精选内容",
+                                    label,
                                     color = AppColors.cyan,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,

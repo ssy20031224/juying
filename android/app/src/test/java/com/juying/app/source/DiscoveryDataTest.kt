@@ -90,7 +90,7 @@ class DiscoveryDataTest {
     }
 
     @Test
-    fun `anime ranking categories distinguish region and theatrical format`() {
+    fun `anime ranking categories distinguish region and exclude theatrical`() {
         val japaneseTv = SourceItem(title = "日漫TV", kind = "日漫 TV")
         val japaneseMovie = SourceItem(title = "日漫电影", tags = listOf("日漫", "剧场版"))
         val chineseTv = SourceItem(title = "国漫TV", kind = "国产动画")
@@ -116,11 +116,11 @@ class DiscoveryDataTest {
             ).single().item.title
         )
         assertEquals(
-            "国漫电影",
+            "国漫TV",
             buildAnimeCategoryRanking(
                 emptyList(),
                 sections,
-                AnimeRankingCategory.CHINESE_MOVIE
+                AnimeRankingCategory.CHINESE_TV
             ).single().item.title
         )
     }
@@ -138,7 +138,7 @@ class DiscoveryDataTest {
             buildAnimeCategoryRanking(
                 rankedEntries = listOf(entry.copy(sourceSection = "搜索:国漫剧场版 · 测试源")),
                 sections = emptyList(),
-                category = AnimeRankingCategory.CHINESE_MOVIE
+                category = AnimeRankingCategory.CHINESE_TV
             ).isEmpty()
         )
 

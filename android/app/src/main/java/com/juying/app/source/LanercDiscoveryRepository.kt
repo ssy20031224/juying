@@ -185,8 +185,9 @@ class LanercDiscoveryRepository {
     /**
      * Lanerc exposes authoritative catalog classes independently from its
      * misleadingly named seasonal "heat" page: 20=Japanese anime,
-     * 22=Japanese theatrical anime, 24=Chinese anime. Preserve endpoint order
-     * and attach explicit region/format evidence before the shared classifier.
+     * 24=Chinese anime. Preserve endpoint order and attach explicit
+     * region/format evidence before the shared classifier. 剧场版分类
+     * 已从排行榜移除，只保留日漫TV番剧与国漫。
      */
     private fun fetchCategoryRankings(scoreByTitle: Map<String, String>): Map<AnimeRankingCategory, List<SourceRankingEntry>> {
         val japaneseTv = fetchCatalogClass(
@@ -195,12 +196,6 @@ class LanercDiscoveryRepository {
             fallbackKind = "日漫 TV动画",
             scoreByTitle = scoreByTitle
         ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_TV) }
-        val japaneseMovies = fetchCatalogClass(
-            classId = 22,
-            section = "Lanerc 剧场版",
-            fallbackKind = "日漫 剧场版 动画电影",
-            scoreByTitle = scoreByTitle
-        ).filter { matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.JAPANESE_MOVIE) }
         val chinese = fetchCatalogClass(
             classId = 24,
             section = "Lanerc 国漫",
@@ -209,12 +204,8 @@ class LanercDiscoveryRepository {
         )
         return mapOf(
             AnimeRankingCategory.JAPANESE_TV to japaneseTv,
-            AnimeRankingCategory.JAPANESE_MOVIE to japaneseMovies,
             AnimeRankingCategory.CHINESE_TV to chinese.filter {
                 matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.CHINESE_TV)
-            },
-            AnimeRankingCategory.CHINESE_MOVIE to chinese.filter {
-                matchesAnimeRankingCategory(it.item, it.sourceSection, AnimeRankingCategory.CHINESE_MOVIE)
             }
         )
     }

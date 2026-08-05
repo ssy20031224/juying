@@ -541,52 +541,78 @@ fun EmbeddedVideoPlayer(
     val isLandscapeNow = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     fun hideSystemBars(act: Activity) {
-        val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        val window = act.window
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
     fun showSystemBars(act: Activity) {
-        WindowCompat.getInsetsController(act.window, act.window.decorView)
+        val window = act.window
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView)
             .show(WindowInsetsCompat.Type.systemBars())
     }
 
-    // 进出全屏的方向旋转动画完成后系统栏可能重新出现，动画结束后再隐藏一次
-    val hideBarsRunnable = Runnable { activity?.let(::hideSystemBars) }
+    // 进出全屏的方向旋转动画耗时不定，在多个关键时间节点重复隐藏系统栏，
+    // 避免旋转动画结束时系统栏重新浮现导致的 1 秒延迟显隐问题。
+    val hideBarsRunnable1 = Runnable { activity?.let(::hideSystemBars) }
+    val hideBarsRunnable2 = Runnable { activity?.let(::hideSystemBars) }
+    val hideBarsRunnable3 = Runnable { activity?.let(::hideSystemBars) }
+
+    fun cancelPendingHideBars(act: Activity) {
+        val decor = act.window.decorView
+        decor.removeCallbacks(hideBarsRunnable1)
+        decor.removeCallbacks(hideBarsRunnable2)
+        decor.removeCallbacks(hideBarsRunnable3)
+    }
+
+    fun scheduleHideSystemBars(act: Activity) {
+        hideSystemBars(act)
+        val decor = act.window.decorView
+        decor.removeCallbacks(hideBarsRunnable1)
+        decor.removeCallbacks(hideBarsRunnable2)
+        decor.removeCallbacks(hideBarsRunnable3)
+        decor.postDelayed(hideBarsRunnable1, 150L)
+        decor.postDelayed(hideBarsRunnable2, 400L)
+        decor.postDelayed(hideBarsRunnable3, 750L)
+    }
+
+    fun ensureShortEdgesCutoutMode(act: Activity) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val window = act.window
+            val lp = window.attributes
+            if (lp.layoutInDisplayCutoutMode != WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES) {
+                lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                window.attributes = lp
+            }
+        }
+    }
 
     // Unified fullscreen window handling: orientation + system bars + display cutout.
-    // SHORT_EDGES lets the window extend into the cutout area on punch-hole devices,
-    // otherwise the system letterboxes the player and control bars can be pushed off-screen.
     val applyFullscreen: (Boolean) -> Unit = { targetFullscreen ->
         isFullscreen = targetFullscreen
         onFullscreenChanged(targetFullscreen)
         activity?.let { act ->
-            val window = act.window
             if (targetFullscreen) {
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                hideSystemBars(act)
-                window.decorView.postDelayed(hideBarsRunnable, 350L)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    val lp = window.attributes
-                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                    window.attributes = lp
-                }
+                scheduleHideSystemBars(act)
+                ensureShortEdgesCutoutMode(act)
             } else {
                 // Give orientation control back to the user/system. A natural
                 // landscape rotation uses the app's split player layout.
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                window.decorView.removeCallbacks(hideBarsRunnable)
+                cancelPendingHideBars(act)
                 if (isLandscapeNow) {
                     // 退出全屏但仍停留在横屏分屏布局时保持沉浸
-                    hideSystemBars(act)
+                    scheduleHideSystemBars(act)
                 } else {
                     showSystemBars(act)
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    val lp = window.attributes
-                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
-                    window.attributes = lp
-                }
+                // 必须保持 SHORT_EDGES 模式，否则切回竖屏后系统会将 Window CutoutMode
+                // 退化为 DEFAULT，导致顶部状态栏/挖孔区被强制追加一条黑边黑条
+                ensureShortEdgesCutoutMode(act)
             }
         }
     }
@@ -596,10 +622,11 @@ fun EmbeddedVideoPlayer(
     LaunchedEffect(isLandscapeNow) {
         activity?.let { act ->
             if (isLandscapeNow) {
-                hideSystemBars(act)
+                scheduleHideSystemBars(act)
             } else {
-                act.window.decorView.removeCallbacks(hideBarsRunnable)
+                cancelPendingHideBars(act)
                 showSystemBars(act)
+                ensureShortEdgesCutoutMode(act)
             }
         }
     }
@@ -611,8 +638,10 @@ fun EmbeddedVideoPlayer(
             if (isFullscreen) applyFullscreen(false)
             // 离开播放器页面时恢复系统栏；若仍处于自然横屏（分屏布局）则保持沉浸
             activity?.let { act ->
+                cancelPendingHideBars(act)
                 if (act.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
                     showSystemBars(act)
+                    ensureShortEdgesCutoutMode(act)
                 }
             }
         }
