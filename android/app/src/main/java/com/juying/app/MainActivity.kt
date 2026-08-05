@@ -3317,7 +3317,7 @@ fun JuyingApp(vm: MainViewModel) {
                             NavigationBarItem(
                                 selected = vm.view == "leaderboard",
                                 onClick = { vm.view = "leaderboard" },
-                                icon = { Icon(painterResource(R.drawable.ic_leaderboard), null) },
+                                icon = { Icon(painterResource(R.drawable.ic_ranking), null) },
                                 label = { Text("排行榜") }
                             )
                             NavigationBarItem(
@@ -5916,7 +5916,7 @@ fun ProfileView(vm: MainViewModel) {
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Icon(
-                                        painterResource(R.drawable.ic_gallery),
+                                        painterResource(R.drawable.ic_album),
                                         contentDescription = null,
                                         tint = AppColors.cyan,
                                         modifier = Modifier.size(18.dp)
