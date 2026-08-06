@@ -76,6 +76,13 @@ class StorageManager(context: Context) {
         prefs.edit().putString("watch_history", gson.toJson(updated)).apply()
     }
 
+    fun removeHistoryBatch(items: List<SourceItem>) {
+        if (items.isEmpty()) return
+        val keys = items.map(::itemKey).toSet()
+        val updated = getHistory().filterNot { itemKey(it.item) in keys }
+        prefs.edit().putString("watch_history", gson.toJson(updated)).apply()
+    }
+
     fun clearHistory() {
         prefs.edit().remove("watch_history").apply()
     }
@@ -179,6 +186,12 @@ class StorageManager(context: Context) {
         }
         prefs.edit().putString("favorites", gson.toJson(list)).apply()
         return !exists
+    }
+
+    fun removeFavorites(items: List<SourceItem>) {
+        if (items.isEmpty()) return
+        val list = getFavorites().filterNot { favorite -> items.any { isMatch(it, favorite) } }
+        prefs.edit().putString("favorites", gson.toJson(list)).apply()
     }
 
     // 收藏时记录番剧集数作为提醒基线：之后每更新一集才提醒一次

@@ -7,10 +7,12 @@ class HistoryPresentationTest {
     @Test
     fun historyPeriodsUseRequestedBoundaries() {
         val now = 200L * 24L * 60L * 60L * 1000L
-        assertEquals("近一周", historyPeriodLabel(now - 2L * 24L * 60L * 60L * 1000L, now))
-        assertEquals("近一月", historyPeriodLabel(now - 10L * 24L * 60L * 60L * 1000L, now))
-        assertEquals("近半年", historyPeriodLabel(now - 60L * 24L * 60L * 60L * 1000L, now))
-        assertEquals("更早", historyPeriodLabel(now - 190L * 24L * 60L * 60L * 1000L, now))
+        val halfDay = 12L * 60L * 60L * 1000L
+        assertEquals("今天", historyPeriodLabel(now - halfDay, now))
+        assertEquals("昨天", historyPeriodLabel(now - 1L * 24L * 60L * 60L * 1000L - halfDay, now))
+        assertEquals("前天", historyPeriodLabel(now - 2L * 24L * 60L * 60L * 1000L - halfDay, now))
+        assertEquals("近一周", historyPeriodLabel(now - 5L * 24L * 60L * 60L * 1000L, now))
+        assertEquals("更早", historyPeriodLabel(now - 10L * 24L * 60L * 60L * 1000L, now))
     }
 
     @Test

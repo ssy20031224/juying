@@ -28,6 +28,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -51,10 +52,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.DismissDirection
-import androidx.compose.material.DismissValue
-import androidx.compose.material.SwipeToDismiss
-import androidx.compose.material.rememberDismissState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -311,6 +308,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var commentPosting by mutableStateOf(false)
     var commentImageUrl by mutableStateOf("")
     var commentImageUploading by mutableStateOf(false)
+    // 从消息通知"评论回复"跳转时定位到对应评论（进入播放页后自动滚动并高亮）
+    var commentFocusId by mutableStateOf<String?>(null)
 
     // Cloud account state. Anonymous local storage remains the default.
     var accountUser by mutableStateOf<AccountUser?>(null)
@@ -2970,6 +2969,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = "已删除该条观看记录"
     }
 
+    fun removeHistoryBatch(items: List<SourceItem>) {
+        if (items.isEmpty()) return
+        storageManager.removeHistoryBatch(items)
+        historyList = storageManager.getHistory()
+        notice = "已删除 ${items.size} 条观看记录"
+    }
+
+    fun removeFavoritesBatch(items: List<SourceItem>) {
+        if (items.isEmpty()) return
+        storageManager.removeFavorites(items)
+        favoritesList = storageManager.getFavorites()
+        items.forEach { storageManager.removeFavoriteBaseline(commentMediaKey(it)) }
+        if (!TEMP_ACCOUNT_AUTH_DISABLED && accountUser != null) {
+            syncAccountData()
+        }
+        notice = "已取消追番 ${items.size} 部作品"
+    }
+
     fun clearHistory() {
         storageManager.clearHistory()
         reloadStorageData()
@@ -4051,15 +4068,15 @@ fun HomeView(vm: MainViewModel) {
                                         ) {
                                             rowItems.forEach { item ->
                                                 MovieCard(item, Modifier.weight(1f).padding(4.dp)) { vm.openMovie(item) }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
                     }
+                }
             }
         }
+    }
+}
     }
 }
 
@@ -4243,6 +4260,19 @@ fun PlayerViewScreen(vm: MainViewModel) {
     // 进入详情/播放页时按作品加载云端评论（每次进入都强制刷新，保证最新评论可见）
     LaunchedEffect(detail.item.sourceKey, detail.item.id) {
         vm.loadCommentsForActiveDetail(force = true)
+    }
+
+    // 消息通知"评论回复"跳转：切到评论页签并滚动定位到对应评论，短暂高亮后清除
+    val commentListState = rememberLazyListState()
+    LaunchedEffect(vm.commentFocusId, vm.comments.size) {
+        val focusId = vm.commentFocusId ?: return@LaunchedEffect
+        val index = vm.comments.indexOfFirst { it.id == focusId }
+        if (index >= 0) {
+            activeTab = "comments"
+            commentListState.animateScrollToItem(index)
+            delay(4_000L)
+            vm.commentFocusId = null
+        }
     }
 
     // 横屏（全屏播放）时播放器必须精确占满可见区域：
@@ -4432,6 +4462,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
 
                 // Action Buttons Row (换源 | 缓存番剧 | 追番 | 分享)
                 item {
+                    val shareContext = LocalContext.current
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceAround
@@ -4442,7 +4473,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             tint = if (totalSources > 1) AppColors.cyan else AppColors.muted
                         ) { vm.switchSource() }
                         ActionButton(
-                            Icons.Default.KeyboardArrowDown,
+                            androidx.compose.ui.res.painterResource(R.drawable.ic_download),
                             if (vm.activeDownloadKeys.isNotEmpty()) "下载中(${vm.activeDownloadKeys.size})" else "下载番剧",
                             enabled = true
                         ) { vm.showDownloadEpisodeModal = true }
@@ -4451,7 +4482,28 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             if (isFav) "已追番" else "追番",
                             tint = if (isFav) AppColors.rose else AppColors.text
                         ) { vm.toggleFavorite(detail.item, latestEpisodeNum(detail)) }
-                        ActionButton(Icons.Default.Share, "分享", enabled = false) {}
+                        ActionButton(Icons.Default.Share, "分享") {
+                            val shareText = buildString {
+                                append("我正在「聚映」观看《${detail.item.title}》")
+                                append("\n剧集：${currentEpisode?.name ?: "第${vm.currentEpisodeIndex + 1}集"}")
+                                append("\n\n聚映 · 多源动漫聚合播放器，推荐给你：")
+                                append("\n${BuildConfig.ACCOUNT_API_BASE}/api/android/latest")
+                            }
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "聚映 · 多源动漫播放器")
+                                putExtra(Intent.EXTRA_TEXT, shareText)
+                            }
+                            runCatching {
+                                shareContext.startActivity(Intent.createChooser(shareIntent, "分享聚映"))
+                            }.onFailure {
+                                android.widget.Toast.makeText(
+                                    vm.getApplication(),
+                                    "未找到可用的分享应用",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
                     }
 
                     if (vm.showDownloadEpisodeModal) {
@@ -4823,13 +4875,15 @@ fun PlayerViewScreen(vm: MainViewModel) {
                                         }
                                     }
                                     else -> {
-                                        Text(
-                                            "🖼️",
-                                            fontSize = 18.sp,
+                                        Icon(
+                                            painterResource(R.drawable.ic_album),
+                                            contentDescription = "添加评论图片",
+                                            tint = AppColors.muted,
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(8.dp))
                                                 .clickable { commentImagePicker.launch("image/*") }
                                                 .padding(horizontal = 6.dp, vertical = 6.dp)
+                                                .size(18.dp)
                                         )
                                     }
                                 }
@@ -4869,12 +4923,16 @@ fun PlayerViewScreen(vm: MainViewModel) {
                         Text("暂无可展示评论", color = AppColors.muted, fontSize = 14.sp)
                     }
                 } else {
-                    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(
+                        state = commentListState,
+                        modifier = Modifier.weight(1f).fillMaxWidth()
+                    ) {
                         items(vm.comments.size) { index ->
                             val comment = vm.comments[index]
                             CommentCard(
                                 comment = comment,
                                 currentUserId = vm.accountUser?.id.orEmpty(),
+                                highlighted = comment.id == vm.commentFocusId,
                                 onLike = { target ->
                                     if (vm.accountUser == null) {
                                         vm.accountDialogVisible = true
@@ -4923,15 +4981,28 @@ private fun CommentActionRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text(
-            if (likesCount > 0) "👍 $likesCount" else "👍",
-            color = if (likedByMe) AppColors.rose else AppColors.muted,
-            fontSize = 12.sp,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(10.dp))
                 .clickable { onLike() }
                 .padding(horizontal = 4.dp, vertical = 2.dp)
-        )
+        ) {
+            Icon(
+                painterResource(R.drawable.ic_like),
+                contentDescription = "点赞",
+                tint = if (likedByMe) AppColors.rose else AppColors.muted,
+                modifier = Modifier.size(16.dp)
+            )
+            if (likesCount > 0) {
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "$likesCount",
+                    color = if (likedByMe) AppColors.rose else AppColors.muted,
+                    fontSize = 12.sp
+                )
+            }
+        }
         if (onReply != null) {
             Text(
                 "回复",
@@ -5009,6 +5080,12 @@ private fun CommentReplyRow(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    formatRelativeTime(reply.ts),
+                    color = AppColors.muted,
+                    fontSize = 10.sp
+                )
             }
             Spacer(Modifier.height(2.dp))
             Text(reply.text, color = AppColors.text, fontSize = 13.sp)
@@ -5046,6 +5123,7 @@ private fun CommentReplyRow(
 private fun CommentCard(
     comment: CloudComment,
     currentUserId: String,
+    highlighted: Boolean = false,
     onLike: (CloudComment) -> Unit,
     onReply: (CloudComment) -> Unit,
     onDelete: (CloudComment) -> Unit
@@ -5053,7 +5131,10 @@ private fun CommentCard(
     var previewUrl by remember { mutableStateOf<String?>(null) }
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
+        colors = CardDefaults.cardColors(
+            containerColor = if (highlighted) AppColors.cyan.copy(alpha = 0.14f) else AppColors.panel2
+        ),
+        border = if (highlighted) androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.6f)) else null
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.Top) {
@@ -6018,7 +6099,7 @@ fun ProfileView(vm: MainViewModel) {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable { vm.view = "profile_downloads" }
                     ) {
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "下载记录", tint = AppColors.text, modifier = Modifier.size(26.dp))
+                        Icon(painterResource(R.drawable.ic_download), contentDescription = "下载记录", tint = AppColors.text, modifier = Modifier.size(26.dp))
                         Spacer(Modifier.height(8.dp))
                         Text("下载记录", color = AppColors.text, fontSize = 13.sp)
                     }
@@ -6198,6 +6279,10 @@ private fun NotificationCard(notification: CloudNotification, vm: MainViewModel)
                         ).show()
                     }
                 } else {
+                    // 评论回复提醒：跳转到对应作品，并定位到该评论
+                    if (notification.commentId.isNotBlank()) {
+                        vm.commentFocusId = notification.commentId
+                    }
                     val favorite = vm.favoritesList.firstOrNull { vm.commentMediaKey(it) == notification.mediaKey }
                     if (favorite != null) {
                         vm.openMovie(favorite)
@@ -6356,7 +6441,7 @@ fun ProfileEntryCard(title: String, subtitle: String, icon: androidx.compose.ui.
 
 @Composable
 fun HistoryScreen(vm: MainViewModel) {
-    val periodOrder = listOf("近一周", "近一月", "近半年", "更早")
+    val periodOrder = listOf("今天", "昨天", "前天", "近一周", "更早")
     val groupedHistory = remember(vm.historyList) {
         val now = System.currentTimeMillis()
         periodOrder.mapNotNull { period ->
@@ -6364,6 +6449,15 @@ fun HistoryScreen(vm: MainViewModel) {
                 .filter { historyPeriodLabel(it.timestamp, now) == period }
                 .takeIf { it.isNotEmpty() }
                 ?.let { period to it }
+        }
+    }
+    var managing by remember { mutableStateOf(false) }
+    var selectedKeys by remember { mutableStateOf(setOf<String>()) }
+    fun historyKey(history: HistoryItem) = "${history.item.sourceKey}:${history.item.id}:${history.timestamp}"
+    LaunchedEffect(vm.historyList.isEmpty()) {
+        if (vm.historyList.isEmpty()) {
+            managing = false
+            selectedKeys = emptySet()
         }
     }
 
@@ -6377,8 +6471,23 @@ fun HistoryScreen(vm: MainViewModel) {
             }
             Text("观看历史", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             if (vm.historyList.isNotEmpty()) {
-                TextButton(onClick = { vm.clearHistory() }) {
-                    Text("清空记录", color = AppColors.rose, fontSize = 13.sp)
+                TextButton(onClick = {
+                    if (managing) {
+                        val toRemove = vm.historyList.filter { historyKey(it) in selectedKeys }
+                        if (toRemove.isNotEmpty()) {
+                            vm.removeHistoryBatch(toRemove.map { it.item })
+                        }
+                        managing = false
+                        selectedKeys = emptySet()
+                    } else {
+                        managing = true
+                    }
+                }) {
+                    Text(
+                        if (managing) "完成" else "管理",
+                        color = if (managing) AppColors.cyan else AppColors.text,
+                        fontSize = 13.sp
+                    )
                 }
             }
         }
@@ -6389,7 +6498,10 @@ fun HistoryScreen(vm: MainViewModel) {
                 Text("暂无观看历史记录", color = AppColors.muted, fontSize = 14.sp)
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 4.dp)
+            ) {
                 groupedHistory.forEach { (period, histories) ->
                     item(key = "history_group_$period") {
                         Text(
@@ -6402,140 +6514,153 @@ fun HistoryScreen(vm: MainViewModel) {
                     }
                     items(
                         items = histories,
-                        key = {
-                            "${it.item.sourceKey}:${it.item.id}:${it.timestamp}"
-                        }
+                        key = { historyKey(it) }
                     ) { history ->
-                        // 左滑仅弹出确认，点击"删除"才真正删除，避免误删
-                        var pendingDelete by remember { mutableStateOf(false) }
-                        val dismissState = rememberDismissState(
-                            confirmStateChange = { value ->
-                                if (value == DismissValue.DismissedToStart) {
-                                    pendingDelete = true
-                                }
-                                false
-                            }
-                        )
+                        val key = historyKey(history)
+                        val isSelected = key in selectedKeys
                         val progress = historyProgressPercent(history.positionMs, history.durationMs)
-                        SwipeToDismiss(
-                            state = dismissState,
-                            directions = setOf(DismissDirection.EndToStart),
-                            background = {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    if (managing) {
+                                        selectedKeys = if (isSelected) selectedKeys - key else selectedKeys + key
+                                    } else {
+                                        vm.openMovie(history.item, history.episodeName)
+                                    }
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) AppColors.cyan.copy(alpha = 0.14f) else AppColors.panel2
+                            ),
+                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.5f)) else null
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (managing) {
+                                    Checkbox(
+                                        checked = isSelected,
+                                        onCheckedChange = {
+                                            selectedKeys = if (it) selectedKeys + key else selectedKeys - key
+                                        },
+                                        colors = CheckboxDefaults.colors(checkedColor = AppColors.cyan),
+                                        modifier = Modifier.padding(end = 4.dp)
+                                    )
+                                }
                                 Box(
                                     modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(vertical = 4.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(AppColors.rose.copy(alpha = 0.18f))
-                                        .padding(horizontal = 20.dp),
-                                    contentAlignment = Alignment.CenterEnd
+                                        .width(148.dp)
+                                        .aspectRatio(16f / 9f)
+                                        .clip(RoundedCornerShape(8.dp))
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("删除", color = AppColors.rose, fontWeight = FontWeight.Bold)
-                                        Spacer(Modifier.width(6.dp))
-                                        Icon(
-                                            Icons.Default.Delete,
-                                            contentDescription = null,
-                                            tint = AppColors.rose
-                                        )
-                                    }
-                                }
-                            },
-                            dismissContent = {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clickable { vm.openMovie(history.item, history.episodeName) },
-                                colors = CardDefaults.cardColors(containerColor = AppColors.panel2)
-                            ) {
-                                Column {
-                                    Row(
-                                        modifier = Modifier.padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                    AsyncImage(
+                                        model = coverRequest(LocalContext.current, history.item.cover),
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .background(Color(0xFFD1D5DB).copy(alpha = 0.5f))
                                     ) {
                                         Box(
                                             modifier = Modifier
-                                                .width(148.dp)
-                                                .aspectRatio(16f / 9f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                        ) {
-                                            AsyncImage(
-                                                model = coverRequest(LocalContext.current, history.item.cover),
-                                                contentDescription = null,
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Crop
-                                            )
-                                            Box(
-                                                modifier = Modifier
-                                                    .align(Alignment.BottomCenter)
-                                                    .fillMaxWidth()
-                                                    .height(4.dp)
-                                                    .background(Color(0xFFD1D5DB).copy(alpha = 0.5f))
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxHeight()
-                                                        .fillMaxWidth(progress.coerceIn(0, 100) / 100f)
-                                                        .background(Color(0xFF38BDF8))
-                                                )
-                                            }
-                                        }
-                                        Spacer(Modifier.width(12.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                history.item.title,
-                                                color = AppColors.text,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Spacer(Modifier.height(4.dp))
-                                            val isFinished = progress >= 95 || (history.durationMs > 0 && history.positionMs >= history.durationMs - 5000)
-                                            val progressLabel = if (isFinished) "${history.episodeName} · 已看完" else "${history.episodeName} · 观看至 $progress%"
-                                            Text(
-                                                progressLabel,
-                                                color = AppColors.cyan,
-                                                fontSize = 12.sp
-                                            )
-                                            Spacer(Modifier.height(5.dp))
-                                            val context = LocalContext.current
-                                            val config = context.resources.configuration
-                                            val isTablet = (config.screenLayout and android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK) >= android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
-                                            val rawModel = android.os.Build.MODEL.orEmpty()
-                                            val rawManuf = android.os.Build.MANUFACTURER.orEmpty()
-                                            // 云端记录显示其来源设备；旧数据无设备信息时回退为当前设备
-                                            val displayDevice = history.deviceName.ifBlank {
-                                                formatFriendlyDeviceName(rawManuf, rawModel, isTablet)
-                                            }
-                                            Text(
-                                                "$displayDevice  ${formatHistoryTimestamp(history.timestamp)}",
-                                                color = AppColors.muted,
-                                                fontSize = 11.sp
-                                            )
-                                        }
+                                                .fillMaxHeight()
+                                                .fillMaxWidth(progress.coerceIn(0, 100) / 100f)
+                                                .background(Color(0xFF38BDF8))
+                                        )
                                     }
                                 }
-                            }
-                            }
-                        )
-                        if (pendingDelete) {
-                            AlertDialog(
-                                onDismissRequest = { pendingDelete = false },
-                                title = { Text("删除观看记录") },
-                                text = { Text("确定删除「${history.item.title}」的观看记录吗？") },
-                                confirmButton = {
-                                    TextButton(onClick = {
-                                        pendingDelete = false
-                                        vm.removeHistory(history.item)
-                                    }) {
-                                        Text("删除", color = AppColors.rose)
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        history.item.title,
+                                        color = AppColors.text,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    val isFinished = progress >= 95 || (history.durationMs > 0 && history.positionMs >= history.durationMs - 5000)
+                                    val progressLabel = if (isFinished) "${history.episodeName} · 已看完" else "${history.episodeName} · 观看至 $progress%"
+                                    Text(
+                                        progressLabel,
+                                        color = AppColors.cyan,
+                                        fontSize = 12.sp
+                                    )
+                                    Spacer(Modifier.height(5.dp))
+                                    val context = LocalContext.current
+                                    val config = context.resources.configuration
+                                    val isTablet = (config.screenLayout and android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK) >= android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
+                                    val rawModel = android.os.Build.MODEL.orEmpty()
+                                    val rawManuf = android.os.Build.MANUFACTURER.orEmpty()
+                                    // 云端记录显示其来源设备；旧数据无设备信息时回退为当前设备
+                                    val displayDevice = history.deviceName.ifBlank {
+                                        formatFriendlyDeviceName(rawManuf, rawModel, isTablet)
                                     }
-                                },
-                                dismissButton = {
-                                    TextButton(onClick = { pendingDelete = false }) { Text("取消") }
+                                    Text(
+                                        "$displayDevice  ${formatHistoryTimestamp(history.timestamp)}",
+                                        color = AppColors.muted,
+                                        fontSize = 11.sp
+                                    )
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            if (managing) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    color = AppColors.panel,
+                    tonalElevation = 6.dp,
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val allSelected = vm.historyList.isNotEmpty() && vm.historyList.all { historyKey(it) in selectedKeys }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    selectedKeys = if (allSelected) {
+                                        emptySet()
+                                    } else {
+                                        vm.historyList.map { historyKey(it) }.toSet()
+                                    }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = allSelected,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(checkedColor = AppColors.cyan)
                             )
+                            Text("选择全部", color = AppColors.text, fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            onClick = {
+                                val toRemove = vm.historyList.filter { historyKey(it) in selectedKeys }
+                                if (toRemove.isNotEmpty()) {
+                                    vm.removeHistoryBatch(toRemove.map { it.item })
+                                }
+                                selectedKeys = emptySet()
+                            },
+                            enabled = selectedKeys.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.rose)
+                        ) {
+                            Text("删除", color = Color.White, fontSize = 13.sp)
                         }
                     }
                 }
@@ -6551,13 +6676,22 @@ fun FavoritesScreen(vm: MainViewModel) {
     }
     val favoriteGroups = remember(vm.favoritesList, historyByTitle) {
         val now = System.currentTimeMillis()
-        val order = listOf("近一周追番", "近一月追番", "近半年追番", "更早追番", "尚未观看")
+        val order = listOf("今天追番", "昨天追番", "前天追番", "近一周追番", "更早追番", "尚未观看")
         val grouped = vm.favoritesList.groupBy { favorite ->
             val watched = historyByTitle[SourceManager.normalizeTitle(favorite.title)]
                 ?: return@groupBy "尚未观看"
             "${historyPeriodLabel(watched.timestamp, now)}追番"
         }
         order.mapNotNull { label -> grouped[label]?.takeIf(List<SourceItem>::isNotEmpty)?.let { label to it } }
+    }
+    var managing by remember { mutableStateOf(false) }
+    var selectedKeys by remember { mutableStateOf(setOf<String>()) }
+    fun favoriteKey(favorite: SourceItem) = "${favorite.sourceKey}:${favorite.id}:${SourceManager.normalizeTitle(favorite.title)}"
+    LaunchedEffect(vm.favoritesList.isEmpty()) {
+        if (vm.favoritesList.isEmpty()) {
+            managing = false
+            selectedKeys = emptySet()
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -6568,7 +6702,27 @@ fun FavoritesScreen(vm: MainViewModel) {
             IconButton(onClick = { vm.view = "profile" }) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
             }
-            Text("我的追番 / 收藏", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("我的追番 / 收藏", color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            if (vm.favoritesList.isNotEmpty()) {
+                TextButton(onClick = {
+                    if (managing) {
+                        val toRemove = vm.favoritesList.filter { favoriteKey(it) in selectedKeys }
+                        if (toRemove.isNotEmpty()) {
+                            vm.removeFavoritesBatch(toRemove)
+                        }
+                        managing = false
+                        selectedKeys = emptySet()
+                    } else {
+                        managing = true
+                    }
+                }) {
+                    Text(
+                        if (managing) "完成" else "管理",
+                        color = if (managing) AppColors.cyan else AppColors.text,
+                        fontSize = 13.sp
+                    )
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
 
@@ -6577,7 +6731,10 @@ fun FavoritesScreen(vm: MainViewModel) {
                 Text("暂未添加任何收藏", color = AppColors.muted, fontSize = 14.sp)
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 4.dp)
+            ) {
                 favoriteGroups.forEach { (group, favorites) ->
                     item(key = "favorite_group_$group") {
                         Text(
@@ -6590,8 +6747,10 @@ fun FavoritesScreen(vm: MainViewModel) {
                     }
                     items(
                         items = favorites,
-                        key = { "${it.sourceKey}:${it.id}:${SourceManager.normalizeTitle(it.title)}" }
+                        key = { favoriteKey(it) }
                     ) { favorite ->
+                        val key = favoriteKey(favorite)
+                        val isSelected = key in selectedKeys
                         val watched = historyByTitle[SourceManager.normalizeTitle(favorite.title)]
                         val progress = watched?.let {
                             historyProgressPercent(it.positionMs, it.durationMs)
@@ -6601,15 +6760,32 @@ fun FavoritesScreen(vm: MainViewModel) {
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
                                 .clickable {
-                                    vm.openMovie(favorite, watched?.episodeName)
+                                    if (managing) {
+                                        selectedKeys = if (isSelected) selectedKeys - key else selectedKeys + key
+                                    } else {
+                                        vm.openMovie(favorite, watched?.episodeName)
+                                    }
                                 },
-                            colors = CardDefaults.cardColors(containerColor = AppColors.panel)
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) AppColors.cyan.copy(alpha = 0.14f) else AppColors.panel
+                            ),
+                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, AppColors.cyan.copy(alpha = 0.5f)) else null
                         ) {
                             Column {
                                 Row(
                                     modifier = Modifier.padding(10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    if (managing) {
+                                        Checkbox(
+                                            checked = isSelected,
+                                            onCheckedChange = {
+                                                selectedKeys = if (it) selectedKeys + key else selectedKeys - key
+                                            },
+                                            colors = CheckboxDefaults.colors(checkedColor = AppColors.cyan),
+                                            modifier = Modifier.padding(end = 4.dp)
+                                        )
+                                    }
                                     AsyncImage(
                                         model = coverRequest(LocalContext.current, favorite.cover),
                                         contentDescription = null,
@@ -6665,20 +6841,58 @@ fun FavoritesScreen(vm: MainViewModel) {
                                         )
                                     }
                                 }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(end = 10.dp, bottom = 6.dp),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    TextButton(
-                                        onClick = { vm.toggleFavorite(favorite, null) },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("取消收藏", color = AppColors.rose, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+            if (managing) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    color = AppColors.panel,
+                    tonalElevation = 6.dp,
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val allSelected = vm.favoritesList.isNotEmpty() && vm.favoritesList.all { favoriteKey(it) in selectedKeys }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    selectedKeys = if (allSelected) {
+                                        emptySet()
+                                    } else {
+                                        vm.favoritesList.map { favoriteKey(it) }.toSet()
                                     }
                                 }
-                            }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = allSelected,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(checkedColor = AppColors.cyan)
+                            )
+                            Text("选择全部", color = AppColors.text, fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            onClick = {
+                                val toRemove = vm.favoritesList.filter { favoriteKey(it) in selectedKeys }
+                                if (toRemove.isNotEmpty()) {
+                                    vm.removeFavoritesBatch(toRemove)
+                                }
+                                selectedKeys = emptySet()
+                            },
+                            enabled = selectedKeys.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AppColors.rose)
+                        ) {
+                            Text("删除", color = Color.White, fontSize = 13.sp)
                         }
                     }
                 }

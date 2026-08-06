@@ -8,9 +8,10 @@ fun historyPeriodLabel(
 ): String {
     val age = (nowMillis - timestamp).coerceAtLeast(0L)
     return when {
-        age < 7L * DAY_MS -> "近一周"
-        age < 31L * DAY_MS -> "近一月"
-        age < 183L * DAY_MS -> "近半年"
+        age < 1 * DAY_MS -> "今天"
+        age < 2 * DAY_MS -> "昨天"
+        age < 3 * DAY_MS -> "前天"
+        age < 7 * DAY_MS -> "近一周"
         else -> "更早"
     }
 }
