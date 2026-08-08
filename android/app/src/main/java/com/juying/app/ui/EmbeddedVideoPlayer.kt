@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.content.pm.ActivityInfo
@@ -21,6 +22,8 @@ import android.widget.Toast
 import com.juying.app.MainActivity
 import com.juying.app.source.StorageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -81,16 +84,18 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.Size as Media3Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -98,6 +103,7 @@ import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -388,6 +394,8 @@ fun EmbeddedVideoPlayer(
     headers: Map<String, String>?,
     referer: String?,
     qualities: List<QualityOption> = emptyList(),
+    error: String? = null,
+    startSec: Long = 0L,
     title: String,
     episodeName: String,
     danmakuMediaKey: String? = null,
@@ -410,16 +418,26 @@ fun EmbeddedVideoPlayer(
 
     var longPressSpeed by remember { mutableStateOf(storageManager.getLongPressSpeed()) }
     var customSpeed by remember { mutableStateOf(storageManager.getCustomSpeed()) }
-    var currentSpeed by remember { mutableStateOf(1.0f) }
-    var resizeMode by remember { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var currentSpeed by remember { mutableStateOf(storageManager.getDefaultSpeed()) }
+    var resizeMode by remember { mutableStateOf(storageManager.getPlayerResizeMode()) }
     var playError by remember { mutableStateOf(false) }
-    var selectedQuality by remember { mutableStateOf("超分辨率") }
+    // A new episode/source always starts in adaptive mode. A concrete quality
+    // is selected only after the user explicitly chooses one.
+    var selectedQuality by remember(url, qualities) { mutableStateOf("Auto") }
     var anime4kMode by remember { mutableStateOf(Anime4kMode.OFF) }
     var showQualityMenu by remember { mutableStateOf(false) }
+    var showPlayerSettings by remember { mutableStateOf(false) }
     var showDanmakuSettings by remember { mutableStateOf(false) }
     var showCustomSpeedDialog by remember { mutableStateOf(false) }
     var showLongPressSpeedDialog by remember { mutableStateOf(false) }
     var showLoginPromptDialog by remember { mutableStateOf(false) }
+    var backgroundPlayback by remember { mutableStateOf(storageManager.getBackgroundPlayback()) }
+    var playerSkipIntroSec by remember { mutableIntStateOf(storageManager.getSkipIntroSec()) }
+    var playerSkipOutroSec by remember { mutableIntStateOf(storageManager.getSkipOutroSec()) }
+    var sleepDeadlineMillis by remember { mutableLongStateOf(0L) }
+    var externalSubtitleUri by remember(url) { mutableStateOf<Uri?>(null) }
+    var externalSubtitleName by remember(url) { mutableStateOf("") }
+    var subtitleRevision by remember(url) { mutableIntStateOf(0) }
     var isSpeedLocked by remember { mutableStateOf(false) }
     var danmakuOpacity by remember { mutableStateOf(0.85f) }
     var danmakuDraft by remember { mutableStateOf("") }
@@ -467,13 +485,33 @@ fun EmbeddedVideoPlayer(
             lowerType.contains("hls") ||
             lowerType.contains("application/x-mpegurl")
     }
-    val qualityChoices = remember(qualities, adaptiveStream) {
+    var adaptiveVideoHeights by remember(url) { mutableStateOf<List<Int>>(emptyList()) }
+    val qualityChoices = remember(qualities, adaptiveStream, adaptiveVideoHeights) {
         if (qualities.isNotEmpty()) {
             listOf("Auto") + qualities.map { it.name }.filter { it.isNotBlank() }.distinct()
-        } else if (adaptiveStream) {
-            listOf("Auto", "4K", "1080p", "720p", "480p")
+        } else if (adaptiveStream && adaptiveVideoHeights.isNotEmpty()) {
+            listOf("Auto") + adaptiveVideoHeights
+                .sortedDescending()
+                .map { height -> if (height >= 2160) "4K" else "${height}p" }
+                .distinct()
         } else {
             listOf("Auto")
+        }
+    }
+
+    val subtitleLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            externalSubtitleUri = uri
+            externalSubtitleName = uri.lastPathSegment?.substringAfterLast('/') ?: "外挂字幕"
+            subtitleRevision++
         }
     }
 
@@ -596,7 +634,10 @@ fun EmbeddedVideoPlayer(
         onFullscreenChanged(targetFullscreen)
         activity?.let { act ->
             if (targetFullscreen) {
-                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                act.requestedOrientation = if (storageManager.getAutoRotateLandscape())
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                else
+                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                 scheduleHideSystemBars(act)
                 ensureShortEdgesCutoutMode(act)
             } else {
@@ -656,6 +697,7 @@ fun EmbeddedVideoPlayer(
     val playbackKey = remember(url, type, headers, referer) {
         listOf(url, type, referer ?: "", headers?.toSortedMap()?.entries?.joinToString(";") { "${it.key}=${it.value}" } ?: "").joinToString("|")
     }
+    var startSecApplied by remember(playbackKey, startSec) { mutableStateOf(false) }
     val requestHeaders = remember(playbackKey) {
         mutableMapOf<String, String>().apply {
             referer?.let {
@@ -674,11 +716,21 @@ fun EmbeddedVideoPlayer(
         val customUa = requestHeaders.entries.firstOrNull {
             it.key.equals("user-agent", ignoreCase = true)
         }?.value
-        DefaultHttpDataSource.Factory().apply {
+        // OkHttpDataSource matches the reference Lanerc player (Xr.k):
+        // headers/Referer are injected via OkHttp so HLS key/segment and
+        // progressive requests share the same browser-like TLS/HTTP2 stack
+        // that source CDNs expect. DefaultHttpDataSource could not satisfy
+        // several CDN anti-hotlink checks, so playback stalled before
+        // video-sized data arrived.
+        val playClient = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+        OkHttpDataSource.Factory(playClient).apply {
             setUserAgent(customUa ?: BROWSER_UA)
-            setAllowCrossProtocolRedirects(true)
-            setConnectTimeoutMs(15000)
-            setReadTimeoutMs(15000)
             if (requestHeaders.isNotEmpty()) {
                 setDefaultRequestProperties(requestHeaders)
             }
@@ -692,16 +744,32 @@ fun EmbeddedVideoPlayer(
     }
     fun createMediaSource(targetUrl: String, targetType: String): MediaSource {
         val cleanUrl = targetUrl.trim()
-        val mediaItem = MediaItem.fromUri(Uri.parse(cleanUrl))
         val targetIsHls = cleanUrl.lowercase().contains(".m3u8") ||
             targetType.lowercase().contains("m3u8") ||
             targetType.lowercase().contains("hls") ||
             targetType.lowercase().contains("application/x-mpegurl")
-        return if (targetIsHls) {
-            HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
-        } else {
-            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        val mediaItemBuilder = MediaItem.Builder()
+            .setUri(Uri.parse(cleanUrl))
+        if (targetIsHls) {
+            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
+        externalSubtitleUri?.let { subtitleUri ->
+            val subtitleMimeType = when (
+                subtitleUri.lastPathSegment?.substringAfterLast('.')?.lowercase()
+            ) {
+                "vtt" -> MimeTypes.TEXT_VTT
+                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                else -> MimeTypes.APPLICATION_SUBRIP
+            }
+            val subtitle = MediaItem.SubtitleConfiguration.Builder(subtitleUri)
+                .setMimeType(subtitleMimeType)
+                .setLanguage("zh")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .build()
+            mediaItemBuilder.setSubtitleConfigurations(listOf(subtitle))
+        }
+        return DefaultMediaSourceFactory(dataSourceFactory)
+            .createMediaSource(mediaItemBuilder.build())
     }
 
     var boundPlayerView by remember(playbackKey) { mutableStateOf<PlayerView?>(null) }
@@ -745,6 +813,17 @@ fun EmbeddedVideoPlayer(
                     )
                 }
 
+                override fun onTracksChanged(tracks: Tracks) {
+                    adaptiveVideoHeights = tracks.groups
+                        .filter { it.type == C.TRACK_TYPE_VIDEO }
+                        .flatMap { group ->
+                            (0 until group.length).mapNotNull { index ->
+                                group.getTrackFormat(index).height.takeIf { it > 0 }
+                            }
+                        }
+                        .distinct()
+                }
+
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     val videoGroups = currentTracks.groups.count { it.type == C.TRACK_TYPE_VIDEO }
                     android.util.Log.i(
@@ -754,6 +833,17 @@ fun EmbeddedVideoPlayer(
                     if (playbackState == Player.STATE_READY) {
                         val mediaDuration = this@apply.duration.coerceAtLeast(0L)
                         duration = duration.coerceAtLeast(mediaDuration)
+                        if (!startSecApplied) {
+                            val introSec = storageManager.getSkipIntroSec().coerceAtLeast(0)
+                            val targetSec = maxOf(startSec, introSec.toLong())
+                            if (targetSec > 0L) {
+                                startSecApplied = true
+                                seekTo(targetSec * 1000L)
+                            }
+                        }
+                    }
+                    if (playbackState == Player.STATE_ENDED && onNextEpisode != null && storageManager.getAutoPlayNext()) {
+                        onNextEpisode()
                     }
                 }
 
@@ -864,6 +954,8 @@ fun EmbeddedVideoPlayer(
     // onRenderedFirstFrame. Wait for the actual PlayerView output surface.
     // The diagnostic snapshots let logcat distinguish decoder, surface and
     // zero-size layout failures without exposing the signed playback URL.
+    var autoFullscreenAttempted by remember(playbackKey) { mutableStateOf(false) }
+
     LaunchedEffect(exoPlayer, boundPlayerView) {
         val view = boundPlayerView ?: return@LaunchedEffect
         val sourceHost = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
@@ -892,6 +984,10 @@ fun EmbeddedVideoPlayer(
 
             if (outputReady && layoutReady) {
                 exoPlayer.playWhenReady = true
+                if (!autoFullscreenAttempted && storageManager.getAutoFullscreenOnLoad() && !isFullscreen && !isLocked) {
+                    autoFullscreenAttempted = true
+                    applyFullscreen(true)
+                }
                 return@LaunchedEffect
             }
             delay(16)
@@ -967,6 +1063,15 @@ fun EmbeddedVideoPlayer(
         playError = false
     }
 
+    LaunchedEffect(currentPosition) {
+        val skipOutroSec = storageManager.getSkipOutroSec().coerceAtLeast(0)
+        if (skipOutroSec > 0 && duration > 0L && exoPlayer.playbackState == Player.STATE_READY &&
+            currentPosition >= duration - skipOutroSec * 1000L
+        ) {
+            exoPlayer.seekTo((duration - 1L).coerceAtLeast(0L))
+        }
+    }
+
     LaunchedEffect(currentSpeed) {
         exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
     }
@@ -981,28 +1086,6 @@ fun EmbeddedVideoPlayer(
             }
             exoPlayer.play()
         }
-    }
-
-    LaunchedEffect(selectedQuality) {
-        val selectedVariant = qualities.firstOrNull { it.name == selectedQuality }
-        if (selectedVariant != null) {
-            // Concrete variants are switched by replacing the media source;
-            // constraints are only useful for adaptive HLS/DASH streams.
-            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                .buildUpon()
-                .clearVideoSizeConstraints()
-                .build()
-            return@LaunchedEffect
-        }
-        val builder = exoPlayer.trackSelectionParameters.buildUpon()
-        when (selectedQuality) {
-            "4K" -> builder.setMaxVideoSize(3840, 2160)
-            "1080p" -> builder.setMaxVideoSize(1920, 1080)
-            "720p" -> builder.setMaxVideoSize(1280, 720)
-            "480p" -> builder.setMaxVideoSize(854, 480)
-            else -> builder.clearVideoSizeConstraints()
-        }
-        exoPlayer.trackSelectionParameters = builder.build()
     }
 
     fun switchQuality(option: QualityOption?) {
@@ -1022,6 +1105,63 @@ fun EmbeddedVideoPlayer(
             android.util.Log.w("EmbeddedPlayer", "quality switch failed: ${e.message}")
             Toast.makeText(context, "清晰度切换失败，请稍后重试", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    LaunchedEffect(subtitleRevision) {
+        if (subtitleRevision <= 0) return@LaunchedEffect
+        val position = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val shouldPlay = exoPlayer.playWhenReady
+        runCatching {
+            exoPlayer.setMediaSource(createMediaSource(url, type))
+            exoPlayer.prepare()
+            if (position > 0L) exoPlayer.seekTo(position)
+            exoPlayer.playWhenReady = shouldPlay
+        }.onFailure {
+            Toast.makeText(context, "外挂字幕加载失败", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(sleepDeadlineMillis) {
+        val deadline = sleepDeadlineMillis
+        if (deadline <= 0L) return@LaunchedEffect
+        val remaining = deadline - System.currentTimeMillis()
+        if (remaining > 0L) delay(remaining)
+        if (sleepDeadlineMillis == deadline) {
+            exoPlayer.pause()
+            controlsVisible = true
+            sleepDeadlineMillis = 0L
+            Toast.makeText(context, "定时关闭已执行", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(selectedQuality) {
+        val selectedVariant = qualities.firstOrNull { it.name == selectedQuality }
+        if (selectedVariant != null) {
+            // Concrete variants are switched by replacing the media source;
+            // constraints are only useful for adaptive HLS/DASH streams.
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                .buildUpon()
+                .clearVideoSizeConstraints()
+                .build()
+            switchQuality(selectedVariant)
+            return@LaunchedEffect
+        }
+        val builder = exoPlayer.trackSelectionParameters.buildUpon()
+        when (selectedQuality) {
+            "4K" -> builder.setMaxVideoSize(3840, 2160)
+            "1080p" -> builder.setMaxVideoSize(1920, 1080)
+            "720p" -> builder.setMaxVideoSize(1280, 720)
+            "480p" -> builder.setMaxVideoSize(854, 480)
+            else -> {
+                val height = selectedQuality.removeSuffix("p").toIntOrNull()
+                if (height != null && height > 0) {
+                    builder.setMaxVideoSize((height * 16f / 9f).toInt(), height)
+                } else {
+                    builder.clearVideoSizeConstraints()
+                }
+            }
+        }
+        exoPlayer.trackSelectionParameters = builder.build()
     }
 
     // 扫描线动画进度持久化：remember 一个 Animatable，保证中途取消后能接着当前位置回退
@@ -1140,13 +1280,13 @@ fun EmbeddedVideoPlayer(
     // isPlaying may already be false because audio focus/surface was lost,
     // while playWhenReady or temporary 3x speed is still active.
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, exoPlayer) {
+    DisposableEffect(lifecycleOwner, exoPlayer, backgroundPlayback) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
                 val activityInPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     activity?.isInPictureInPictureMode == true
                 } else false
-                if (PlayerInteractionPolicy.shouldPauseOnStop(activityInPip)) {
+                if (!backgroundPlayback && PlayerInteractionPolicy.shouldPauseOnStop(activityInPip)) {
                     stopHoldGesture()
                     dragGestureActive = false
                     exoPlayer.playbackParameters = PlaybackParameters(currentSpeed)
@@ -1284,6 +1424,15 @@ fun EmbeddedVideoPlayer(
             }
             .pointerInput(Unit) {
                 detectTapGestures(
+                    onDoubleTap = { offset ->
+                        if (!storageManager.getDoubleTapSeekEnabled()) return@detectTapGestures
+                        val seekMs = 5_000L
+                        val target = if (offset.x < size.width / 2f)
+                            (exoPlayer.currentPosition - seekMs).coerceAtLeast(0L)
+                        else
+                            (exoPlayer.currentPosition + seekMs).coerceAtMost(duration)
+                        exoPlayer.seekTo(target)
+                    },
                     onTap = {
                         if (System.currentTimeMillis() - lastDragTime < 300L) return@detectTapGestures
                         controlsVisible = !controlsVisible
@@ -1381,7 +1530,7 @@ fun EmbeddedVideoPlayer(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text("视频加载失败", color = AppColors.orange, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(error ?: "视频加载失败", color = AppColors.orange, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(8.dp))
                 Text("请尝试点击「重新加载」或切换数据源", color = AppColors.muted, fontSize = 13.sp)
                 Spacer(Modifier.height(14.dp))
@@ -1740,8 +1889,8 @@ fun EmbeddedVideoPlayer(
                         }
 
                         // More Button (更多)
-                        IconButton(onClick = { showRatioMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
+                        IconButton(onClick = { showPlayerSettings = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "播放设置", tint = Color.White)
                         }
                     }
 
@@ -1970,7 +2119,7 @@ fun EmbeddedVideoPlayer(
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    "超分辨率",
+                                    selectedQuality,
                                     color = AppColors.cyan,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
@@ -2053,6 +2202,7 @@ fun EmbeddedVideoPlayer(
                             Surface(
                                 onClick = {
                                     currentSpeed = speed
+                                    storageManager.setDefaultSpeed(speed)
                                     showSpeedMenu = false
                                 },
                                 shape = RoundedCornerShape(10.dp),
@@ -2181,6 +2331,7 @@ fun EmbeddedVideoPlayer(
                         val finalVal = (Math.round(tempVal * 20) / 20.0f).coerceIn(0.25f, 4.0f)
                         customSpeed = finalVal
                         currentSpeed = finalVal
+                        storageManager.setDefaultSpeed(finalVal)
                         storageManager.setCustomSpeed(finalVal)
                         showCustomSpeedDialog = false
                         showSpeedMenu = false
@@ -2282,6 +2433,145 @@ fun EmbeddedVideoPlayer(
             )
         }
 
+        if (showPlayerSettings) {
+            AlertDialog(
+                onDismissRequest = { showPlayerSettings = false },
+                title = { Text("播放设置", color = AppColors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("播放内核", color = AppColors.text, fontWeight = FontWeight.Bold)
+                        Text(
+                            "ExoPlayer（当前版本唯一已接入内核）",
+                            color = AppColors.muted,
+                            fontSize = 12.sp
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("画面裁剪", color = AppColors.text, fontWeight = FontWeight.Bold)
+                                Text(
+                                    when (resizeMode) {
+                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "铺满"
+                                        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> "裁剪"
+                                        AspectRatioFrameLayout.RESIZE_MODE_FILL -> "拉伸"
+                                        else -> "默认"
+                                    },
+                                    color = AppColors.muted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            TextButton(onClick = {
+                                showPlayerSettings = false
+                                showRatioMenu = true
+                            }) { Text("调整", color = AppColors.cyan) }
+                        }
+
+                        Text("跳过片头 / 片尾", color = AppColors.text, fontWeight = FontWeight.Bold)
+                        listOf(
+                            "片头" to playerSkipIntroSec,
+                            "片尾" to playerSkipOutroSec
+                        ).forEach { (label, seconds) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("$label ${seconds}秒", color = AppColors.muted)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(onClick = {
+                                        val value = (seconds - 5).coerceAtLeast(0)
+                                        if (label == "片头") {
+                                            playerSkipIntroSec = value
+                                            storageManager.setSkipIntroSec(value)
+                                        } else {
+                                            playerSkipOutroSec = value
+                                            storageManager.setSkipOutroSec(value)
+                                        }
+                                    }) { Text("-5", color = AppColors.cyan) }
+                                    TextButton(onClick = {
+                                        val value = (seconds + 5).coerceAtMost(300)
+                                        if (label == "片头") {
+                                            playerSkipIntroSec = value
+                                            storageManager.setSkipIntroSec(value)
+                                        } else {
+                                            playerSkipOutroSec = value
+                                            storageManager.setSkipOutroSec(value)
+                                        }
+                                    }) { Text("+5", color = AppColors.cyan) }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("后台播放", color = AppColors.text, fontWeight = FontWeight.Bold)
+                                Text("离开应用后继续播放音频", color = AppColors.muted, fontSize = 12.sp)
+                            }
+                            Switch(
+                                checked = backgroundPlayback,
+                                onCheckedChange = {
+                                    backgroundPlayback = it
+                                    storageManager.setBackgroundPlayback(it)
+                                }
+                            )
+                        }
+
+                        Text("外挂字幕", color = AppColors.text, fontWeight = FontWeight.Bold)
+                        Text(
+                            externalSubtitleName.ifBlank { "支持 SRT / VTT / ASS / SSA" },
+                            color = AppColors.muted,
+                            fontSize = 12.sp
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = {
+                                subtitleLauncher.launch(
+                                    arrayOf("text/*", "application/x-subrip", "application/octet-stream")
+                                )
+                            }) { Text("加载字幕", color = AppColors.cyan) }
+                            if (externalSubtitleUri != null) {
+                                TextButton(onClick = {
+                                    externalSubtitleUri = null
+                                    externalSubtitleName = ""
+                                    subtitleRevision++
+                                }) { Text("清除", color = AppColors.rose) }
+                            }
+                        }
+
+                        Text("定时关闭", color = AppColors.text, fontWeight = FontWeight.Bold)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(0, 15, 30, 60, 90).forEach { minutes ->
+                                AssistChip(
+                                    onClick = {
+                                        sleepDeadlineMillis = if (minutes == 0) 0L else {
+                                            System.currentTimeMillis() + minutes * 60_000L
+                                        }
+                                    },
+                                    label = { Text(if (minutes == 0) "关闭" else "$minutes 分钟") }
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showPlayerSettings = false }) {
+                        Text("完成", color = AppColors.cyan)
+                    }
+                },
+                containerColor = AppColors.panel
+            )
+        }
+
         if (showQualityMenu) {
             AlertDialog(
                 onDismissRequest = { showQualityMenu = false },
@@ -2290,6 +2580,42 @@ fun EmbeddedVideoPlayer(
                     Column(
                         modifier = Modifier.verticalScroll(rememberScrollState())
                     ) {
+                        if (qualityChoices.size > 1) {
+                            Text(
+                                "清晰度",
+                                color = AppColors.text,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                qualityChoices.forEach { choice ->
+                                    val qSelected = selectedQuality == choice
+                                    Surface(
+                                        onClick = { selectedQuality = choice },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (qSelected) AppColors.cyan.copy(alpha = 0.22f) else AppColors.panel2,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (qSelected) AppColors.cyan else Color.Transparent
+                                        )
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            RadioButton(
+                                                selected = qSelected,
+                                                onClick = { selectedQuality = choice },
+                                                colors = RadioButtonDefaults.colors(selectedColor = AppColors.cyan)
+                                            )
+                                            Text(choice, color = if (qSelected) AppColors.text else AppColors.muted, fontSize = 13.sp)
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(14.dp))
+                        }
                         Text(
                             "Anime4K GPU超分辨率 · 实验功能",
                             color = AppColors.text,
@@ -2659,6 +2985,7 @@ fun EmbeddedVideoPlayer(
                                     .fillMaxWidth()
                                     .clickable {
                                         resizeMode = mode
+                                        storageManager.setPlayerResizeMode(mode)
                                         showRatioMenu = false
                                     }
                                     .padding(vertical = 8.dp, horizontal = 4.dp),
@@ -2670,6 +2997,7 @@ fun EmbeddedVideoPlayer(
                                         selected = selected,
                                         onClick = {
                                             resizeMode = mode
+                                            storageManager.setPlayerResizeMode(mode)
                                             showRatioMenu = false
                                         },
                                         colors = RadioButtonDefaults.colors(selectedColor = AppColors.cyan)

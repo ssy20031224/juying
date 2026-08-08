@@ -12,14 +12,14 @@
  *   - 搜索：GET host/vc/api/search/{kw}/{page}.json → 明文数组（含全部频道，取 typeName==动漫；仅第 1 页有数据）
  *   - 详情：GET host/cache/videos/{floor(id/1000)}/{id}.json?version={ver}&baoming=com.baiyunvideo.app&channel=fenxiang
  *           → base64(iv12+cipher+tag16)，AES-256-GCM 解密（必须带上面 query，否则服务端返回旧 key 密文、新 key 解不开）
- *           key=UvsoWWyu3PM8GpEsaqm4VsBcJrDJy7i7（utf8 32B）→ {videoName,...,playUrlList:[{name,ji}]}
+ *           key=Uvokilpu3PM8GpEsaqm4VsBcJrDJy7i7（utf8 32B）→ {videoName,...,playUrlList:[{name,ji}]}
  *   - 取流：GET host/vc/api/video/playurl?sid={id}&ji={ji}&jiIndex={i}&t=0&y=0&isjiid=1&androidId={16}&version={ver}&baoming=com.baiyunvideo.app&channel=fenxiang
  *           header vuk=md5(id+key) → data.url（多为带签名 mp4 直链）
  */
 
 var CHANNEL = '动漫';
 var PKG = 'com.baiyunvideo.app';
-var KEY = 'UvsoWWyu3PM8GpEsaqm4VsBcJrDJy7i7'; // AES-256 key（utf8 32 字节；2026-07 由 Zz4O… 轮换而来，详情解密 + 取流 vuk 签名共用）
+var KEY = 'Uvokilpu3PM8GpEsaqm4VsBcJrDJy7i7'; // AES-256 key（utf8 32 字节；2026-07 由 Zz4O… 轮换而来，详情解密 + 取流 vuk 签名共用）
 var BOOT = 'https://ss.trgfd.cn/cache/index/' + PKG + '.json';
 var HOST_DEFAULT = 'https://js.trgfd.cn';
 var VER_DEFAULT = '2.5.0';

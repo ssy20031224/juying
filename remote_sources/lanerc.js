@@ -1,72 +1,98 @@
-/* Lanerc 旧版宿主兼容源  version: 1.0.7 */
+ 
 
-// 2026-07-20 修复：该 COS 发现地址已失联（域名无法解析/被黑洞），此前放在解析首位会把
-// 首次调用拖慢十几秒，撞上宿主 8s 首拉预算被误判成坏源。现改为「回退站优先」（见
-// _resolveHost），本地址仅在回退站失败时用 3s 短超时兜底尝试，保留为将来换域名的自愈通道。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 var _LANERC_DISCOVERY = 'https://anime999x-1366475786.cos.ap-guangzhou.myqcloud.com/apis.json';
 var _LANERC_FALLBACK_HOST = 'http://lol.jngaoke.cn/';
-/** 回退站探测与域名发现请求的短超时（毫秒）：失联地址快速失败，不拖慢首次调用。 */
+ 
 var _LANERC_PROBE_TIMEOUT_MS = 3000;
+ 
+var _LANERC_WARNING_PLAYLIST_TIMEOUT_MS = 3000;
+var _LANERC_BLOCK_WARNING_PLAYLIST = true;
 var _LANERC_STALE_HOST = 'https://server.jngaoke.cn/';
 var _LANERC_AUTH_FALLBACK = 'com.clggjv.xcjfmd.ffo';
 var _LANERC_DECRYPT_KEY = '8f81c2519e3b661834219e7142000093';
+ 
+var _LANERC_BUILD_SIGNATURE = '74322D4D62B9F4A986DFA8973EE70EBC034E74551B8715C755EDD9ED18E6820B';
+ 
+var _LANERC_QUERY_SIGN_SECRET = '7d3cb4d6e7fbc7c9';
+
+
+var _LANERC_API_UA = 'Dart/3.5 (dart:io)';
 var _lanercExt = typeof ext === 'object' && ext ? ext : {};
 var _lanercHost = '';
 var _lanercHome = null;
 var _lanercRuntime = null;
 
-/**
- * 兼容旧 Rhino：避免依赖 String.prototype.trim。
- */
+
+var _lanercLastDetail = null;
+
+
+
 function _legacyTrim(value) {
     return value === null || value === undefined ? '' : String(value).replace(/^\s+|\s+$/g, '');
 }
 
-/**
- * 兼容旧 Rhino：避免依赖 Array.isArray。
- */
+
+
 function _legacyIsArray(value) {
     return Object.prototype.toString.call(value) === '[object Array]';
 }
 
-/**
- * 兼容精简宿主：安全判断对象自有字段。
- */
+
+
 function _legacyOwn(object, key) {
     return object !== null && object !== undefined &&
         Object.prototype.hasOwnProperty.call(object, key);
 }
 
-/**
- * 输出统一的中文日志，日志异常不能影响数据源主流程。
- */
+
+
 function _lanercLog(message) {
     try {
         log('[Lanerc旧版源] ' + message);
     } catch (error) {
-        // 某些最老宿主没有日志实现，直接忽略即可。
+        
     }
 }
 
-/**
- * 把基础地址整理为恰好带一个结尾斜杠的形式。
- */
+
+
 function _normalizeHost(host) {
     var value = _legacyTrim(host);
     if (!value) return '';
     return value.replace(/\/+$/, '') + '/';
 }
 
-/**
- * 识别在线配置仍在下发、但证书已过期的旧业务站点。
- */
+
+
 function _isStaleLanercHost(host) {
     return _normalizeHost(host).toLowerCase() === _LANERC_STALE_HOST;
 }
 
-/**
- * 安全解析 JSON；已经是对象的值直接返回。
- */
+
+
 function _safeParse(value, fallback) {
     if (value === null || value === undefined || value === '') return fallback;
     if (typeof value === 'object') return value;
@@ -78,9 +104,8 @@ function _safeParse(value, fallback) {
     }
 }
 
-/**
- * 读取旧版源的接口解密配置；未配置 key 时明确返回空对象。
- */
+
+
 function _decryptOptions() {
     var config = _lanercExt.decrypt;
     if (typeof config === 'string') config = _safeParse(config, {});
@@ -88,10 +113,8 @@ function _decryptOptions() {
     return config;
 }
 
-/**
- * 参考 manshan.js 的自包含结构，实现旧宿主可用的精简 AES-256-ECB 解密器。
- * 仅包含当前协议需要的 Base64、PKCS7 和 UTF-8 解码，不依赖宿主 crypto。
- */
+
+
 var _LANERC_AES_FALLBACK = (function () {
     var inverseSbox = [
         0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
@@ -131,12 +154,12 @@ var _LANERC_AES_FALLBACK = (function () {
     ];
     var roundConstants = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36];
 
-    /** 在 AES 有限域中执行乘二。 */
+     
     function _aesXtime(value) {
         return ((value << 1) ^ (((value >> 7) & 1) * 0x1b)) & 0xff;
     }
 
-    /** 将 32 字节密钥扩展为 AES-256 的 15 组轮密钥。 */
+     
     function _aesExpandKey(key) {
         var keyWords = 8;
         var rounds = 14;
@@ -164,7 +187,7 @@ var _LANERC_AES_FALLBACK = (function () {
         return expanded;
     }
 
-    /** 执行一轮逆向行移位和逆向字节替换。 */
+     
     function _aesInverseShiftAndSubstitute(state) {
         var shifted = [
             state[0], state[13], state[10], state[7],
@@ -176,7 +199,7 @@ var _LANERC_AES_FALLBACK = (function () {
         return shifted;
     }
 
-    /** 就地执行 AES 逆向列混合。 */
+     
     function _aesInverseMixColumns(state) {
         for (var column = 0; column < 4; column += 1) {
             var offset = column * 4;
@@ -198,7 +221,7 @@ var _LANERC_AES_FALLBACK = (function () {
         }
     }
 
-    /** 使用已扩展的 AES-256 轮密钥解密单个 16 字节块。 */
+     
     function _aesDecryptBlock(block, expanded) {
         var rounds = 14;
         var state = block.slice();
@@ -214,14 +237,14 @@ var _LANERC_AES_FALLBACK = (function () {
         return state;
     }
 
-    /** 把 ASCII 密钥字符串转换为字节数组。 */
+     
     function _aesTextBytes(value) {
         var result = [];
         for (var index = 0; index < value.length; index += 1) result.push(value.charCodeAt(index) & 0xff);
         return result;
     }
 
-    /** 在不依赖 atob 的旧宿主中解析标准 Base64。 */
+     
     function _aesBase64Bytes(value) {
         var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
         var lookup = {};
@@ -243,7 +266,7 @@ var _LANERC_AES_FALLBACK = (function () {
         return output;
     }
 
-    /** 把解密后的 UTF-8 字节还原为宿主字符串。 */
+     
     function _aesUtf8Text(bytes, length) {
         var output = '';
         var index = 0;
@@ -268,7 +291,7 @@ var _LANERC_AES_FALLBACK = (function () {
     }
 
     return {
-        /** 解密标准 Base64 编码的 AES-256-ECB/PKCS7 密文。 */
+         
         decryptBase64: function (base64, keyText) {
             var key = _aesTextBytes(String(keyText || ''));
             if (key.length !== 32) throw new Error('内置 AES-256 要求 32 字节密钥');
@@ -290,10 +313,8 @@ var _LANERC_AES_FALLBACK = (function () {
     };
 })();
 
-/**
- * 严格按应用原始顺序恢复 Lanerc 的自定义 Base64 字符表。
- * 后五步依赖前五步产生的占位字符，不能合并成无序映射。
- */
+
+
 function _restoreLanercAlphabet(ciphertext) {
     return String(ciphertext || '')
         .replace(/1/g, '!')
@@ -308,10 +329,8 @@ function _restoreLanercAlphabet(ciphertext) {
         .replace(/&/g, '/');
 }
 
-/**
- * 对接口返回的自定义 Base64 密文做 AES 解密并还原 JSON 对象。
- * 默认使用 APK 已确认参数，同时允许 ext.decrypt 覆盖协议配置。
- */
+
+
 function _decryptApiData(ciphertext) {
     var config = _decryptOptions();
     var key = _firstValue(config, ['key']) || _LANERC_DECRYPT_KEY;
@@ -354,9 +373,8 @@ function _decryptApiData(ciphertext) {
     }
 }
 
-/**
- * 识别 Lanerc 的 code=201 加密响应，成功时替换为明文业务对象。
- */
+
+
 function _decodeApiResponse(value) {
     var response = value;
     if (!response || typeof response !== 'object' || _legacyIsArray(response)) return response;
@@ -367,13 +385,18 @@ function _decodeApiResponse(value) {
     return response;
 }
 
-/**
- * 生成旧版 request/post 接受的字符串配置。
- * 2026-07-20：新增 timeoutMs 按次覆盖（宿主 JsHttp 认 options.timeout 毫秒字段），
- * 供发现/探测请求传短超时；不传时沿用 ext.timeout 的旧行为。
- */
+
+
+function _lanercApiUserAgent() {
+    var candidate = _legacyTrim(_lanercExt.userAgent);
+    return /^Dart\//i.test(candidate) ? candidate : _LANERC_API_UA;
+}
+
+
+
 function _requestOptions(isPost, timeoutMs) {
     var headers = { Accept: 'application/json' };
+    headers['User-Agent'] = _lanercApiUserAgent();
     if (isPost) headers['Content-Type'] = 'application/json';
     var options = { headers: headers };
     var timeout = Number(timeoutMs || _lanercExt.timeout || 0);
@@ -381,10 +404,8 @@ function _requestOptions(isPost, timeoutMs) {
     return JSON.stringify(options);
 }
 
-/**
- * 使用旧版同步 request 发起 GET，并将响应解析为对象。
- * 2026-07-20：透传可选 timeoutMs（见 _requestOptions），业务调用不传时行为不变。
- */
+
+
 function _requestJson(url, timeoutMs) {
     try {
         return _decodeApiResponse(_safeParse(request(url, _requestOptions(false, timeoutMs)), {}));
@@ -394,9 +415,8 @@ function _requestJson(url, timeoutMs) {
     }
 }
 
-/**
- * 使用旧版同步 post 发送 JSON，并将响应解析为对象。
- */
+
+
 function _postJson(url, body) {
     try {
         return _decodeApiResponse(_safeParse(post(url, JSON.stringify(body || {}), _requestOptions(true)), {}));
@@ -406,9 +426,8 @@ function _postJson(url, body) {
     }
 }
 
-/**
- * 递归查找配置或响应中的指定字段，最多下探十二层。
- */
+
+
 function _findDeep(value, key, depth) {
     var level = depth || 0;
     if (!value || typeof value !== 'object' || level > 12) return '';
@@ -421,32 +440,143 @@ function _findDeep(value, key, depth) {
     return '';
 }
 
-/**
- * 解析业务基础地址：ext.host 优先，其次静态回退站，最后在线发现。
- *
- * 2026-07-20 修复：老顺序是「在线发现 → 静态回退」，而内置 COS 发现地址已失联
- * （域名解析失败/被黑洞），首次调用要白等发现请求超时才落到回退站，撞上宿主 8s
- * 首拉预算被误判成坏源。现在反过来：先用 3s 短超时探测实测存活的回退站
- * lol.jngaoke.cn（探到的首页数据顺手喂给 _getHome 复用，探测零浪费）；回退站真挂
- * 了才用发现地址（同样 3s 短超时）自愈到新域名，失联地址只保留为末位自愈通道。
+
+
+/*
+ * 播放接口在不同版本里出现过 play_url / playUrl / url 三种字段名，
+ * 播放请求头也有 playHeader / play_header / headers 三种写法。不要把
+ * 这些兼容逻辑塞进 play()，否则接口升级时很容易又把结果解析丢掉。
  */
+function _findDeepAny(value, keys) {
+    var names = _legacyIsArray(keys) ? keys : [];
+    for (var index = 0; index < names.length; index += 1) {
+        var found = _findDeep(value, String(names[index] || ''));
+        if (found !== '' && found !== null && found !== undefined) return found;
+    }
+    return '';
+}
+
+
+
+function _normalizePlayText(value) {
+    var text = _legacyTrim(value);
+    if (!text) return '';
+    /* JSON 接口常把 URL 写成 https:\/\/... 或 HTML 实体。 */
+    text = text
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/&amp;/gi, '&');
+    if (/^https?%3a%2f%2f/i.test(text)) {
+        try { text = decodeUri(text); } catch (error) { }
+    }
+    if (/^\/\//.test(text)) text = 'https:' + text;
+    return text;
+}
+
+
+
+function _playUrlFromResponse(response) {
+    var source = response;
+    if (typeof source === 'string') {
+        var parsedSource = _safeParse(source, source);
+        if (parsedSource === source) return _normalizePlayText(source);
+        source = parsedSource;
+    }
+    /* 某些旧节点把 data 再序列化了一层：{data:"{\\"play_url\\":...}"}。 */
+    for (var depth = 0; depth < 3 && source && typeof source === 'object'; depth += 1) {
+        if (typeof source.data !== 'string') break;
+        var decoded = _safeParse(source.data, null);
+        if (!decoded || typeof decoded !== 'object') break;
+        source = decoded;
+    }
+    var value = _findDeepAny(source, [
+        'play_url', 'playUrl', 'playurl', 'video_url', 'videoUrl',
+        'm3u8_url', 'm3u8Url', 'url', 'src'
+    ]);
+    if (value && typeof value === 'object') {
+        value = _findDeepAny(value, ['url', 'play_url', 'playUrl', 'src', 'value']);
+    }
+    return _normalizePlayText(value);
+}
+
+
+
+function _playHeadersFromResponse(response) {
+    var source = response;
+    if (typeof source === 'string') source = _safeParse(source, source);
+    for (var depth = 0; depth < 3 && source && typeof source === 'object'; depth += 1) {
+        if (typeof source.data !== 'string') break;
+        var decoded = _safeParse(source.data, null);
+        if (!decoded || typeof decoded !== 'object') break;
+        source = decoded;
+    }
+    var value = _findDeepAny(source, [
+        'play_header', 'playHeader', 'play_headers', 'playHeaders',
+        'http_headers', 'httpHeaders', 'headers'
+    ]);
+    if (typeof value === 'string') value = _safeParse(value, null);
+    if (!value || typeof value !== 'object' || _legacyIsArray(value)) return {};
+    var result = {};
+    for (var key in value) {
+        if (_legacyOwn(value, key) && value[key] !== null && value[key] !== undefined) {
+            result[String(key)] = String(value[key]);
+        }
+    }
+    return result;
+}
+
+
+
+function _playResult(response, playUrl) {
+    var result = { url: playUrl, type: _mediaType(playUrl) };
+    var headers = _playHeadersFromResponse(response);
+    var source = response;
+    if (typeof source === 'string') source = _safeParse(source, source);
+    if (result.type === 'auto') {
+        var responseType = String(_findDeepAny(source, ['type', 'format', 'mime', 'mime_type']) || '').toLowerCase();
+        if (responseType.indexOf('m3u8') !== -1 || responseType.indexOf('hls') !== -1) result.type = 'm3u8';
+        else if (responseType.indexOf('mp4') !== -1) result.type = 'mp4';
+    }
+    var referer = _normalizePlayText(_findDeepAny(source, ['referer', 'referrer']));
+    var userAgent = _normalizePlayText(_findDeepAny(source, ['user_agent', 'userAgent', 'ua']));
+
+    /* file.jngaoke.cn 的取流地址需要从站点页带 Referer；如果接口没有
+       下发头，给一个与请求端一致的最小默认值，避免播放器二次请求被 403。 */
+    if (!Object.keys(headers).length && /^https?:\/\/file\.jngaoke\.cn\//i.test(playUrl)) {
+        headers.Referer = _resolveHost();
+        headers['User-Agent'] = _lanercApiUserAgent();
+    }
+    if (Object.keys(headers).length) result.headers = headers;
+    if (referer) result.referer = referer;
+    if (userAgent) result.userAgent = userAgent;
+    return result;
+}
+
+
+
+function _upgradeHost(host) {
+    return host ? String(host).replace(/^http:\/\//i, 'https://') : host;
+}
+
+
+
 function _resolveHost() {
     if (_lanercHost) return _lanercHost;
-    _lanercHost = _normalizeHost(_lanercExt.host);
+    _lanercHost = _upgradeHost(_normalizeHost(_lanercExt.host));
     if (_lanercHost) return _lanercHost;
 
-    var fallbackProbe = _payload(_requestJson(_LANERC_FALLBACK_HOST + 'app/home', _LANERC_PROBE_TIMEOUT_MS));
+    var fallbackProbe = _payload(_requestJson(_upgradeHost(_LANERC_FALLBACK_HOST) + 'app/home', _LANERC_PROBE_TIMEOUT_MS));
     if (fallbackProbe && typeof fallbackProbe === 'object' &&
         (_legacyOwn(fallbackProbe, 'vod_list') || _legacyOwn(fallbackProbe, 'banner') || _legacyOwn(fallbackProbe, 'hot_list'))) {
         _lanercHome = fallbackProbe;
-        _lanercHost = _LANERC_FALLBACK_HOST;
+        _lanercHost = _upgradeHost(_LANERC_FALLBACK_HOST);
         return _lanercHost;
     }
 
     _lanercLog('静态回退站探测失败，尝试在线域名发现');
     var configUrl = String(_lanercExt.configUrl || _LANERC_DISCOVERY);
     var discovery = _requestJson(configUrl, _LANERC_PROBE_TIMEOUT_MS);
-    var discoveredHost = _normalizeHost(_findDeep(discovery, 'domain'));
+    var discoveredHost = _upgradeHost(_normalizeHost(_findDeep(discovery, 'domain')));
     if (_isStaleLanercHost(discoveredHost)) {
         _lanercLog('在线配置仍为证书过期旧站点，改用静态回退地址');
         discoveredHost = '';
@@ -454,28 +584,42 @@ function _resolveHost() {
     _lanercHost = discoveredHost;
     if (!_lanercHost) {
         _lanercLog('域名发现失败，使用静态回退地址');
-        _lanercHost = _LANERC_FALLBACK_HOST;
+        _lanercHost = _upgradeHost(_LANERC_FALLBACK_HOST);
     }
     return _lanercHost;
 }
 
-/**
- * 调用 Lanerc 业务 GET 接口。
- */
+
+
 function _apiGet(path) {
     return _requestJson(_resolveHost() + String(path || '').replace(/^\/+/, ''));
 }
 
-/**
- * 调用 Lanerc 业务 POST 接口。
- */
+
+
+function _lanercSignedApiPath(path, seconds, nonce) {
+    var cleanPath = String(path || '').replace(/^\/+/, '');
+    var timeValue = seconds === null || seconds === undefined
+        ? Math.floor(Number(timestamp()) / 1000)
+        : Math.floor(Number(seconds));
+    var randomValue = nonce === null || nonce === undefined ? '' : String(nonce);
+    var alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    while (randomValue.length < 6) {
+        randomValue += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+    }
+    randomValue = randomValue.slice(0, 6);
+    var digest = md5('/' + cleanPath + '@' + timeValue + '@' + randomValue + '@' + _LANERC_QUERY_SIGN_SECRET);
+    return cleanPath + '?sign=' + timeValue + '-' + randomValue + '-' + String(digest).toLowerCase();
+}
+
+
+
 function _apiPost(path, body) {
     return _postJson(_resolveHost() + String(path || '').replace(/^\/+/, ''), body);
 }
 
-/**
- * 逐层移除常见的 data 包裹，但保留业务对象和数组本身。
- */
+
+
 function _payload(value) {
     var current = value;
     var count = 0;
@@ -494,15 +638,11 @@ function _payload(value) {
     return current || {};
 }
 
-// 豆瓣图床封面防盗链 UA（2026-07-20 图片不显示修复）：img3 节点对 okhttp UA 即使带 Referer 也 403，须浏览器 UA。
+
 var _LANERC_PIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36';
 
-/**
- * 给豆瓣图床封面拼防盗链头后缀（宿主 PicUrl 协议 @Referer=/@User-Agent=，见 App PicUrl.kt）。
- * 豆瓣图床无 Referer 一律 418、img3 节点还要求非-okhttp UA，拼上两个头后 App 用净地址发请求 +
- * 附头即可过防盗链，不依赖 App 侧 ImageLoader 拦截器。只对 doubanio 域名拼（其余图床原样返回）；
- * 已带后缀的不重复拼。
- */
+
+
 function _lanercCoverPic(pic) {
     var url = String(pic || '');
     if (!url) return '';
@@ -511,9 +651,8 @@ function _lanercCoverPic(pic) {
     return url + '@Referer=https://movie.douban.com/@User-Agent=' + _LANERC_PIC_UA;
 }
 
-/**
- * 按字段优先级取第一个非空值。
- */
+
+
 function _firstValue(object, keys) {
     var source = object || {};
     for (var index = 0; index < keys.length; index += 1) {
@@ -523,9 +662,44 @@ function _firstValue(object, keys) {
     return '';
 }
 
-/**
- * 把不同接口的视频条目统一为宿主视频卡片。
- */
+
+
+function _cardRemarks(source) {
+    var text = _legacyTrim(String(_firstValue(source, ['vod_remarks', 'vod_sub', 'vod_tag']) || ''));
+    var flag = text === '0' || text === '1' ? text : String(_firstValue(source, ['vod_isend']));
+    if (text === '' || text === '0' || text === '1') {
+        if (flag === '1') return '已完结';
+        if (flag === '0') return '连载中';
+        return '';
+    }
+    return text;
+}
+
+ 
+function _sortName(value) {
+    var key = String(value === null || value === undefined ? '' : value);
+    if (!key) return '';
+    var home = _getHome();
+    var groups = _legacyIsArray(home.vod_list) ? home.vod_list : [];
+    for (var index = 0; index < groups.length; index += 1) {
+        var group = groups[index] || {};
+        if (String(group.sort_id) === key) return String(group.sort_name || '');
+    }
+    return '';
+}
+
+
+
+function _typeText(source) {
+    var value = _firstValue(source || {}, ['vod_class', 'vod_type']);
+    var text = _legacyTrim(String(value === null || value === undefined ? '' : value));
+    if (!text) return '';
+    if (/^\d+$/.test(text)) return _sortName(text);
+    return text;
+}
+
+
+
 function _card(item, sectionTitle) {
     var source = item || {};
     var id = _firstValue(source, ['id', 'vod_id']);
@@ -535,16 +709,15 @@ function _card(item, sectionTitle) {
         id: String(id),
         name: String(name),
         pic: _lanercCoverPic(_firstValue(source, ['vod_pic', 'pic', 'image', 'cover'])),
-        type: String(sectionTitle || _firstValue(source, ['vod_class', 'vod_type']) || ''),
+        type: String(sectionTitle || '') || _typeText(source),
         year: String(_firstValue(source, ['vod_year', 'year']) || ''),
-        remarks: String(_firstValue(source, ['vod_remarks', 'vod_sub', 'vod_tag', 'vod_isend']) || ''),
+        remarks: _cardRemarks(source),
         desc: String(_firstValue(source, ['vod_blurb', 'desc']) || '')
     };
 }
 
-/**
- * 把业务数组批量转换为有效视频卡片。
- */
+
+
 function _cards(items, sectionTitle) {
     var list = _legacyIsArray(items) ? items : [];
     var result = [];
@@ -555,9 +728,8 @@ function _cards(items, sectionTitle) {
     return result;
 }
 
-/**
- * 将分类配置转换为显示字符串。
- */
+
+
 function _optionText(value) {
     if (value === null || value === undefined) return '';
     if (typeof value === 'object') {
@@ -566,9 +738,8 @@ function _optionText(value) {
     return _legacyTrim(value);
 }
 
-/**
- * 兼容数组、JSON 数组、逗号和斜杠分隔的筛选选项，并保证“全部”位于首项。
- */
+
+
 function _options(value) {
     var source = value;
     if (typeof source === 'string') {
@@ -589,9 +760,8 @@ function _options(value) {
     return result;
 }
 
-/**
- * 将筛选字符串转换为 TVBox 显示值/提交值，全部选项提交空字符串。
- */
+
+
 function _filterOptions(value) {
     var options = _options(value);
     var result = [];
@@ -602,9 +772,8 @@ function _filterOptions(value) {
     return result;
 }
 
-/**
- * 获取并缓存当前上下文的首页数据。
- */
+
+
 function _getHome() {
     if (_lanercHome !== null) return _lanercHome;
     _lanercHome = _payload(_apiGet('app/home'));
@@ -612,9 +781,8 @@ function _getHome() {
     return _lanercHome;
 }
 
-/**
- * 根据首页模型构造推荐、热门和分类分区。
- */
+
+
 function _buildHomeSections() {
     var home = _getHome();
     var sections = [];
@@ -634,9 +802,8 @@ function _buildHomeSections() {
     return sections;
 }
 
-/**
- * 将首页按“热门、分类、轮播”顺序展开，并按内容 ID 去重。
- */
+
+
 function _flattenHome() {
     var sections = _buildHomeSections();
     var ordered = [];
@@ -665,9 +832,8 @@ function _flattenHome() {
     return cards;
 }
 
-/**
- * 返回首页分区；异常时返回空数组 JSON。
- */
+
+
 function homeSections() {
     try {
         return JSON.stringify(_buildHomeSections());
@@ -677,9 +843,8 @@ function homeSections() {
     }
 }
 
-/**
- * 搜索内容；空关键词时兼容旧版宿主并返回首页扁平列表。
- */
+
+
 function search(keyword, page) {
     try {
         var word = _legacyTrim(keyword);
@@ -693,9 +858,8 @@ function search(keyword, page) {
     }
 }
 
-/**
- * 返回老格式分类筛选，适配不支持新版数组筛选结构的宿主。
- */
+
+
 function categories() {
     try {
         var home = _getHome();
@@ -727,17 +891,15 @@ function categories() {
     }
 }
 
-/**
- * 将老格式“全部”和值映射为接口实际提交值。
- */
+
+
 function _filterValue(value) {
     if (value === null || value === undefined || value === '全部') return '';
     return String(value);
 }
 
-/**
- * 判断搜索参数是否为首页下发的真实分类 key。
- */
+
+
 function _isCategoryKey(value) {
     var key = String(value || '');
     var home = _getHome();
@@ -750,9 +912,8 @@ function _isCategoryKey(value) {
     return false;
 }
 
-/**
- * 请求分类筛选的单个服务端页，并转换为宿主卡片。
- */
+
+
 function _filteredPage(category, filters, page) {
     var source = filters || {};
     var classValue = _filterValue(source['class'] || source.type || '');
@@ -769,9 +930,8 @@ function _filteredPage(category, filters, page) {
     return _cards(data.filter_vods, '');
 }
 
-/**
- * 保留分类筛选，并按宿主传入页码返回单个服务端页。
- */
+
+
 function searchFiltered(category, filtersJson, page) {
     try {
         if (_filterValue(category) === '') return JSON.stringify(_flattenHome());
@@ -783,9 +943,8 @@ function searchFiltered(category, filtersJson, page) {
     }
 }
 
-/**
- * 在当前 QuickJS 上下文中只读取一次播放运行配置。
- */
+
+
 function _loadRuntimeConfig() {
     if (_lanercRuntime !== null) return _lanercRuntime;
     var data = _apiGet('app/config?platform=android');
@@ -796,15 +955,14 @@ function _loadRuntimeConfig() {
     return _lanercRuntime;
 }
 
-/**
- * 按播放标记、ext、运行配置的顺序确定 sign/auth，并补齐包名授权。
- */
+
+
 function _runtimeValues(flagData) {
     var flag = flagData && typeof flagData === 'object' ? flagData : {};
     var config = _loadRuntimeConfig();
     var sign = _firstValue(flag, ['sign']);
     if (sign === '') sign = _firstValue(_lanercExt, ['sign']);
-    if (sign === '') sign = config.sign;
+    if (sign === '') sign = _LANERC_BUILD_SIGNATURE;
     var auth = _firstValue(flag, ['auth']);
     if (auth === '') auth = _firstValue(_lanercExt, ['auth']);
     if (auth === '') auth = config.auth;
@@ -812,9 +970,8 @@ function _runtimeValues(flagData) {
     return { sign: String(sign || ''), auth: String(auth) };
 }
 
-/**
- * 将线路的 video 字段转换为播放项数组。
- */
+
+
 function _videoItems(value) {
     if (_legacyIsArray(value)) return value;
     if (value === null || value === undefined || value === '') return [];
@@ -826,16 +983,19 @@ function _videoItems(value) {
     return [value];
 }
 
-/**
- * 解析“集名$vid”或对象形式的单个播放项。
- */
+
+
 function _episodePart(value, fallbackName) {
     if (value && typeof value === 'object') {
-        var objectVid = _firstValue(value, ['vid', 'url', 'value']);
+        var objectVid = _firstValue(value, [
+            'vid', 'video_id', 'videoId', 'episode_id', 'episodeId', 'id', 'url', 'value'
+        ]);
         return {
             name: String(_firstValue(value, ['name', 'title']) || fallbackName || ''),
             vid: String(objectVid || ''),
-            raw: String(_firstValue(value, ['raw', 'url', 'vid', 'value']) || '')
+            raw: String(_firstValue(value, [
+                'raw', 'url', 'vid', 'video_id', 'videoId', 'episode_id', 'episodeId', 'id', 'value'
+            ]) || '')
         };
     }
     var raw = value === null || value === undefined ? '' : String(value);
@@ -847,9 +1007,8 @@ function _episodePart(value, fallbackName) {
     };
 }
 
-/**
- * 按线路 sort 字段排序，缺少 sort 时保持相对顺序。
- */
+
+
 function _sortPlayLines(left, right) {
     var leftSort = Number(left && left.sort);
     var rightSort = Number(right && right.sort);
@@ -858,24 +1017,36 @@ function _sortPlayLines(left, right) {
     return leftSort - rightSort;
 }
 
-/**
- * 把详情中的多线路播放项转换为宿主 episodes：每集带 route=线路名，
- * 宿主按 route 分组渲染线路切换 Tab（并支持播放失败自动换线）。
- * ⚠ 不要再用「线路1 第1集」这种拼名摊平的写法——所有集会挤在同一条线路里。
- */
+ 
+function _isMainLine(line) {
+    var name = String((line && (line.name || line.title)) || '');
+    return /LC\s*-?\s*Main/i.test(name);
+}
+
+
+
 function _episodes(playList, runtime) {
     var lines = _legacyIsArray(playList) ? playList.slice() : [];
     lines.sort(_sortPlayLines);
+    
+    
+    
+    var mainLines = [];
+    var otherLines = [];
+    for (var splitIndex = 0; splitIndex < lines.length; splitIndex += 1) {
+        (_isMainLine(lines[splitIndex]) ? mainLines : otherLines).push(lines[splitIndex]);
+    }
+    lines = mainLines.concat(otherLines);
     var usedRouteNames = {};
     var result = [];
     for (var lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
         var line = lines[lineIndex] || {};
-        // 线路名截掉站方拼在后面的括号提示语（如「LC - Main[如果一直加载请…]」），
-        // 否则线路 Tab 会被撑成一长条；截完为空再落到「线路N」。
+        
+        
         var lineName = _legacyTrim(String(line.name || line.title || '').replace(/[\[【（(].*$/, ''));
         if (!lineName) lineName = '线路' + (lineIndex + 1);
-        // 截断后撞名（两条线路仅括号内不同）会被宿主按 route 合并成一个 Tab、
-        // 自动换线也会失效——重名时追加序号区分。
+        
+        
         var usedCount = usedRouteNames[lineName] || 0;
         usedRouteNames[lineName] = usedCount + 1;
         if (usedCount > 0) lineName = lineName + ' ' + (usedCount + 1);
@@ -897,21 +1068,22 @@ function _episodes(playList, runtime) {
     return result;
 }
 
-/**
- * 获取详情元数据与多线路选集；异常时返回可安全渲染的空详情。
- */
+
+
 function detail(id) {
     var contentId = id === null || id === undefined ? '' : String(id);
     try {
         var data = _payload(_apiGet('app/getvod/' + encodeUri(contentId)));
         var info = data.video_play_info && typeof data.video_play_info === 'object' ? data.video_play_info : data;
         var runtime = _runtimeValues({});
+        
+        _lanercLastDetail = { id: contentId, classId: _legacyTrim(String(_firstValue(info, ['vod_type']) || '')) };
         return JSON.stringify({
             id: String(_firstValue(info, ['id', 'vod_id']) || contentId),
             name: String(_firstValue(info, ['vod_name', 'name', 'title']) || ''),
             pic: _lanercCoverPic(_firstValue(info, ['vod_pic', 'pic', 'image', 'cover'])),
             desc: String(_firstValue(info, ['vod_blurb', 'desc', 'vod_content']) || ''),
-            type: String(_firstValue(info, ['vod_type', 'vod_class']) || ''),
+            type: _typeText(info),
             year: String(_firstValue(info, ['vod_year', 'year']) || ''),
             remarks: String(_firstValue(info, ['vod_sub', 'vod_remarks']) || ''),
             score: String(_firstValue(info, ['vod_score', 'score']) || ''),
@@ -923,9 +1095,39 @@ function detail(id) {
     }
 }
 
-/**
- * 根据媒体地址后缀推断宿主播放器类型。
- */
+
+
+function _resolveContentClass(contentId) {
+    if (_lanercLastDetail && String(_lanercLastDetail.id) === contentId) return _lanercLastDetail.classId;
+    var data = _payload(_apiGet('app/getvod/' + encodeUri(contentId)));
+    var info = data.video_play_info && typeof data.video_play_info === 'object' ? data.video_play_info : data;
+    return _legacyTrim(String(_firstValue(info, ['vod_type']) || ''));
+}
+
+
+
+function related(id) {
+    var contentId = id === null || id === undefined ? '' : String(id);
+    try {
+        if (!contentId) return '[]';
+        var classId = _resolveContentClass(contentId);
+        if (!classId) return '[]';
+        var cards = _filteredPage(classId, {}, 1);
+        var out = [];
+        for (var index = 0; index < cards.length; index += 1) {
+            if (String(cards[index].id) === contentId) continue;
+            out.push(cards[index]);
+            if (out.length >= 20) break;
+        }
+        return JSON.stringify(out);
+    } catch (error) {
+        _lanercLog('相关推荐获取失败：' + String(error));
+        return '[]';
+    }
+}
+
+
+
 function _mediaType(url) {
     var value = String(url || '');
     if (/\.m3u8(?:$|[?#])/i.test(value)) return 'm3u8';
@@ -933,9 +1135,41 @@ function _mediaType(url) {
     return 'auto';
 }
 
-/**
- * 调用原应用播放代理，把详情标记转换为最终媒体地址。
- */
+
+
+function _shouldBlockLanercWarningPlaylist() {
+    var value = _lanercExt.blockWarningPlaylist;
+    if (value === null || value === undefined || value === '') return _LANERC_BLOCK_WARNING_PLAYLIST;
+    return value === true || value === 1 || String(value).toLowerCase() === 'true';
+}
+
+
+
+function _isLanercWarningPlaylist(url) {
+    var value = String(url || '');
+    if (!/^https?:\/\/file\.jngaoke\.cn\/.*\.m3u8(?:$|[?#])/i.test(value)) return false;
+    try {
+        var playlist = String(request(
+            value,
+            _requestOptions(false, _LANERC_WARNING_PLAYLIST_TIMEOUT_MS)
+        ) || '');
+        var pattern = /#EXTINF:\s*([0-9]+(?:\.[0-9]+)?)/ig;
+        var count = 0;
+        var duration = 0;
+        var matched;
+        while ((matched = pattern.exec(playlist)) !== null) {
+            count += 1;
+            duration += Number(matched[1]);
+        }
+        return count >= 10 && duration >= 179 && duration <= 181;
+    } catch (error) {
+        _lanercLog('防盗提示片检测失败：' + String(error));
+        return false;
+    }
+}
+
+
+
 function play(flag) {
     try {
         var parsed = _safeParse(flag, null);
@@ -951,9 +1185,24 @@ function play(flag) {
             auth: runtime.auth
         };
         if (!body.vid) return JSON.stringify({ url: '', type: 'auto' });
-        var response = _apiPost('app/proxyx3x', body);
-        var playUrl = String(_findDeep(response, 'play_url') || '');
-        return JSON.stringify({ url: playUrl, type: _mediaType(playUrl) });
+        var response = _apiPost(_lanercSignedApiPath('app/proxyx3x'), body);
+        var playUrl = _playUrlFromResponse(response);
+        if (_shouldBlockLanercWarningPlaylist() && _isLanercWarningPlaylist(playUrl)) {
+            _lanercLog('检测到 180 秒防盗提示片，重新签名请求一次');
+            response = _apiPost(_lanercSignedApiPath('app/proxyx3x'), body);
+            playUrl = _playUrlFromResponse(response);
+            if (_isLanercWarningPlaylist(playUrl)) {
+                var warningMessage = '检测到防盗提示片，当前线路不可播放';
+                _lanercLog(warningMessage);
+                return JSON.stringify({
+                    url: '',
+                    type: 'auto',
+                    error: warningMessage,
+                    _server_msg: warningMessage
+                });
+            }
+        }
+        return JSON.stringify(_playResult(response, playUrl));
     } catch (error) {
         _lanercLog('播放解析失败：' + String(error));
         return JSON.stringify({ url: '', type: 'auto' });

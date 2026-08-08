@@ -136,7 +136,9 @@ function requestHeaders(encodedBody, now, requestNonce) {
 
 function apiPost(path, data) {
     try {
-        var now = String(timestamp());
+        // App99 signs protocol time in Unix seconds. Juying exposes
+        // timestamp() in milliseconds for the other source adapters.
+        var now = String(Math.floor(Number(timestamp()) / 1000));
         var requestNonce = nonce();
         var body = data || {};
         body.timestamp = now;

@@ -303,7 +303,8 @@ function listVod(sub, f, page) {
     var j = apiJson('/App/IndexList/indexList', {
         tid: '3',
         page: String(page || 1),
-        sort: f.sort || 'd_id',
+        // 服务器实测仅接受 sort=d_id；其他排序值（time/hits/score/id）返回 code 42S22。
+        sort: 'd_id',
         area: f.area || '0',
         sub: String(sub),
         year: f.year || '0',

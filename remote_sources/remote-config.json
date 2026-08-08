@@ -1,71 +1,65 @@
 {
   "version": 8,
-  "updatedAt": "2026-07-22T11:57:48Z",
+  "updatedAt": "2026-08-06T11:33:09Z",
   "sources": {
-    "defaultKey": "lanerc",
+    "defaultKey": "AuvFun",
     "disabled": [],
     "defaultOff": [],
     "order": [
       "AuvFun",
-      "lanerc",
       "jinpai",
       "cycapp",
       "guazi",
       "shuangxing",
-      "xifanacg",
+      "shutiao",
       "yzx",
-      "sanqiu",
+      "xifanacg",
+      "fanshu",
       "akianime",
       "lmm85",
       "gugu",
-      "dmbus"
+      "dmbus",
+      "lanerc"
     ],
     "items": [
       {
         "key": "dmbus",
-        "title": "Auv源16",
+        "title": "Auv源12",
         "desc": "dmbus.cc(dm84) ",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/dmbus.js"
       },
       {
         "key": "lmm85",
-        "title": "Auv源12",
+        "title": "Auv源10",
         "desc": "lmm85",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/lmm85.js"
       },
       {
         "key": "gugu",
-        "title": "Auv源14",
+        "title": "Auv源11",
         "desc": "番剧/剧场版/特摄 ",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/gugu.js"
       },
       {
         "key": "xifanacg",
-        "title": "Auv源5",
+        "title": "Auv源7",
         "desc": "精选好源",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/xifanacg.js"
       },
       {
-        "key": "sanqiu",
-        "title": "Auv源10",
+        "key": "fanshu",
+        "title": "Auv源8",
         "desc": "",
         "enabled": true,
-        "codeUrl": "https://js.z1i.cn/js/sanqiu.js"
-      },
-      {
-        "key": "jinpai",
-        "title": "Auv源1",
-        "desc": "精选好源",
-        "enabled": true,
-        "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js"
+        "codeUrl": "https://js.z1i.cn/js/fanshu.js"
       },
       {
         "key": "akianime",
-        "title": "Auv源11",
+        "title": "Auv源9",
         "desc": "",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/akianime.js"
@@ -78,20 +72,6 @@
         "codeUrl": "https://js.z1i.cn/js/guazi.js"
       },
       {
-        "key": "cycapp",
-        "title": "Auv源2",
-        "desc": "精选推荐",
-        "enabled": true,
-        "codeUrl": "https://js.z1i.cn/js/cyc.js"
-      },
-      {
-        "key": "jinpai",
-        "title": "Auv源1",
-        "desc": "精选好源",
-        "enabled": true,
-        "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js"
-      },
-      {
         "key": "yzx",
         "title": "Auv源6",
         "desc": "",
@@ -100,17 +80,10 @@
       },
       {
         "key": "AuvFun",
-        "title": "AuvFun1",
+        "title": "AuvFun",
         "desc": "精选源",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/AuvFun.js"
-      },
-      {
-        "key": "lanerc",
-        "title": "AuvFun",
-        "desc": "精选好源",
-        "enabled": true,
-        "codeUrl": "https://js.z1i.cn/js/lanerc_legacy.js"
       },
       {
         "key": "shuangxing",
@@ -118,6 +91,34 @@
         "desc": "",
         "enabled": true,
         "codeUrl": "https://js.z1i.cn/js/shuangxing99.js"
+      },
+      {
+        "key": "jinpai",
+        "title": "Auv源1",
+        "desc": "",
+        "enabled": true,
+        "codeUrl": "https://js.z1i.cn/js/jinpaiapp.js"
+      },
+      {
+        "key": "shutiao",
+        "title": "源5（维护中）",
+        "desc": "",
+        "enabled": true,
+        "codeUrl": "https://js.z1i.cn/js/shutiao.js"
+      },
+      {
+        "key": "lanerc",
+        "title": "该源维护中",
+        "desc": "",
+        "enabled": false,
+        "codeUrl": "https://js.z1i.cn/js/lanerc.js"
+      },
+      {
+        "key": "cycapp",
+        "title": "Auv源2",
+        "desc": "",
+        "enabled": true,
+        "codeUrl": "https://js.z1i.cn/js/cyc.js"
       }
     ]
   },
@@ -144,7 +145,9 @@
     "imageUrl": "",
     "downloadUrlMethod": "inapp",
     "backupDownloadUrl": "https://12957.kstore.space/Lanerc.apk",
-    "backupDownloadUrlMethod": "browser"
+    "backupDownloadUrlMethod": "browser",
+    "downloadUrlNewSig": "",
+    "backupDownloadUrlNewSig": ""
   },
   "homeBanners": [],
   "hotAnime": [],
@@ -153,7 +156,7 @@
     "apiBaseUrl": "",
     "sendEnabled": true,
     "maxPerPage": 200,
-    "danmuApiUrl": "https://logo.saodu.work:8888/87654321",
+    "danmuApiUrl": "https://danm.lubao2.de5.net/87654321",
     "danmuApiUrl2": "https://api.danmaku.weeblify.app/ddp/v1",
     "danmuApiUrl3": "https://danmu-api.misaka10876.top/cors",
     "danmuApiUrl4": "https://api.dandanplay.net/api",
@@ -177,6 +180,10 @@
     "enabled": true,
     "apiBaseUrl": "https://1.z1i.cn"
   },
+  "community": {
+    "enabled": true,
+    "apiBaseUrl": ""
+  },
   "block": {
     "enabled": true,
     "titles": [
@@ -194,7 +201,33 @@
       "后宫露营",
       "在异世界迷宫开后宫",
       "在异世界迷宫开启后宫",
-      "无颜之月"
+      "无颜之月",
+      "人妻之唇烧酒之味",
+      "作弊道具管理局",
+      "夜游生活",
+      "还得是人妻",
+      "人妻的嘴唇",
+      "妹妹的样子有点怪",
+      "新妹",
+      "挣扎吧，亚当君",
+      "正后方的神威",
+      "从后面来的神威先生",
+      "终末的后宫",
+      "异种族风俗娘评鉴指南",
+      "末班车后",
+      "XL上司",
+      "研讨同组",
+      "同研讨班",
+      "在联谊会的",
+      "夜晚游玩生活",
+      "唱歌的大姐姐也想",
+      "夫妇联欢",
+      "向涟苍士献",
+      "我是看守专用宠物",
+      "成年人不懂如何恋爱",
+      "深夜的濡恋频道",
+      "打工声优",
+      "青春水球社"
     ],
     "categories": [
       "里番",
@@ -256,16 +289,18 @@
   "apps": {
     "app1": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "1.0.0.8",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/nPRYsW/%E5%8A%A8%E6%BC%AB%E5%85%B1%E5%92%8C%E5%9B%BD.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/876d5b922dea258617902fbbc53c53f7",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/iTSdD3xx5cda",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iLK6C406ayza",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "contact": {
         "qqGroup": "680474604",
@@ -274,16 +309,18 @@
     },
     "app2": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "1.0.6",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/1jwgC9/Lanerc.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/b8f3fd8e65e4849ca7e18605a406cb81",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/iw7Y03xx57da",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iDJoM406cchc",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "announcement": {
         "enabled": false,
@@ -305,16 +342,18 @@
     },
     "app3": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "1.5.8.0",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/G3wlfo/%E5%9B%A7%E6%AC%A1%E5%85%83.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/a1460f3aba57f4d03adf587655a1070d",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/i641q3xx5edc",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iypq7406b3di",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "contact": {
         "qqGroup": "682258882",
@@ -327,12 +366,14 @@
         "latestVersionName": "2.0",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/KVYvia/AuvFun.apk",
+        "downloadUrl": "https://links.8uid.com/d/b25972fd637f496cdb6b64af3c56324d",
         "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/ithcU3xx558d",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iK5e9406b7rg",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "announcement": {
         "enabled": false,
@@ -354,16 +395,18 @@
     },
     "app5": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "1.6.88",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/7X0NCZ/OmoFun.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/436b2f106ece0e93833c4158ee71bb96",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/ip7ZD3xx5a7c",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iSVBh406cqcb",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "contact": {
         "qqGroup": "958473359",
@@ -372,16 +415,18 @@
     },
     "app6": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "2.1.7",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/ebYjcK/Kazumi.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/4f0c597ad7f75e82f0b361aedc5c4620",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/its4b3xx56de",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iUPhb406c2id",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "announcement": {
         "enabled": false,
@@ -402,6 +447,20 @@
       }
     },
     "app7": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "2.0.0",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/8283aba2e57323c8408aa6aac60e2315",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iLvtE406bnxi",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      },
       "contact": {
         "qqGroup": "818403472",
         "official": "https://www.auvfun.com"
@@ -424,7 +483,7 @@
           "enabled": true,
           "codeId": "b6a50eceb903aa",
           "timeoutMs": 3500,
-          "coldOnly": false,
+          "coldOnly": true,
           "cooldownSeconds": 30,
           "hotMinBackgroundSeconds": 30
         },
@@ -441,30 +500,34 @@
     },
     "app8": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "5.8.3",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/9NlmTk/%E4%B8%89%E5%8F%B7%E5%8A%A8%E6%BC%AB.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/9bb64011b93195109f6eda608818301c",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/iZikC3xx5g6h",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/ihI5p406baxa",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       }
     },
     "app9": {
       "update": {
-        "latestVersionCode": 13,
+        "latestVersionCode": 14,
         "latestVersionName": "5.1.7",
         "minSupportedVersionCode": 0,
         "forceUpdate": true,
-        "downloadUrl": "https://www.senluopan.com/f/d/0R5RuR/MiFun.apk",
-        "releaseNotes": "1️⃣新增“我的消息”、“评论点赞”、“评论回复”功能\n2️⃣优化播放速度\n3️⃣新增弹幕关键词屏蔽功能\n4️⃣适配平板电脑(Android)\n5️⃣新增“一起看”功能\n6️⃣添加了搜索页面显示全部源弹窗\n7️⃣增加播放器缓存\n8️⃣观看历史增加定位源功能\n9️⃣新增可以调整分辨率功能\n🔟解决了已知Bug",
+        "downloadUrl": "https://links.8uid.com/d/d7c2c236bf499c003928975e2db2c332",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
         "imageUrl": "",
         "downloadUrlMethod": "inapp",
-        "backupDownloadUrl": "https://wwbdh.lanzout.com/iNoF23xx58ng",
-        "backupDownloadUrlMethod": "browser"
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/i38kX406ch6b",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       },
       "announcement": {
         "enabled": false,
@@ -487,6 +550,102 @@
       "contact": {
         "qqGroup": "",
         "official": ""
+      }
+    },
+    "app10": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/4814eaa27ee66785c4c902450c16abff",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/ib1jJ406bf1i",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      }
+    },
+    "app11": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/93725a0c3872126e3767797f892ae666",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iSWcD406bx1g",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      }
+    },
+    "app12": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/0d2f2cff08d0c59bb7270555ef779d39",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iPf8s406biza",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      }
+    },
+    "app13": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/d6b0028b244070139d01803c9db322dc",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/ithX5406c7za",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      }
+    },
+    "app14": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/2683e9439a1d3dac6b85028226e5e776",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/iFkIT406cm1g",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
+      }
+    },
+    "app15": {
+      "update": {
+        "latestVersionCode": 14,
+        "latestVersionName": "",
+        "minSupportedVersionCode": 0,
+        "forceUpdate": true,
+        "downloadUrl": "https://links.8uid.com/d/5f142d54805b87edd7273e574b04a24f",
+        "releaseNotes": "1.增加了签到送金币功能；\n2.开放了社区功能；\n3.增加了称号及勋章功能；\n4;播放器新增双击快进；\n5.优化了已知Bug~",
+        "imageUrl": "",
+        "downloadUrlMethod": "inapp",
+        "backupDownloadUrl": "https://wwbdh.lanzout.com/i1iVe406cura",
+        "backupDownloadUrlMethod": "browser",
+        "downloadUrlNewSig": "",
+        "backupDownloadUrlNewSig": ""
       }
     },
     "ios": {

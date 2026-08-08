@@ -3,6 +3,10 @@ package com.juying.app.source
 import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
@@ -29,10 +33,7 @@ class VideoDownloadManager(private val context: Context) {
         episodeName: String,
         onProgress: (Long, Long) -> Unit = { _, _ -> }
     ): DownloadedFile? = withContext(Dispatchers.IO) {
-        val root = File(
-            context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir,
-            "lanerc/${safe(title)}"
-        )
+        val root = File(rootDir(), safe(title))
         root.mkdirs()
         var suffix = if (isHls(url)) "m3u8" else "mp4"
         var output = File(root, "${safe(episodeName)}.$suffix")
@@ -65,6 +66,50 @@ class VideoDownloadManager(private val context: Context) {
                 val total = body.contentLength().coerceAtLeast(0L)
                 val partial = File(root, "${output.name}.part")
                 partial.delete()
+                val segmentThreads = StorageManager(context).getSegmentThreads().coerceAtLeast(1)
+                if (total > 1024L * 1024 && segmentThreads > 1) {
+                    // 分段 Range 并行下载（仅当服务端支持断点续传）
+                    val segSize = total / segmentThreads
+                    val okFlags = BooleanArray(segmentThreads)
+                    val semaphore = Semaphore(segmentThreads)
+                    coroutineScope {
+                        (0 until segmentThreads).forEach { seg ->
+                            launch {
+                                val start = seg * segSize
+                                val end = if (seg == segmentThreads - 1) total - 1 else (seg + 1) * segSize - 1
+                                okFlags[seg] = semaphore.withPermit {
+                                    downloadRange(url, headers, referer, start, end, File(root, "${partial.name}.$seg"))
+                                }
+                            }
+                        }
+                    }
+                    val segOk = okFlags.all { it }
+                    if (segOk) {
+                        partial.outputStream().use { out ->
+                            (0 until segmentThreads).forEach { seg ->
+                                val f = File(root, "${partial.name}.$seg")
+                                if (f.exists() && f.length() > 0L) f.inputStream().use { it.copyTo(out) }
+                            }
+                        }
+                    }
+                    (0 until segmentThreads).forEach { seg -> File(root, "${partial.name}.$seg").delete() }
+                    if (!segOk || partial.length() <= 0L) {
+                        partial.delete()
+                        return@withContext null
+                    }
+                    if (!partial.renameTo(output)) {
+                        try {
+                            partial.copyTo(output, overwrite = true)
+                            partial.delete()
+                        } catch (_: Exception) {
+                            partial.delete()
+                            output.delete()
+                            return@withContext null
+                        }
+                    }
+                    onProgress(total, total)
+                    return@withContext DownloadedFile(output, true)
+                }
                 body.byteStream().use { input ->
                     partial.outputStream().use { out ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -113,45 +158,66 @@ class VideoDownloadManager(private val context: Context) {
                     resourceUriRegex.containsMatchIn(line) &&
                     !line.contains("METHOD=NONE")
             }
-            var downloaded = 0L
-            val total = (segmentLines.size + directiveResources).toLong()
-            var segmentIndex = 0
-            var auxiliaryIndex = 0
-            var complete = true
-            playlist.lines().forEach { line ->
-                if (line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP")) {
-                    val match = resourceUriRegex.find(line)
-                    if (match == null || line.contains("METHOD=NONE")) {
-                        rewritten.appendLine(line)
-                    } else {
-                        val child = match.groupValues[1]
-                        val remoteUrl = resolve(url, child)
-                        val defaultExtension = if (line.startsWith("#EXT-X-KEY")) "key" else "mp4"
-                        val localName = "${episodePrefix}_aux_${auxiliaryIndex.toString().padStart(3, '0')}." +
-                            resourceExtension(remoteUrl, defaultExtension)
-                        auxiliaryIndex += 1
-                        if (downloadResource(remoteUrl, File(root, localName), headers, referer)) {
-                            rewritten.appendLine(line.replace(child, localName))
-                            downloaded += 1
-                            onProgress(downloaded, total)
-                        } else {
-                            complete = false
+            val lines = playlist.lines()
+            val segmentThreads = StorageManager(context).getSegmentThreads().coerceAtLeast(1)
+            val semaphore = Semaphore(segmentThreads)
+            // 第一遍：收集需要下载的资源（lineIndex -> (remoteUrl, localFile)）与替换文本
+            val lineMappings = mutableMapOf<Int, Pair<String, File>>()
+            val replacementText = mutableMapOf<Int, String>()
+            var segIdx = 0
+            var auxIdx = 0
+            lines.forEachIndexed { idx, line ->
+                when {
+                    line.startsWith("#EXT-X-KEY") || line.startsWith("#EXT-X-MAP") -> {
+                        val match = resourceUriRegex.find(line)
+                        if (match != null && !line.contains("METHOD=NONE")) {
+                            val child = match.groupValues[1]
+                            val remoteUrl = resolve(url, child)
+                            val defaultExtension = if (line.startsWith("#EXT-X-KEY")) "key" else "mp4"
+                            val localName = "${episodePrefix}_aux_${auxIdx.toString().padStart(3, '0')}." +
+                                resourceExtension(remoteUrl, defaultExtension)
+                            auxIdx += 1
+                            lineMappings[idx] = remoteUrl to File(root, localName)
+                            replacementText[idx] = line.replace(child, localName)
                         }
                     }
-                } else if (line.isBlank() || line.startsWith("#")) {
-                    rewritten.appendLine(line)
-                } else {
-                    val segmentUrl = resolve(url, line)
-                    val segmentName = "${episodePrefix}_segment_${segmentIndex.toString().padStart(5, '0')}." +
-                        resourceExtension(segmentUrl, "ts")
-                    segmentIndex += 1
-                    if (downloadResource(segmentUrl, File(root, segmentName), headers, referer)) {
-                        rewritten.appendLine(segmentName)
+                    !line.isBlank() && !line.startsWith("#") -> {
+                        val segmentUrl = resolve(url, line)
+                        val segmentName = "${episodePrefix}_segment_${segIdx.toString().padStart(5, '0')}." +
+                            resourceExtension(segmentUrl, "ts")
+                        segIdx += 1
+                        lineMappings[idx] = segmentUrl to File(root, segmentName)
+                        replacementText[idx] = segmentName
+                    }
+                }
+            }
+            // 第二遍：限量并行下载分段
+            val okFlags = BooleanArray(lines.size)
+            coroutineScope {
+                lineMappings.forEach { (idx, spec) ->
+                    launch {
+                        okFlags[idx] = semaphore.withPermit {
+                            downloadResource(spec.first, spec.second, headers, referer)
+                        }
+                    }
+                }
+            }
+            // 第三遍：按原顺序构建本地 playlist
+            var downloaded = 0L
+            val total = (segmentLines.size + directiveResources).toLong()
+            var complete = true
+            lines.forEachIndexed { idx, line ->
+                val replacement = replacementText[idx]
+                if (replacement != null) {
+                    if (okFlags[idx]) {
+                        rewritten.appendLine(replacement)
                         downloaded += 1
                         onProgress(downloaded, total)
                     } else {
                         complete = false
                     }
+                } else {
+                    rewritten.appendLine(line)
                 }
             }
             if (!complete || downloaded != total || total <= 0L) {
@@ -173,10 +239,7 @@ class VideoDownloadManager(private val context: Context) {
 
     suspend fun downloadCover(coverUrl: String, title: String): File? = withContext(Dispatchers.IO) {
         if (coverUrl.isBlank()) return@withContext null
-        val root = File(
-            context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir,
-            "lanerc/${safe(title)}"
-        )
+        val root = File(rootDir(), safe(title))
         root.mkdirs()
         val coverFile = File(root, "cover.jpg")
         if (coverFile.exists() && coverFile.length() > 0L) return@withContext coverFile
@@ -209,10 +272,7 @@ class VideoDownloadManager(private val context: Context) {
     }
 
     fun getDownloadedItems(): List<DownloadedItemInfo> {
-        val rootDir = File(
-            context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir,
-            "lanerc"
-        )
+        val rootDir = rootDir()
         if (!rootDir.exists() || !rootDir.isDirectory) return emptyList()
 
         val results = mutableListOf<DownloadedItemInfo>()
@@ -343,6 +403,28 @@ class VideoDownloadManager(private val context: Context) {
         }
     }
 
+    private fun downloadRange(
+        url: String,
+        headers: Map<String, String>?,
+        referer: String?,
+        start: Long,
+        end: Long,
+        destination: File
+    ): Boolean {
+        val req = request(url, headers, referer).newBuilder()
+            .header("Range", "bytes=$start-$end")
+            .build()
+        val response = try { client.newCall(req).execute() } catch (_: Exception) { return false }
+        response.use { res ->
+            val body = res.body
+            if (res.code != 206 || body == null) return false
+            return try {
+                destination.outputStream().use { out -> body.byteStream().use { input -> input.copyTo(out) } }
+                destination.length() > 0L
+            } catch (_: Exception) { false }
+        }
+    }
+
     private fun isOfflineHlsComplete(playlist: File): Boolean {
         if (!playlist.exists() || playlist.length() <= 0L) return false
         val text = try { playlist.readText() } catch (_: Exception) { return false }
@@ -396,6 +478,13 @@ class VideoDownloadManager(private val context: Context) {
 
     private fun resolve(base: String, child: String): String =
         try { URI(base).resolve(Uri.decode(child)).toString() } catch (_: Exception) { child }
+
+    private fun rootDir(): File {
+        val configured = StorageManager(context).getDownloadDir()
+        val base = if (configured.isNotBlank()) File(configured)
+            else (context.getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: context.filesDir)
+        return File(base, "lanerc")
+    }
 
     private fun isHls(value: String): Boolean =
         value.lowercase().contains(".m3u8") || value.lowercase().contains("mpegurl")

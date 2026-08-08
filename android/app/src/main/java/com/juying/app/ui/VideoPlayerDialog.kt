@@ -24,7 +24,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -60,11 +60,15 @@ fun VideoPlayerDialog(
         }
         val finalUa = customUa ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
+        val httpDataSourceFactory = OkHttpDataSource.Factory(
+            okhttp3.OkHttpClient.Builder()
+                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+        ).apply {
             setUserAgent(finalUa)
-            setAllowCrossProtocolRedirects(true)
-            setConnectTimeoutMs(15000)
-            setReadTimeoutMs(15000)
             if (requestHeaders.isNotEmpty()) {
                 setDefaultRequestProperties(requestHeaders)
             }

@@ -162,6 +162,9 @@ data class HomeSection(
     val items: List<SourceItem>
 )
 
+/** 源 JS `categories()` 返回的分类 Tab：key 作为 search(catKey,1) 的关键词，title 为显示名。 */
+data class SourceCategory(val key: String, val title: String)
+
 data class Episode(
     val id: String,
     val name: String,
@@ -181,7 +184,9 @@ data class PlayResult(
     val type: String = "auto",
     val headers: Map<String, String>? = null,
     val referer: String? = null,
-    val qualities: List<QualityOption> = emptyList()
+    val qualities: List<QualityOption> = emptyList(),
+    val error: String? = null,
+    val startSec: Long = 0L
 )
 
 data class DetailResult(
@@ -194,8 +199,16 @@ data class SourceConfig(
     val title: String,
     val localFile: String,
     val codeUrl: String = "",
-    val defaultEnabled: Boolean = true
+    val defaultEnabled: Boolean = true,
+    val availability: SourceAvailability = SourceAvailability.AVAILABLE,
+    val unavailableReason: String = ""
 )
+
+enum class SourceAvailability(val label: String) {
+    AVAILABLE("可用"),
+    MAINTENANCE("源维护中"),
+    ABNORMAL("源异常")
+}
 
 class SourceManager(private val context: Context) {
 
@@ -209,15 +222,40 @@ class SourceManager(private val context: Context) {
 
     private val builtInSources: List<SourceConfig> = listOf(
         SourceConfig("AuvFun", "AuvFun动漫", "AuvFun.js"),
-        SourceConfig("lanerc", "Lanerc动漫", "lanerc.js"),
+        // Upstream currently disables Lanerc because its proxy returns a
+        // fixed upgrade-notice playlist instead of the requested title.
+        SourceConfig(
+            "lanerc", "Lanerc动漫", "lanerc.js",
+            defaultEnabled = false,
+            availability = SourceAvailability.MAINTENANCE,
+            unavailableReason = "上游当前只返回版本升级提示视频"
+        ),
         SourceConfig("jinpai", "金牌动漫", "jinpai.js"),
         SourceConfig("cycapp", "次元城", "cycapp.js"),
         SourceConfig("guazi", "瓜子动漫", "guazi.js"),
         SourceConfig("shuangxing", "双星动漫", "shuangxing.js"),
         SourceConfig("xifanacg", "稀饭动漫", "xifanacg.js"),
-        SourceConfig("sanqiu", "三秋动漫", "sanqiu.js"),
+        SourceConfig(
+            "fanshu", "番薯动漫", "fanshu.js",
+            defaultEnabled = false,
+            availability = SourceAvailability.MAINTENANCE,
+            unavailableReason = "上游 App-Guard 校验已更新"
+        ),
+        // Sanqiu is absent from AuvFun's current remote source list and its
+        // only known API host now responds 403.
+        SourceConfig(
+            "sanqiu", "三秋动漫", "sanqiu.js",
+            defaultEnabled = false,
+            availability = SourceAvailability.ABNORMAL,
+            unavailableReason = "上游接口持续返回 403"
+        ),
         SourceConfig("gugu", "咕咕动漫", "gugu.js"),
-        SourceConfig("shutiao", "薯条动漫", "shutiao.js"),
+        SourceConfig(
+            "shutiao", "薯条动漫", "shutiao.js",
+            defaultEnabled = false,
+            availability = SourceAvailability.MAINTENANCE,
+            unavailableReason = "上游已暂停该来源"
+        ),
         SourceConfig("yzx", "云帧享", "yzx.js"),
         SourceConfig("akianime", "AkiAnime", "akianime.js"),
         SourceConfig("lmm85", "动漫在线", "lmm85.js"),
@@ -239,8 +277,30 @@ class SourceManager(private val context: Context) {
     val rawSources: List<SourceConfig>
         get() = builtInSources + customSources
 
+    fun getSourceConfig(keyOrTitle: String): SourceConfig? = rawSources.firstOrNull {
+        it.key.equals(keyOrTitle, ignoreCase = true) ||
+            it.title.equals(keyOrTitle, ignoreCase = true)
+    }
+
+    fun sourceAvailability(keyOrTitle: String): SourceAvailability =
+        getSourceConfig(keyOrTitle)?.availability ?: SourceAvailability.AVAILABLE
+
+    fun isSourceAvailable(keyOrTitle: String): Boolean =
+        sourceAvailability(keyOrTitle) == SourceAvailability.AVAILABLE
+
+    fun sourceUnavailableMessage(keyOrTitle: String): String? {
+        val source = getSourceConfig(keyOrTitle) ?: return null
+        if (source.availability == SourceAvailability.AVAILABLE) return null
+        val suffix = source.unavailableReason.takeIf(String::isNotBlank)?.let { "：$it" }.orEmpty()
+        return "${source.availability.label}，暂不可用$suffix，请尝试切换其他源"
+    }
+
     fun isSourceEnabled(key: String): Boolean {
-        val defaultVal = rawSources.find { it.key == key }?.defaultEnabled ?: true
+        val source = rawSources.find { it.key == key }
+        if (source?.availability != null && source.availability != SourceAvailability.AVAILABLE) {
+            return false
+        }
+        val defaultVal = source?.defaultEnabled ?: true
         return prefs.getBoolean("source_enabled_$key", defaultVal)
     }
 
@@ -291,6 +351,11 @@ class SourceManager(private val context: Context) {
     fun toggleSourceEnabled(key: String): Boolean {
         val current = isSourceEnabled(key)
         val newState = !current
+        if (newState && !isSourceAvailable(key)) return false
+        // 强制至少保留一个启用的源：禁用最后一个启用源时拒绝
+        if (!newState && enabledSources.count() <= 1) {
+            return current
+        }
         prefs.edit().putBoolean("source_enabled_$key", newState).apply()
 
         if (newState) {
@@ -333,14 +398,29 @@ class SourceManager(private val context: Context) {
     fun getAdapter(key: String) = adapters[key]
     fun allAdapters() = adapters.values.toList()
 
+    fun getSourceUrl(key: String): String {
+        val customFile = java.io.File(context.filesDir, "custom_sources/$key.js")
+        if (customFile.exists()) return customFile.absolutePath
+        return remoteConfigs[key]?.codeUrl ?: ""
+    }
+
+    fun isCustomSource(key: String): Boolean =
+        java.io.File(context.filesDir, "custom_sources/$key.js").exists()
+
     fun testSourceSpeed(key: String): Long {
+        when (sourceAvailability(key)) {
+            SourceAvailability.MAINTENANCE -> return SOURCE_TEST_MAINTENANCE
+            SourceAvailability.ABNORMAL -> return SOURCE_TEST_ABNORMAL
+            SourceAvailability.AVAILABLE -> Unit
+        }
         val adapter = adapters[key] ?: return -1L
         val start = System.currentTimeMillis()
         return try {
-            adapter.homeSections()
-            System.currentTimeMillis() - start
+            val sections = adapter.homeSections()
+            val items = if (sections.isNotEmpty()) sections.flatMap { it.items } else adapter.search("漫", 1)
+            if (items.isEmpty()) SOURCE_TEST_FAILED else System.currentTimeMillis() - start
         } catch (_: Exception) {
-            -1L
+            SOURCE_TEST_FAILED
         }
     }
 
@@ -363,110 +443,31 @@ class SourceManager(private val context: Context) {
     }
 
     fun testSource(key: String): String {
+        sourceUnavailableMessage(key)?.let { message ->
+            val source = getSourceConfig(key)
+            return "【${source?.availability?.label ?: "源异常"}】${source?.title ?: key}：$message"
+        }
         val adapter = adapters[key] ?: return "源 [$key] 未开启或未成功初始化"
-        val sb = StringBuilder()
         val start = System.currentTimeMillis()
-        try {
-            // Step 1: homeSections
+        return try {
+            // 对齐 AuvFun：测试只验证首页数据能否返回（连通性），不做详情/播放链路探测
             val sections = adapter.homeSections()
             val items = if (sections.isNotEmpty()) sections.flatMap { it.items } else adapter.search("漫", 1)
             val duration = System.currentTimeMillis() - start
             if (items.isEmpty()) {
-                return "【首页失败】源 [$key] 无视频卡片 (${duration}ms) — 服务器不可达或被风控"
-            }
-            sb.append("【首页✅】$key: ${items.size}卡片 (${duration}ms), 首卡: ${items.first().title}\n")
-
-            // Step 2: detail
-            val testItem = items.first()
-            val detailStart = System.currentTimeMillis()
-            val detail = try { adapter.detail(testItem.id) } catch (e: Exception) { null }
-            val detailMs = System.currentTimeMillis() - detailStart
-            if (detail == null || detail.episodes.isEmpty()) {
-                sb.append("【详情❌】$key: 获取选集失败 (${detailMs}ms)")
-                return sb.toString()
-            }
-            sb.append("【详情✅】$key: ${detail.episodes.size}集 (${detailMs}ms), 首集: ${detail.episodes.first().name}\n")
-
-            // Step 3: play
-            val ep = detail.episodes.first()
-            val playStart = System.currentTimeMillis()
-            val playResult = try { adapter.play(ep.flagStr) } catch (e: Exception) { null }
-            val playMs = System.currentTimeMillis() - playStart
-            val probe = if (playResult != null && playResult.url.isNotBlank()) probeMedia(playResult) else null
-            if (probe != null && !probe.ok) {
-                sb.append("Playback probe FAILED: ${probe.reason}\nURL: ${playResult!!.url.take(160)}")
-                return sb.toString()
-            }
-            if (playResult == null || playResult.url.isBlank()) {
-                sb.append("【播放❌】$key: 解析播放地址失败 (${playMs}ms)")
-                return sb.toString()
-            }
-            sb.append("【播放✅】$key: ${playResult.url.take(80)} (${playMs}ms)\n")
-            sb.append("【类型】$key: ${playResult.type}")
-        } catch (e: Exception) {
-            val duration = System.currentTimeMillis() - start
-            sb.append("【测试异常】源 [$key] ${e.message} (${duration}ms)")
-        }
-        return sb.toString()
-    }
-
-    /**
-     * A non-empty parser result can still be an HTML player page. Probe the
-     * URL with the same headers as the player and a tiny ranged GET.
-     */
-    private fun probeMedia(result: PlayResult): ProbeResult {
-        val url = result.url.trim()
-        val lowerUrl = url.lowercase(Locale.US)
-        if (lowerUrl.startsWith("javascript:") || lowerUrl.startsWith("data:")) {
-            return ProbeResult(false, "unsupported URL scheme")
-        }
-        return try {
-            val client = NetworkClient.create(context).newBuilder()
-                .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
-                .followRedirects(true)
-                .followSslRedirects(true)
-                .build()
-            val request = Request.Builder().url(url)
-                .header("Range", "bytes=0-1")
-                .header("Accept-Encoding", "identity")
-            var hasUa = false
-            result.headers.orEmpty().forEach { (key, value) ->
-                if (key.isBlank() || value.isBlank()) return@forEach
-                if (key.equals("user-agent", ignoreCase = true)) hasUa = true
-                try { request.addHeader(key, value.replace("\r", "").replace("\n", "").trim()) } catch (_: Exception) {}
-            }
-            if (!hasUa) request.header("User-Agent", "okhttp/3.15")
-            if (!result.referer.equals("never", ignoreCase = true) && !result.referer.isNullOrBlank()) {
-                request.header("Referer", result.referer!!)
-            }
-            client.newCall(request.build()).execute().use { response ->
-                val contentType = response.header("Content-Type").orEmpty().lowercase(Locale.US)
-                val pageLike = contentType.contains("text/html") || contentType.contains("application/xhtml")
-                val extensionLooksMedia = lowerUrl.contains(".m3u8") || lowerUrl.contains(".mp4") ||
-                    lowerUrl.contains(".m4v") || lowerUrl.contains(".flv") || lowerUrl.contains(".ts")
-                when {
-                    !response.isSuccessful -> ProbeResult(false, "HTTP ${response.code} ${contentType.ifBlank { "unknown" }}")
-                    pageLike && !extensionLooksMedia -> ProbeResult(false, "HTTP ${response.code} text/html (player page)")
-                    else -> ProbeResult(true, "HTTP ${response.code} ${contentType.ifBlank { "media" }}")
-                }
+                "【首页失败】源 [$key] 无视频卡片 (${duration}ms) — 服务器不可达或被风控"
+            } else {
+                "【首页✅】$key: ${items.size}卡片 (${duration}ms), 首卡: ${items.first().title}"
             }
         } catch (e: Exception) {
-            ProbeResult(false, "request failed: ${e.message ?: "unknown"}")
+            "【测试异常】源 [$key] ${e.message} (${System.currentTimeMillis() - start}ms)"
         }
     }
-
-    private data class ProbeResult(val ok: Boolean, val reason: String)
 
     fun testAllSources(): String {
         val sb = StringBuilder()
         val keys = rawSources.map { it.key }
         for (key in keys) {
-            val enabled = isSourceEnabled(key)
-            if (!enabled) {
-                sb.append("[$key] 已关闭\n")
-                continue
-            }
             val result = testSource(key)
             sb.append(result).append("\n").append("─────────────────────\n")
         }
@@ -479,6 +480,10 @@ class SourceManager(private val context: Context) {
     }
 
     companion object {
+        const val SOURCE_TEST_FAILED = -1L
+        const val SOURCE_TEST_MAINTENANCE = -2L
+        const val SOURCE_TEST_ABNORMAL = -3L
+
         fun normalizeTitle(title: String): String {
             return title
                 .replace(Regex("<[^>]+>"), "")
@@ -708,6 +713,22 @@ class SourceAdapter(
         }
     }
 
+    fun categories(): List<SourceCategory> {
+        val raw = exports.categories()
+        if (raw.isBlank() || raw == "[]") return emptyList()
+        return try {
+            val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
+            val list: List<Map<String, Any>>? = gson.fromJson(raw, listType)
+            list?.mapNotNull { m ->
+                val cKey = m["key"]?.toString() ?: ""
+                val cTitle = m["title"]?.toString()?.trim() ?: ""
+                if (cTitle.isBlank()) null else SourceCategory(cKey, cTitle)
+            } ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun detail(id: String): DetailResult {
         val defaultItem = SourceItem(id = id, title = "", sourceKey = key, sourceTitle = title)
         return try {
@@ -779,16 +800,20 @@ class SourceAdapter(
                 SourceLogManager.error(key, "播放解析", "源返回空播放地址", "flag=${flagStr.take(240)}")
                 return PlayResult(url = "", type = "auto")
             }
-            if (raw.startsWith("http://") || raw.startsWith("https://")) {
+            if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("//")) {
                 logResolvedMedia(raw)
-                return PlayResult(url = raw, type = "auto")
+                return PlayResult(url = resolvePlayUrl(raw, null), type = "auto")
             }
             val element = com.google.gson.JsonParser.parseString(raw)
             if (element.isJsonObject) {
                 val obj = element.asJsonObject
-                val url = obj.get("url")?.asString ?: ""
-                val type = obj.get("type")?.asString ?: "auto"
                 val referer = obj.get("referer")?.asString
+                val type = obj.get("type")?.asString ?: "auto"
+                val url = resolvePlayUrl(obj.get("url")?.asString ?: "", referer)
+                val error = obj.get("error")?.asString ?: obj.get("_server_msg")?.asString
+                val startSec = obj.get("startSec")?.asLong
+                    ?: (obj.get("startMs")?.asLong ?: 0L) / 1000
+                    ?: (obj.get("start")?.asDouble ?: 0.0).toLong()
                 val headerMap = obj.get("headers")?.let { h ->
                     if (h.isJsonObject) {
                         h.asJsonObject.entrySet().associate { it.key to it.value.asString }
@@ -826,7 +851,7 @@ class SourceAdapter(
                     ?.mapNotNull { item ->
                         if (!item.isJsonObject) return@mapNotNull null
                         val q = item.asJsonObject
-                        val qUrl = q.get("url")?.asString?.trim().orEmpty()
+                        val qUrl = resolvePlayUrl(q.get("url")?.asString?.trim().orEmpty(), referer)
                         if (qUrl.isBlank()) return@mapNotNull null
                         QualityOption(
                             name = q.get("name")?.asString?.trim().orEmpty().ifBlank { "清晰度" },
@@ -842,7 +867,9 @@ class SourceAdapter(
                     type = type,
                     headers = mergedHeaders.takeIf { it.isNotEmpty() },
                     referer = referer,
-                    qualities = qualities
+                    qualities = qualities,
+                    error = error,
+                    startSec = startSec
                 )
             } else {
                 PlayResult(url = raw, type = "auto")
@@ -850,6 +877,16 @@ class SourceAdapter(
         } catch (e: Exception) {
             SourceLogManager.error(key, "播放解析", "播放结果解析异常: ${e.message}", "flag=${flagStr.take(240)}")
             PlayResult(url = "", type = "auto")
+        }
+    }
+
+    private fun resolvePlayUrl(url: String, referer: String?): String {
+        if (url.isBlank()) return url
+        return when {
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> referer?.toHttpUrlOrNull()
+                ?.let { "${it.scheme}://${it.host}${url}" } ?: url
+            else -> url
         }
     }
 

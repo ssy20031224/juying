@@ -131,11 +131,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
 
     // Media
-    implementation("androidx.media3:media3-exoplayer:1.2.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
-    implementation("androidx.media3:media3-ui:1.2.1")
-    // GPU 视频效果管线（Anime4K 风格的本地 GLSL 线条修复与纹理放大）
-    implementation("androidx.media3:media3-effect:1.2.1")
+implementation("androidx.media3:media3-exoplayer:1.2.1")
+implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
+implementation("androidx.media3:media3-ui:1.2.1")
+implementation("androidx.media3:media3-effect:1.2.1")
+implementation("androidx.media3:media3-datasource-okhttp:1.2.1")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(./gradlew :app:compileDebugKotlin -q)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Bash([ -f \"tmp/auvfun-live/decrypted/$f.js\" ])",
+      "Bash([ -f \"android/app/src/main/assets/sources/$f.js\" ])",
+      "Bash(diff -q tmp/auvfun-live/decrypted/__TRACKED_VAR__.js android/app/src/main/assets/sources/__TRACKED_VAR__.js)"
     ]
   }
 }

@@ -34,11 +34,12 @@ interface HostApiNative {
     fun request(url: String, optsJson: String?): String
     fun post(url: String, bodyStr: String?, optsJson: String?): String
     fun post2(url: String, bodyStr: String?, optsJson: String?): String
+    fun request2(url: String, optsJson: String?): String
     fun md5(input: String): String
     fun sha1(input: String): String
     fun sha256(input: String): String
     fun sha512(input: String): String
-    fun hmac(input: String, key: String, algo: String?): String
+    fun hmac(input: String, key: String, algo: String?, optsJson: String?): String
     fun base64Decode(input: String): String
     fun timestamp(): Double
     fun encodeUri(input: String): String
@@ -48,6 +49,7 @@ interface HostApiNative {
     fun matchAll(html: String, pattern: String): String
     fun getItem(key: String, defaultValue: String?): String
     fun setItem(key: String, value: String)
+    fun removeItem(key: String)
     fun log(msg: String)
 
     fun aesEncrypt(plain: String, key: String, optsJson: String?): String
@@ -60,6 +62,7 @@ interface HostApiNative {
     fun base64DecodeOpts(data: String, optsJson: String?): String
     fun inflate(data: String, optsJson: String?): String
     fun sniffMedia(url: String, optsJson: String?): String
+    fun getExt(): String
 }
 
 class QuickJsEngine(private val context: Context) {
@@ -67,6 +70,23 @@ class QuickJsEngine(private val context: Context) {
     private val gson = Gson()
     private val client = NetworkClient.create(context)
     private val storage = mutableMapOf<String, MutableMap<String, String>>()
+
+    /**
+     * 每源 ext 注入：跳过脚本内置的慢速域名探测（探测撞上 evalSafe 预算会被杀）。
+     * 域名均来自 2026-08-06 实测可达的备用入口，与官方 Lanerc 配置一致。
+     */
+    private val sourceExts = mapOf(
+        "AuvFun" to """{"hosts":["http://85.209.230.191:8003"]}""",
+        "jinpai" to """{"hosts":["https://m.9zhoukj.com","https://m.hkybqufgh.com","https://m.jiabaide.cn","https://m.sizhengxt.com","https://y2s52n7.com"]}""",
+        "cycapp" to """{"hosts":["https://mapi.babel.gold","https://mapi.cycback.org"]}""",
+        "sanqiu" to """{"host":"https://asd123sx23xdacsx.top"}""",
+        "lanerc" to """{"host":"http://lol.jngaoke.cn"}""",
+        // The script appends /app/systemInit, /app/search, etc. Its protocol
+        // root already includes /app/bn; the bare origin targets wrong routes.
+        "shuangxing" to """{"host":"http://175.178.65.250:19987/app/bn"}""",
+        // guazi: 只保留实测可达域名（其余 3 个已死，每个会拖 20s 超时）；脚本按逗号拆分
+        "guazi" to """{"hosts":"https://apinew.uozvr.com,https://api.w32z7vtd.com"}""",
+    )
 
     fun loadSource(localFile: String): SourceExports {
         val sourceKey = localFile.removeSuffix(".js").substringAfterLast("/")
@@ -116,15 +136,40 @@ class QuickJsEngine(private val context: Context) {
                     val charsetName = opts["charset"] ?: "utf-8"
                     val charset = try { java.nio.charset.Charset.forName(charsetName) } catch (_: Exception) { Charsets.ISO_8859_1 }
                     val bodyBytes = bodyStr?.toByteArray(charset)
-                    val respBytes = syncHttpBytes("POST", url, bodyBytes, opts)
+                    val (statusCode, respBytes) = syncHttpResult("POST", url, bodyBytes, opts)
                     val bodyText = String(respBytes, charset)
+                    logHttpBridge("POST", url, opts, statusCode, bodyText)
                     val json = com.google.gson.JsonObject()
                     json.addProperty("body", bodyText)
-                    json.addProperty("statusCode", 200)
+                    json.addProperty("status", statusCode)
+                    json.addProperty("statusCode", statusCode)
                     gson.toJson(json)
                 } catch (e: Exception) {
                     val json = com.google.gson.JsonObject()
                     json.addProperty("body", "")
+                    json.addProperty("status", 500)
+                    json.addProperty("statusCode", 500)
+                    gson.toJson(json)
+                }
+            }
+
+            override fun request2(url: String, optsJson: String?): String {
+                return try {
+                    val opts = parseOpts(optsJson)
+                    val charsetName = opts["charset"] ?: "utf-8"
+                    val charset = try { java.nio.charset.Charset.forName(charsetName) } catch (_: Exception) { Charsets.ISO_8859_1 }
+                    val (statusCode, respBytes) = syncHttpResult("GET", url, null, opts)
+                    val bodyText = String(respBytes, charset)
+                    logHttpBridge("GET", url, opts, statusCode, bodyText)
+                    val json = com.google.gson.JsonObject()
+                    json.addProperty("body", bodyText)
+                    json.addProperty("status", statusCode)
+                    json.addProperty("statusCode", statusCode)
+                    gson.toJson(json)
+                } catch (e: Exception) {
+                    val json = com.google.gson.JsonObject()
+                    json.addProperty("body", "")
+                    json.addProperty("status", 500)
                     json.addProperty("statusCode", 500)
                     gson.toJson(json)
                 }
@@ -134,12 +179,29 @@ class QuickJsEngine(private val context: Context) {
             override fun sha1(input: String): String = digest(input, "SHA-1")
             override fun sha256(input: String): String = digest(input, "SHA-256")
             override fun sha512(input: String): String = digest(input, "SHA-512")
-            override fun hmac(input: String, key: String, algo: String?): String {
-                return hmacHash(input, key, algo ?: "HmacSHA256")
+            override fun hmac(input: String, key: String, algo: String?, optsJson: String?): String {
+                return try {
+                    val opts = parseOpts(optsJson)
+                    val output = opts["output"] ?: "hex"
+                    val macAlgo = when (algo?.uppercase()) {
+                        "SHA-256", "SHA256" -> "HmacSHA256"
+                        "SHA-1", "SHA1" -> "HmacSHA1"
+                        "SHA-512", "SHA512" -> "HmacSHA512"
+                        "MD5" -> "HmacMD5"
+                        else -> algo ?: "HmacSHA256"
+                    }
+                    val mac = Mac.getInstance(macAlgo)
+                    mac.init(SecretKeySpec(key.toByteArray(Charsets.UTF_8), mac.algorithm))
+                    val result = mac.doFinal(input.toByteArray(Charsets.UTF_8))
+                    when (output) {
+                        "base64" -> Base64.encodeToString(result, Base64.NO_WRAP)
+                        else -> result.joinToString("") { "%02x".format(it) }
+                    }
+                } catch (_: Exception) { "" }
             }
             override fun base64Decode(input: String): String {
                 return try {
-                    String(Base64.decode(input, Base64.DEFAULT), Charsets.UTF_8)
+                    String(decodeBase64Lenient(input), Charsets.UTF_8)
                 } catch (_: Exception) { "" }
             }
 
@@ -171,10 +233,16 @@ class QuickJsEngine(private val context: Context) {
                 return try {
                     val regex = Regex(pattern, setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
                     val list = regex.findAll(html).map { m ->
-                        if (m.groupValues.size > 1) m.groupValues.drop(1) else listOf(m.value)
+                        val item = mutableListOf(m.value)
+                        for (i in 1 until m.groupValues.size) {
+                            item.add(m.groups[i]?.value ?: "")
+                        }
+                        item
                     }.toList()
                     gson.toJson(list)
-                } catch (_: Exception) { "[]" }
+                } catch (e: Exception) {
+                    "[]"
+                }
             }
 
             override fun getItem(key: String, defaultValue: String?): String {
@@ -185,10 +253,16 @@ class QuickJsEngine(private val context: Context) {
                 store[key] = value
             }
 
+            override fun removeItem(key: String) {
+                store.remove(key)
+            }
+
             override fun log(msg: String) {
                 android.util.Log.d("QuickJS-Log", "[$sourceKey] $msg")
                 com.juying.app.source.SourceLogManager.info(sourceKey, "JS", msg)
             }
+
+            override fun getExt(): String = sourceExts[sourceKey] ?: "{}"
 
             override fun aesEncrypt(plain: String, key: String, optsJson: String?): String {
                 return aesCrypt(true, plain, key, optsJson)
@@ -207,9 +281,11 @@ class QuickJsEngine(private val context: Context) {
             }
 
             override fun hexEncode(data: String, optsJson: String?): String {
-                val opts = parseOpts(optsJson)
-                val bytes = toBytes(data, opts["input"] ?: "utf8")
-                return fromBytes(bytes, "hex")
+                return try {
+                    val opts = parseOpts(optsJson)
+                    val bytes = toBytes(data, opts["input"] ?: "utf8")
+                    fromBytes(bytes, "hex")
+                } catch (_: Exception) { "" }
             }
 
             override fun hexDecode(data: String, optsJson: String?): String {
@@ -240,6 +316,23 @@ class QuickJsEngine(private val context: Context) {
         }
     }  // end createHost
 
+    private fun logHttpBridge(method: String, url: String, opts: Map<String, String>, statusCode: Int, body: String) {
+        val debugUrl = url.take(200)
+        val verbose = url.contains("/App/") || url.contains("signUp") || url.contains("indexList") ||
+            url.contains("refresh") || url.contains("playInfo") || url.contains("Vurl") ||
+            url.contains("xifanacg") || url.contains("dmbus") || url.contains("meilinvps") ||
+            url.contains("shuangxing") || url.contains("uozvr") || url.contains("z7vtd")
+        if (!verbose && !body.contains("sign") && !body.contains("error") && statusCode < 400) return
+        val headerKeys = runCatching {
+            JsonParser.parseString(opts["headers"] ?: "").asJsonObject.entrySet()
+                .joinToString(",") { it.key }
+        }.getOrDefault("")
+        android.util.Log.w(
+            "HttpBridge",
+            "$method $debugUrl => $statusCode head=[$headerKeys] body=${body.take(300)}"
+        )
+    }
+
     private val BRIDGE_SCRIPT = """
             globalThis.module = { exports: {} };
             globalThis.exports = globalThis.module.exports;
@@ -267,6 +360,11 @@ class QuickJsEngine(private val context: Context) {
                     var rawJson = HostNative.post2(String(url || ''), bodyStr, optsStr);
                     try { return JSON.parse(rawJson); } catch(e) { return { body: '', statusCode: 500 }; }
                 },
+                request2: function(url, opts) {
+                    var optsStr = typeof opts === 'object' ? JSON.stringify(opts) : (opts || null);
+                    var rawJson = HostNative.request2(String(url || ''), optsStr);
+                    try { return JSON.parse(rawJson); } catch(e) { return { body: '', statusCode: 500 }; }
+                },
                 get: function(url, opts) {
                     var optsStr = typeof opts === 'object' ? JSON.stringify(opts) : (opts || null);
                     return HostNative.request(String(url || ''), optsStr);
@@ -281,8 +379,9 @@ class QuickJsEngine(private val context: Context) {
             function sha1(v) { return HostNative.sha1(String(v || '')); }
             function sha256(v) { return HostNative.sha256(String(v || '')); }
             function sha512(v) { return HostNative.sha512(String(v || '')); }
-            function hmac(v, key, algo) { return HostNative.hmac(String(v || ''), String(key || ''), algo || null); }
+            function hmac(v, key, algo) { return HostNative.hmac(String(v || ''), String(key || ''), algo || null, null); }
             function base64Decode(v) { return HostNative.base64Decode(String(v || '')); }
+            function base64Encode(v) { return HostNative.base64Encode(String(v || ''), null); }
             function timestamp() { return HostNative.timestamp(); }
             function parseJson(v) {
                 if (v === null || v === undefined || v === '') return null;
@@ -305,6 +404,7 @@ class QuickJsEngine(private val context: Context) {
             globalThis.sha512 = sha512;
             globalThis.hmac = hmac;
             globalThis.base64Decode = base64Decode;
+            globalThis.base64Encode = base64Encode;
             globalThis.timestamp = timestamp;
             globalThis.parseJson = parseJson;
 
@@ -322,8 +422,13 @@ class QuickJsEngine(private val context: Context) {
             };
             globalThis.getItem = function(k, def) { return HostNative.getItem(String(k), def || null); };
             globalThis.setItem = function(k, v) { HostNative.setItem(String(k), String(v)); };
+            globalThis.removeItem = function(k) { HostNative.removeItem(String(k)); };
 
             globalThis.crypto = {
+                hmac: function(algo, key, msg, opts) {
+                    var optsStr = typeof opts === 'object' ? JSON.stringify(opts) : (opts || null);
+                    return HostNative.hmac(String(msg || ''), String(key || ''), algo || null, optsStr);
+                },
                 aes: {
                     encrypt: function(plain, key, opts) {
                         var optsStr = typeof opts === 'object' ? JSON.stringify(opts) : (opts || null);
@@ -378,8 +483,19 @@ class QuickJsEngine(private val context: Context) {
                 var one = globalThis.sniffMedia(url, opts);
                 return one ? [one] : [];
             };
-            globalThis.ext = {};
-            globalThis.UA = {};
+            globalThis.ext = parseJson(HostNative.getExt()) || {};
+            globalThis.UA = {
+                chrome: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                edge: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+                firefox: 'Mozilla/5.0 (Windows NT 10.0; rv:130.0) Gecko/20100101 Firefox/130.0',
+                safari: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15',
+                iphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
+                ipad: 'Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
+                android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+                mobile: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+                desktop: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                okhttp: 'okhttp/4.12.0'
+            };
         """.trimIndent()
 
     private fun decodeUnicodeEscapes(s: String): String {
@@ -457,13 +573,16 @@ class QuickJsEngine(private val context: Context) {
     /**
      * Run dynamic player JavaScript in an off-screen WebView and intercept the
      * first media request. Static HTTP parsing cannot see URLs created by JS.
+     * Extended window: after onPageFinished keep polling the DOM/globals for
+     * video sources, since several CMS players (lmm85/akianime) create the
+     * media URL only after their player script finishes booting.
      */
     private fun sniffMediaWebView(
         url: String,
         headers: Map<String, String>,
         opts: Map<String, String>
     ): WebViewSniff? {
-        val timeoutMs = (opts["timeout"]?.toLongOrNull() ?: 15000L).coerceIn(3000L, 30000L)
+        val timeoutMs = (opts["timeout"]?.toLongOrNull() ?: 25000L).coerceIn(8000L, 40000L)
         val latch = CountDownLatch(1)
         val hit = AtomicReference<WebViewSniff?>(null)
         val handler = Handler(Looper.getMainLooper())
@@ -473,12 +592,26 @@ class QuickJsEngine(private val context: Context) {
                 web.settings.javaScriptEnabled = true
                 web.settings.domStorageEnabled = true
                 web.settings.mediaPlaybackRequiresUserGesture = false
+                web.settings.mediaPlaybackRequiresUserGesture = false
                 val suppliedUa = opts["userAgent"] ?: opts["ua"]
                 if (!suppliedUa.isNullOrBlank()) web.settings.userAgentString = suppliedUa
                 val loadHeaders = headers.toMutableMap()
                 val referer = opts["referer"] ?: opts["referrer"]
                 if (!referer.isNullOrBlank() && loadHeaders.keys.none { it.equals("Referer", true) }) {
                     loadHeaders["Referer"] = referer
+                }
+                val checkMedia = object : Runnable {
+                    override fun run() {
+                        if (hit.get() == null) {
+                            try {
+                                web.evaluateJavascript(
+                                    "(function(){try{var v=document.querySelectorAll('video,source');for(var i=0;i<v.length;i++){var s=v[i].src||v[i].getAttribute('src')||'';if(s&&/m3u8|mp4|m4v|flv|mpd/i.test(s))return s;}var w=window.player_aaaa||window.player_data||window.vod_data||window.dplayer||null;if(w){var u=w.url||w.playUrl||w.video_url||'';if(u&&/m3u8|mp4|m4v|flv|mpd/i.test(u))return u;}return '';}catch(e){return '';}})()",
+                                    { r -> if (hit.get() == null && r is String && r.isNotBlank()) { val u = r.trim().removePrefix("\"").removeSuffix("\"").replace("\\/", "/"); if (u.startsWith("http") && Regex("m3u8|mp4|m4v|flv|mpd", RegexOption.IGNORE_CASE).containsMatchIn(u)) { hit.set(WebViewSniff(u, emptyMap())); latch.countDown() } } }
+                                )
+                            } catch (_: Exception) {}
+                            handler.postDelayed(this, 800L)
+                        }
+                    }
                 }
                 web.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
@@ -491,6 +624,10 @@ class QuickJsEngine(private val context: Context) {
                             latch.countDown()
                         }
                         return super.shouldInterceptRequest(view, request)
+                    }
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        super.onPageFinished(view, url)
+                        handler.post(checkMedia)
                     }
                     override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                         if (request.isForMainFrame) latch.countDown()
@@ -559,7 +696,10 @@ class QuickJsEngine(private val context: Context) {
             }
 
             val response = requestClient.newCall(request.build()).execute()
-            response.body?.string() ?: ""
+            val body = response.body?.string() ?: ""
+            val code = response.code
+            logHttpBridge(method, cleanUrl.take(200), opts, code, body)
+            body
         } catch (e: Exception) {
             android.util.Log.e("QuickJsEngine", "HTTP $method $url failed: ${e.message}")
             ""
@@ -567,6 +707,10 @@ class QuickJsEngine(private val context: Context) {
     }
 
     private fun syncHttpBytes(method: String, url: String, bodyBytes: ByteArray?, opts: Map<String, String>): ByteArray {
+        return syncHttpResult(method, url, bodyBytes, opts).second
+    }
+
+    private fun syncHttpResult(method: String, url: String, bodyBytes: ByteArray?, opts: Map<String, String>): Pair<Int, ByteArray> {
         val cleanUrl = decodeUnicodeEscapes(url)
         return try {
             val headers = mutableMapOf<String, String>()
@@ -605,10 +749,12 @@ class QuickJsEngine(private val context: Context) {
             }
 
             val response = requestClient.newCall(request.build()).execute()
-            response.body?.bytes() ?: ByteArray(0)
+            val code = response.code
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            code to bytes
         } catch (e: Exception) {
             android.util.Log.e("QuickJsEngine", "HTTP $method $url failed: ${e.message}")
-            ByteArray(0)
+            500 to ByteArray(0)
         }
     }
 
@@ -648,16 +794,26 @@ class QuickJsEngine(private val context: Context) {
                     }
                     val cipher = Cipher.getInstance(algo)
                     if (mode == "GCM") {
+                        val explicitIv = opts["iv"]?.let { toBytes(it, ivFmt) }
                         if (encrypt) {
-                            var iv = (opts["iv"] ?: "").let { toBytes(it, ivFmt) }
+                            var iv = explicitIv ?: ByteArray(12) { (Math.random() * 256).toInt().toByte() }
                             if (iv.size < 12) iv = iv + ByteArray(12 - iv.size)
                             iv = iv.take(12).toByteArray()
                             cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
                             return toOutput(iv + cipher.doFinal(inputBytes), outputFmt)
                         } else {
-                            val iv = inputBytes.take(12).toByteArray()
-                            cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
-                            return toOutput(cipher.doFinal(inputBytes.drop(12).toByteArray()), outputFmt)
+                            // 官方语义：opts.iv 单独传参时直接用；否则从输入前 12 字节截取
+                            if (explicitIv != null) {
+                                var iv = explicitIv
+                                if (iv.size < 12) iv = iv + ByteArray(12 - iv.size)
+                                iv = iv.take(12).toByteArray()
+                                cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                                return toOutput(cipher.doFinal(inputBytes), outputFmt)
+                            } else {
+                                val iv = inputBytes.take(12).toByteArray()
+                                cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                                return toOutput(cipher.doFinal(inputBytes.drop(12).toByteArray()), outputFmt)
+                            }
                         }
                     } else {
                         val ivSpec = if (mode == "ECB") null
@@ -747,15 +903,6 @@ class QuickJsEngine(private val context: Context) {
         return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 
-    private fun hmacHash(input: String, key: String, algo: String): String {
-        return try {
-            val mac = Mac.getInstance(algo)
-            mac.init(SecretKeySpec(key.toByteArray(Charsets.UTF_8), mac.algorithm))
-            val result = mac.doFinal(input.toByteArray(Charsets.UTF_8))
-            result.joinToString("") { "%02x".format(it) }
-        } catch (_: Exception) { "" }
-    }
-
     private fun parseOpts(json: String?): Map<String, String> {
         if (json.isNullOrBlank()) return emptyMap()
         return try {
@@ -768,8 +915,34 @@ class QuickJsEngine(private val context: Context) {
 
     private fun toBytes(data: String, fmt: String): ByteArray = when (fmt) {
         "hex" -> data.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        "base64" -> Base64.decode(data, Base64.DEFAULT)
+        "base64" -> decodeBase64Lenient(data)
         else -> data.toByteArray(Charsets.UTF_8)
+    }
+
+    private fun decodeBase64Lenient(data: String): ByteArray {
+        val clean = data.replace("\r", "").replace("\n", "").trim()
+        val attempts = listOf(
+            Base64.DEFAULT,
+            Base64.URL_SAFE,
+            Base64.URL_SAFE or Base64.NO_WRAP
+        )
+        var lastError: IllegalArgumentException? = null
+        for (flags in attempts) {
+            try {
+                return Base64.decode(clean, flags)
+            } catch (e: IllegalArgumentException) {
+                lastError = e
+            }
+        }
+        // Some CDN responses arrive in unpadded or mixed format; fall back to
+        // a manual 4-char-at-a-time decode tolerant of missing padding.
+        try {
+            val sb = StringBuilder(clean)
+            while (sb.length % 4 != 0) sb.append('=')
+            return Base64.decode(sb.toString(), Base64.URL_SAFE)
+        } catch (_: Exception) {
+            throw lastError ?: IllegalArgumentException("invalid base64")
+        }
     }
 
     private fun fromBytes(bytes: ByteArray, fmt: String): String = when (fmt) {
@@ -799,12 +972,11 @@ class SourceExports(private val sourceKey: String, private val gson: Gson) {
             instance.block()
         })
         return try {
-            future.get(4, TimeUnit.SECONDS)
+            // 20s 预算对齐源脚本默认请求超时（15~20s）；4s 会把带域名探测的源
+            // （AuvFun/jinpai/cycapp 等）全部误杀。不做 cancel：同步 HTTP 不响应
+            // interrupt，cancel 后线程仍被占用，后续调用会永久排队超时。
+            future.get(20, TimeUnit.SECONDS)
         } catch (e: Exception) {
-            // Also cancel the underlying QuickJS/network task. Without this,
-            // the single-thread source executor remains occupied after the UI
-            // timeout and later requests queue behind a task nobody awaits.
-            future.cancel(true)
             android.util.Log.w("QuickJsEngine", "[$sourceKey] evalSafe timeout or failed: ${e.message}")
             throw e
         }
@@ -885,6 +1057,15 @@ class SourceExports(private val sourceKey: String, private val gson: Gson) {
             val duration = System.currentTimeMillis() - startTime
             android.util.Log.e("SourceExports", "homeSections failed: ${e.message}", e)
             com.juying.app.source.SourceLogManager.error(sourceKey, "首页", "首页分区异常: ${e.message} (${duration}ms)")
+            "[]"
+        }
+    }
+
+    fun categories(): String {
+        return try {
+            callFn("categories", "", "[]")
+        } catch (e: Exception) {
+            android.util.Log.e("SourceExports", "categories failed: ${e.message}", e)
             "[]"
         }
     }

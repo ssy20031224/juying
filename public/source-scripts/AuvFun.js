@@ -1,45 +1,41 @@
-/*
- * AES-128-ECB 加密 API + sign 鉴权 · 首页板块（homeSections）真还原（2026-07-01 Node 端到端验证）
- * version: 2.0.0
- *
- * 协议（GET，sign 鉴权，部分接口响应是 "base64"(AES-128-ECB 加密) 字符串）：
- *   - sign = base64url( MD5(time + path + apiSecret) )[:22]，另带 time=<秒+60>。UA=Dart。
- *   - 栏目  /app/tab/getList                         → data[]{id,title,sort}  4 个：推荐/日漫/国漫/4K
- *   - 板块  /app/video/getList?tabId=<栏目id>        → data[]{title,type,videoList[]}  ★首页板块结构
- *           （type=1 banner 轮播；type!=1 普通板块；每板块 5~7 部，不分页）
- *   - 搜索  /app/video/search?keyWord=&page=&size=   → data[]（真分页）
- *   - 详情  /app/video/getDetail?videoId=            → data{...,episodeList[]{id,title}}
- *   - 取流  /app/episode/jx?videoTitle=&episodeId=&deviceId= → data.resolutionList[]{name,url}+playHeader
- *           选集 flag = videoId@episodeId@base64url(videoTitle)，play() 拆开调取流接口。
- *
- *  封面 pic 大量是豆瓣图床(img*.doubanio.com)，带防盗链：无 Referer 必 418。
- *    已在 App 端 Coil 加载器统一为 doubanio/douban 主机补 Referer=https://movie.douban.com/（见 LanercApp）。
- *  play 取流接口 /episode/jx 服务端可能间歇性返回「正在维护」，非本源逻辑问题。
- */
 
-var BASE       = 'http://85.209.230.191:8003';
+
+
+
+
+
+var BASE       = 'https://app.manshan.fun';
+var LEGACY_BASE= 'http://85.209.230.191:8003';
 var API_PREFIX = '/app';
-var AES_KEY    = 'zhuhongleipeipei';     // 16 字节
-var API_SECRET = "zhl's river app";       // 15 字节
+var AES_KEY    = 'zhuhongleipeipei';     
+var API_SECRET = "zhl's river app";       
 var DEVICE_ID  = '4822e35123b5312b';
 var UA_DART    = 'Dart/3.11 (dart:io)';
 var CHROME_UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36';
 
-// 多 BASE 备用 (jinpai 风格), 漫闪当前只一个 IP, 留作未来扩展
+
 var HOSTS = (function () {
+    var out = [], seen = {};
+    
+    pushHost(out, seen, BASE);
     try {
         if (typeof ext !== 'undefined' && ext) {
             if (typeof ext === 'string' && ext.indexOf('http') >= 0) {
-                return ext.split(',').map(rstrip).filter(function (x) { return !!x; });
+                var arr = ext.split(',');
+                for (var i = 0; i < arr.length; i++) pushHost(out, seen, arr[i]);
             }
-            if (ext.hosts && ext.hosts.length) return ext.hosts.map(rstrip);
-            if (ext.host) return [rstrip(ext.host)];
+            if (ext.hosts && ext.hosts.length) {
+                for (var j = 0; j < ext.hosts.length; j++) pushHost(out, seen, ext.hosts[j]);
+            }
+            if (ext.host) pushHost(out, seen, ext.host);
         }
     } catch (e) {}
-    return [BASE];
+    
+    pushHost(out, seen, LEGACY_BASE);
+    return out.length ? out : [BASE, LEGACY_BASE];
 })();
 
-// /tab/getList 偶发失败时的兜底栏目（2026-07-01 实测 id），保证首页/分类不至于全空
+
 var FALLBACK_TABS = [
     { id: '3740c6fc9f992bd660303d2a23f6ebb5', title: '推荐', sort: 1 },
     { id: 'd1832ba165d0538f8c72ea09e84fd413', title: '日漫', sort: 2 },
@@ -47,11 +43,18 @@ var FALLBACK_TABS = [
     { id: '6ee3bcd148d1dcb98550d00b93232f24', title: '4K',   sort: 4 }
 ];
 
-// ============================================================
-// 工具函数 (与 jinpai 同名同语义)
-// ============================================================
+
+
+
 function trim(s)   { return s == null ? '' : String(s).replace(/^\s+|\s+$/g, ''); }
 function rstrip(s) { return trim(s).replace(/\/+$/, ''); }
+
+function pushHost(list, seen, s) {
+    var h = rstrip(s);
+    if (!h || seen[h]) return;
+    seen[h] = 1;
+    list.push(h);
+}
 function clean(s) {
     if (s == null) return '';
     return trim(String(s)
@@ -75,7 +78,7 @@ function guessType(u) {
     if (u.indexOf('.flv')  >= 0) return 'flv';
     return 'auto';
 }
-// 分辨率原始档位名 -> 前台友好名（供「清晰度切换」展示）
+
 function resName(raw) {
     switch (String(raw == null ? '' : raw).toLowerCase()) {
         case '8k':     return '8K';
@@ -91,10 +94,10 @@ function resName(raw) {
     }
 }
 
-// ============================================================
-// 精简版 AES-128-ECB 解密 (仅 decrypt + PKCS7 + Base64)
-// 移植自 aes-js, 已裁剪到仅含必需部分
-// ============================================================
+
+
+
+
 var AES_DEC = (function () {
     var SI = [
         0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
@@ -136,7 +139,7 @@ var AES_DEC = (function () {
 
     function xtime(a) { return ((a << 1) ^ (((a >> 7) & 1) * 0x1b)) & 0xff; }
 
-    // 16 字节 key -> 11 轮 round keys (44 个 32-bit word)
+    
     function expandKey(key) {
         var Nk = 4, Nr = 10, Nb = 4;
         var w = new Array(Nb * (Nr + 1) * 4);
@@ -153,22 +156,22 @@ var AES_DEC = (function () {
 
     function decryptBlock(blk, rk) {
         var s = blk.slice();
-        // initial AddRoundKey (last round key)
+        
         for (var i = 0; i < 16; i++) s[i] ^= rk[160 + i];
 
         for (var r = 9; r >= 1; r--) {
-            // InvShiftRows
+            
             var t = [
                 s[0], s[13], s[10], s[7],
                 s[4], s[1],  s[14], s[11],
                 s[8], s[5],  s[2],  s[15],
                 s[12],s[9],  s[6],  s[3]
             ];
-            // InvSubBytes
+            
             for (var i = 0; i < 16; i++) s[i] = SI[t[i]];
-            // AddRoundKey
+            
             for (var i = 0; i < 16; i++) s[i] ^= rk[r * 16 + i];
-            // InvMixColumns
+            
             for (var c = 0; c < 4; c++) {
                 var a = s[c * 4], b = s[c * 4 + 1], cc = s[c * 4 + 2], d = s[c * 4 + 3];
                 var a2 = xtime(a), b2 = xtime(b), c2 = xtime(cc), d2 = xtime(d);
@@ -184,7 +187,7 @@ var AES_DEC = (function () {
                 s[c * 4 + 3] = (ab ^ bd ^ c9 ^ de) & 0xff;
             }
         }
-        // final round: InvShiftRows + InvSubBytes + AddRoundKey
+        
         var t = [
             s[0], s[13], s[10], s[7],
             s[4], s[1],  s[14], s[11],
@@ -204,7 +207,7 @@ var AES_DEC = (function () {
         while (i < len) {
             var c = b[i++];
             if (c < 0x80) { out += String.fromCharCode(c); }
-            else if (c < 0xc0) { /* skip */ }
+            else if (c < 0xc0) {   }
             else if (c < 0xe0) { out += String.fromCharCode(((c & 0x1f) << 6) | (b[i++] & 0x3f)); }
             else if (c < 0xf0) { out += String.fromCharCode(((c & 0x0f) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f)); }
             else {
@@ -235,7 +238,7 @@ var AES_DEC = (function () {
     }
 
     return {
-        // 解密 base64 字符串 -> UTF-8 plaintext
+        
         decryptBase64: function (b64, keyStr) {
             var key = str2bytes(keyStr || AES_KEY);
             var rk = expandKey(key);
@@ -248,7 +251,7 @@ var AES_DEC = (function () {
                 var blk = decryptBlock(cipher.slice(i, i + 16), rk);
                 for (var j = 0; j < 16; j++) out.push(blk[j]);
             }
-            // PKCS7 unpad
+            
             var pad = out[out.length - 1];
             if (pad < 1 || pad > 16) throw new Error('invalid PKCS7 pad: ' + pad);
             for (var k = out.length - pad; k < out.length; k++) {
@@ -259,11 +262,11 @@ var AES_DEC = (function () {
     };
 })();
 
-// ============================================================
-// 鉴权 + base64url
-// ============================================================
+
+
+
 function b64url(hexStr) {
-    // 输入是 md5 hex (32 字符) -> 转 16 字节 -> base64url 不带 = -> 取前 22
+    
     var bytes = '';
     for (var i = 0; i < hexStr.length; i += 2) {
         bytes += String.fromCharCode(parseInt(hexStr.substr(i, 2), 16));
@@ -286,7 +289,7 @@ function b64url(hexStr) {
 }
 
 function sign(path, ts) {
-    // sign = base64url( MD5(time + path + apiSecret) )[:22]
+    
     return b64url(md5(String(ts) + path + API_SECRET));
 }
 
@@ -294,9 +297,9 @@ function hdr() {
     return { 'User-Agent': UA_DART };
 }
 
-// ============================================================
-// 请求 / 响应处理
-// ============================================================
+
+
+
 var RESOLVED = '';
 function host() {
     if (RESOLVED) return RESOLVED;
@@ -365,9 +368,9 @@ function parseResp(raw) {
     return { _raw: s.substr(0, 200) };
 }
 
-// ============================================================
-// 业务字段映射
-// ============================================================
+
+
+
 function mapVideoBrief(v) {
     if (!v) return null;
     var title = clean(v.title || v.douBanTitle || '');
@@ -375,7 +378,7 @@ function mapVideoBrief(v) {
     return {
         id:      String(v.id || ''),
         name:    title,
-        pic:     trim(v.pic),                 // 多为豆瓣图床，App 端 Coil 已统一补防盗链 Referer
+        pic:     trim(v.pic),                 
         type:    typeOf(v.area),
         year:    yearStr(v.year),
         remarks: clean(v.remarks || ''),
@@ -383,7 +386,7 @@ function mapVideoBrief(v) {
     };
 }
 
-// videoList -> VideoItem[]（按 id 去重）
+
 function mapList(arr) {
     var out = [], seen = {};
     if (!arr) return out;
@@ -395,8 +398,8 @@ function mapList(arr) {
     return out;
 }
 
-// banner / hero 横版位专用：优先用横图 thumb（豆瓣 l/m 原始比例，接近 16:9），
-// 回退竖图 pic。漫闪官方首页轮播用的就是 thumb；竖版海报塞进横版位会被裁成中间一条。
+
+
 function mapListBanner(arr) {
     var out = [], seen = {};
     if (!arr) return out;
@@ -411,9 +414,9 @@ function mapListBanner(arr) {
     return out;
 }
 
-// ============================================================
-// 栏目 / 列表
-// ============================================================
+
+
+
 var TABS_CACHE = null;
 function fetchTabsCached() {
     if (TABS_CACHE) return TABS_CACHE;
@@ -432,14 +435,14 @@ function fetchTabsCached() {
     return TABS_CACHE;
 }
 
-// 「推荐」栏目 id（找不到取第一个）
+
 function recommendId() {
     var tabs = fetchTabsCached();
     for (var i = 0; i < tabs.length; i++) if (tabs[i].title === '推荐') return tabs[i].id;
     return tabs.length ? tabs[0].id : '';
 }
 
-// 取某栏目 getList 的全部分区, 摊平成一维影片列表(去重)
+
 function flattenTab(tabId) {
     if (!tabId) return [];
     var j = callApi('/video/getList', { tabId: tabId }) || {};
@@ -456,7 +459,7 @@ function flattenTab(tabId) {
     return out;
 }
 
-// 栏目内浏览：getList 不分页, 摊平后客户端切片(每页 20)
+
 function listByTab(tabId, page) {
     var all = flattenTab(tabId);
     page = page || 1;
@@ -470,11 +473,11 @@ function searchByKeyword(kw, page) {
     return mapList(j.data || []);
 }
 
-// ============================================================
-// 契约入口
-// ============================================================
 
-// 首页 tab：推荐(空 key 走 homeSections) + 各栏目(key=栏目 id)
+
+
+
+
 function categories() {
     var tabs = fetchTabsCached();
     var cats = [{ key: '', title: '推荐' }];
@@ -486,12 +489,12 @@ function categories() {
     return JSON.stringify(cats);
 }
 
-// 首页板块：还原漫闪布局。
-//  - hero 轮播 = banner 段前 5（横图 thumb，"轮播还是原来的"）
-//  - 紧跟 hero 的横滑卡 = 「最近更新」（按用户要求把这条横滑位换成最近更新）
-//  - 其余 = 豆瓣高分 / 记忆深刻 / 简单的快乐 等竖版网格
-// 机制：HomeScreen.buildSectionedUi 把第一段「前 5 做 hero、其余做横滑」，
-//      所以第一段 items 拼成 [banner 前5] + [最近更新]，title 用「最近更新」。
+
+
+
+
+
+
 function homeSections() {
     var recId = recommendId();
     if (!recId) return '[]';
@@ -504,19 +507,20 @@ function homeSections() {
         var title = trim(sec.title);
         var isBanner = (sec.type === 1) || title.toLowerCase() === 'banner';
         if (isBanner && !bannerItems.length) {
-            bannerItems = mapListBanner(sec.videoList);        // hero 横图
+            bannerItems = mapListBanner(sec.videoList);        
         } else if (title === '最近更新' && !recentItems.length) {
-            recentItems = mapList(sec.videoList);              // 横滑卡（竖版海报）
+            recentItems = mapList(sec.videoList);              
         } else {
             rest.push({ title: title || '推荐', items: mapList(sec.videoList) });
         }
     }
 
     var out = [];
-    // 第一段：hero(banner 前5) + 横滑(最近更新)，由 buildSectionedUi 自动拆分
+    
     var first = bannerItems.slice(0, 5).concat(recentItems);
     if (first.length) out.push({ title: '最近更新', key: '', items: first });
-    // banner 不足 5 张时兜底：直接用 banner 全部当第一段（避免 hero 卷进最近更新）
+    
+    
     for (var k = 0; k < rest.length; k++) {
         if (rest[k].items.length) out.push({ title: rest[k].title, key: '', items: rest[k].items.slice(0, 12) });
     }
@@ -526,9 +530,9 @@ function homeSections() {
 function search(keyword, page) {
     page = page || 1;
     var key = trim(keyword);
-    if (!key) return JSON.stringify(listByTab(recommendId(), page));   // 精选页降级 / 推荐摊平
-    if (/^[0-9a-f]{32}$/.test(key)) return JSON.stringify(listByTab(key, page)); // 栏目 tab
-    return JSON.stringify(searchByKeyword(key, page));                  // 关键词搜索(真分页)
+    if (!key) return JSON.stringify(listByTab(recommendId(), page));   
+    if (/^[0-9a-f]{32}$/.test(key)) return JSON.stringify(listByTab(key, page)); 
+    return JSON.stringify(searchByKeyword(key, page));                  
 }
 
 function searchFiltered(category, filtersJson, page) {
@@ -537,9 +541,9 @@ function searchFiltered(category, filtersJson, page) {
     return search(cat, page);
 }
 
-// ============================================================
-// 选集 flag 编解码（videoTitle 用 base64url 随 flag 透传给 play）
-// ============================================================
+
+
+
 function utf8ToB64url(s) {
     var bytes = [];
     for (var i = 0; i < s.length; i++) {
@@ -628,7 +632,7 @@ function detail(id) {
         var name = clean(e.title || ('第' + (i + 1) + '集'));
         out.episodes.push({
             name:  name,
-            url:   String(id) + '@' + eid + '@' + titleEnc,   // flag = videoId@episodeId@b64url(videoTitle)
+            url:   String(id) + '@' + eid + '@' + titleEnc,   
             route: '在线播放'
         });
     }
@@ -644,7 +648,7 @@ function play(flag) {
     if (!eid)   { res._note = 'missing episodeId in flag'; return JSON.stringify(res); }
     if (!title) { res._note = 'missing videoTitle in flag (re-open detail to re-encode)'; return JSON.stringify(res); }
 
-    // /app/episode/jx?videoTitle=&episodeId=&deviceId=  ← 真实必填
+    
     var j = callApi('/episode/jx', {
         videoTitle: title,
         episodeId:  eid,
@@ -658,9 +662,9 @@ function play(flag) {
         return JSON.stringify(res);
     }
 
-    // 选最佳分辨率：4k 优先。漫闪「4K」栏目视频的 resolutionList 含 name="4k" 的超清直链，
-    // 旧 order 漏了它 → 退而选 super(≈1080p)，导致「官方有 4K、这里却不是 4K」。
-    // 2026-07-01 Node 实测某 4K 视频 resolutionList = [4k, super, high, low]；uhd/8k/2k 为防御别名。
+    
+    
+    
     var rs = d.resolutionList || [];
     var pick = null;
     var order = ['8k', '4k', 'uhd', '2k', 'super', 'fullHd', 'high', 'normal', 'low'];
@@ -679,7 +683,7 @@ function play(flag) {
     res.url  = u;
     res.type = guessType(u);
 
-    // 用 jx 接口返回的 playHeader 作为播放请求头 (Cookie/Referer/UserAgent)
+    
     var ph = d.playHeader || {};
     var hdrs = {
         'User-Agent': ph.UserAgent || ph['User-Agent'] || CHROME_UA,
@@ -690,7 +694,7 @@ function play(flag) {
     res.referer = hdrs.Referer;
     res.headers = JSON.stringify(hdrs);
 
-    // 全部档位 → 前台「清晰度切换」列表（保留 API 顺序：4k/super/high/low 即高→低；去重）
+    
     var resolutions = [], rseen = {};
     for (var qi = 0; qi < rs.length; qi++) {
         var q = rs[qi];
@@ -704,9 +708,9 @@ function play(flag) {
     return JSON.stringify(res);
 }
 
-// ============================================================
-// CommonJS / Node 测试导出 (App 不会执行这一块)
-// ============================================================
+
+
+
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         categories: categories,

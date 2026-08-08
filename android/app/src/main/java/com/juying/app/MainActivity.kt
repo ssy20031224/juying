@@ -13,7 +13,10 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,6 +27,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -42,6 +46,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.Semaphore
 
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -92,6 +97,7 @@ import com.juying.app.source.*
 import com.juying.app.ui.EmbeddedVideoPlayer
 import com.juying.app.ui.PipController
 import com.juying.app.ui.PlayerInteractionPolicy
+import com.juying.app.ui.THEME_PALETTES
 import com.juying.app.update.AppUpdateInfo
 import com.juying.app.update.AppUpdateManager
 import com.juying.app.update.UpdateCheckResult
@@ -105,6 +111,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -160,6 +167,13 @@ object AppColors {
     val orange: Color @Composable get() = LocalCustomColors.current.orange
     val rose: Color @Composable get() = LocalCustomColors.current.rose
     val green: Color @Composable get() = LocalCustomColors.current.green
+    val isDark: Boolean @Composable get() = LocalCustomColors.current.isDark
+}
+
+fun isWifiConnected(context: android.content.Context): Boolean {
+    val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+    val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return true
+    return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
 }
 
 fun isValidEmail(email: String): Boolean {
@@ -274,6 +288,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     private val animeCategoryRankingJobs = mutableMapOf<AnimeRankingCategory, Job>()
     private val animeCategorySearchCompleted = mutableSetOf<AnimeRankingCategory>()
+    private var aggregateRankings: Map<RankingKind, List<SourceRankingEntry>> = emptyMap()
+    private var aggregateSchedule: List<ScheduleEntry> = emptyList()
+    private var aggregateSeasons: List<SeasonalRecommendation> = emptyList()
+    private var aggregateCategoryRankings: Map<AnimeRankingCategory, List<SourceRankingEntry>> = emptyMap()
 
     // Player & Detail State
     var activeDetail by mutableStateOf<DetailResult?>(null)
@@ -324,9 +342,142 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastHistoryProgressKey = ""
     private var lastHistoryProgressPercent = -1
     private val placeholderRecoveryKeys = mutableSetOf<String>()
+    private val attemptedRouteFallbacks = mutableSetOf<String>()
 
     // Theme & Account Settings State
     var themeMode by mutableStateOf(storageManager.getThemeMode())
+    var themePalette by mutableStateOf(storageManager.getThemePalette())
+    var showContinueWatching by mutableStateOf(storageManager.getShowContinueWatching())
+    // ── 首页切源（对齐 AuvFun 单源模式）："" = 全部数据源聚合；非空 = 该源首页 ──
+    var homeSourceKey by mutableStateOf("")
+    var homeSourceCategories by mutableStateOf<List<SourceCategory>>(emptyList())
+    var homeSourceTab by mutableStateOf("")
+    var homeSourceSections by mutableStateOf<List<HomeSection>>(emptyList())
+    var homeSourceTabItems by mutableStateOf<List<SourceItem>>(emptyList())
+    var homeSourceLoading by mutableStateOf(false)
+    var homeSourceError by mutableStateOf<String?>(null)
+
+    private fun restoreAggregateDiscovery() {
+        lanercRankings = aggregateRankings
+        lanercSchedule = aggregateSchedule
+        lanercSeasons = aggregateSeasons
+        animeCategoryRankings = aggregateCategoryRankings
+        lanercDiscoveryError = null
+    }
+
+    private fun applySourceDiscovery(sourceKey: String, sections: List<HomeSection>) {
+        val source = sourceManager.getSourceConfig(sourceKey) ?: return
+        val allItems = sections.flatMap { it.items }
+            .distinctBy { SourceManager.normalizeTitle(it.title) }
+        val rankings = RankingKind.entries.associateWith { kind ->
+            buildRankingEntries(sections, allItems, kind).ifEmpty {
+                if (kind == RankingKind.HOT) {
+                    allItems.take(50).mapIndexed { index, item ->
+                        SourceRankingEntry(item, "${source.title} · 首页顺序", index + 1)
+                    }
+                } else emptyList()
+            }
+        }
+        val ranked = rankings.values.flatten()
+        val categories = AnimeRankingCategory.entries.associateWith { category ->
+            buildAnimeCategoryRanking(ranked, sections, category)
+        }
+        val seasons = beijingSeasonWindow().mapNotNull { season ->
+            val explicitSections = sections.filter { section ->
+                val month = seasonMonthFromLabel(section.title)
+                month == season.month ||
+                    (season == beijingSeasonWindow().firstOrNull() &&
+                        listOf("新番", "更新", "推荐").any(section.title::contains))
+            }
+            val explicitEntries = explicitSections.flatMap { section ->
+                section.items.mapIndexed { index, item ->
+                    SourceRankingEntry(item, "${source.title} · ${section.title}", index + 1)
+                }
+            }.distinctBy { SourceManager.normalizeTitle(it.item.title) }
+            val entries = if (explicitEntries.isNotEmpty()) explicitEntries else {
+                if (season == beijingSeasonWindow().firstOrNull()) {
+                    allItems.filter { it.year.toIntOrNull() == season.year }
+                        .take(40)
+                        .mapIndexed { index, item ->
+                            SourceRankingEntry(item, "${source.title} · 当年更新", index + 1)
+                        }
+                } else emptyList()
+            }
+            entries.takeIf(List<SourceRankingEntry>::isNotEmpty)
+                ?.let { SeasonalRecommendation(season, it) }
+        }
+        lanercRankings = rankings
+        lanercSchedule = buildScheduleEntries(allItems)
+        lanercSeasons = seasons
+        animeCategoryRankings = categories
+        lanercDiscoveryUpdatedAt = System.currentTimeMillis()
+        lanercDiscoveryError = if (
+            rankings.values.all(List<SourceRankingEntry>::isEmpty) &&
+            lanercSchedule.isEmpty() && seasons.isEmpty()
+        ) "${source.title} 暂未提供榜单、排期或周表数据" else null
+    }
+
+    fun updateHomeSource(key: String) {
+        if (homeSourceKey == key) return
+        homeSourceKey = key
+        homeSourceCategories = emptyList()
+        homeSourceTab = ""
+        homeSourceSections = emptyList()
+        homeSourceTabItems = emptyList()
+        homeSourceError = null
+        if (key.isBlank()) {
+            homeSourceLoading = false
+            restoreAggregateDiscovery()
+            return
+        }
+        sourceManager.sourceUnavailableMessage(key)?.let { message ->
+            homeSourceLoading = false
+            homeSourceError = message
+            notice = message
+            restoreAggregateDiscovery()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val adapter = sourceManager.getAdapter(key) ?: run {
+                withContext(Dispatchers.Main) {
+                    homeSourceLoading = false
+                    homeSourceError = "源异常，暂不可用，请尝试切换其他源"
+                    notice = homeSourceError.orEmpty()
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) { homeSourceLoading = true }
+            val cats = try { withTimeout(10_000L) { adapter.categories() } } catch (_: Exception) { emptyList() }
+            val sections = try { withTimeout(12_000L) { adapter.homeSections() } } catch (_: Exception) { emptyList() }
+            withContext(Dispatchers.Main) {
+                homeSourceCategories = cats
+                homeSourceSections = sections
+                applySourceDiscovery(key, sections)
+                homeSourceError = if (sections.isEmpty()) {
+                    "源异常，未返回首页内容，请尝试切换其他源"
+                } else null
+                homeSourceError?.let { notice = it }
+                if (homeSourceError == null) notice = ""
+                homeSourceLoading = false
+            }
+        }
+    }
+
+    fun selectHomeSourceCategory(catKey: String) {
+        homeSourceTab = catKey
+        homeSourceTabItems = emptyList()
+        if (catKey.isBlank()) return
+        sourceManager.sourceUnavailableMessage(homeSourceKey)?.let { message ->
+            homeSourceError = message
+            notice = message
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val adapter = sourceManager.getAdapter(homeSourceKey) ?: return@launch
+            val items = try { withTimeout(12_000L) { adapter.search(catKey, 1) } } catch (_: Exception) { emptyList() }
+            withContext(Dispatchers.Main) { homeSourceTabItems = items }
+        }
+    }
     var userEmail by mutableStateOf(storageManager.getUserEmail())
     var userAvatarIndex by mutableStateOf(storageManager.getUserAvatar())
     var updateChecking by mutableStateOf(false)
@@ -489,6 +640,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         themeMode = mode
         storageManager.setThemeMode(mode)
     }
+
+    fun updateThemePalette(id: String) {
+        themePalette = id
+        storageManager.setThemePalette(id)
+    }
+
+    fun updateShowContinueWatching(v: Boolean) {
+        showContinueWatching = v
+        storageManager.setShowContinueWatching(v)
+    }
+
+    fun isAutoSwitchSourceEnabled(): Boolean = storageManager.getAutoSwitchSource()
 
     fun updateUserEmail(email: String) {
         userEmail = email
@@ -862,7 +1025,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             .distinctBy { SourceManager.normalizeTitle(it.title) }
 
+    private fun refreshSelectedSourceDiscovery() {
+        val key = homeSourceKey.takeIf(String::isNotBlank) ?: return
+        sourceManager.sourceUnavailableMessage(key)?.let { message ->
+            homeSourceError = message
+            lanercDiscoveryError = message
+            notice = message
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val adapter = sourceManager.getAdapter(key) ?: run {
+                withContext(Dispatchers.Main) {
+                    lanercDiscoveryError = "源异常，暂不可用，请尝试切换其他源"
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                lanercDiscoveryLoading = true
+                lanercDiscoveryMessage = "正在刷新当前源的榜单与排期…"
+            }
+            val sections = runCatching {
+                withTimeout(15_000L) { adapter.homeSections() }
+            }.getOrDefault(emptyList())
+            val cats = runCatching {
+                withTimeout(10_000L) { adapter.categories() }
+            }.getOrDefault(emptyList())
+            withContext(Dispatchers.Main) {
+                homeSourceSections = sections
+                homeSourceCategories = cats
+                applySourceDiscovery(key, sections)
+                homeSourceError = if (sections.isEmpty()) {
+                    "源异常，未返回首页内容，请尝试切换其他源"
+                } else null
+                lanercDiscoveryMessage = if (sections.isEmpty()) "当前源未返回榜单与排期数据" else "当前源数据已刷新"
+                lanercDiscoveryLoading = false
+            }
+        }
+    }
+
+    fun selectHomeStandardCategory(category: String) {
+        homeSourceTab = category
+        homeSourceTabItems = emptyList()
+        if (category.isBlank() || category == "精选" || homeSourceKey.isBlank()) return
+        sourceManager.sourceUnavailableMessage(homeSourceKey)?.let { message ->
+            homeSourceError = message
+            notice = message
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val adapter = sourceManager.getAdapter(homeSourceKey) ?: return@launch
+            val nativeCategory = homeSourceCategories.firstOrNull { sourceCategory ->
+                when (category) {
+                    "日漫" -> listOf("日漫", "日本", "番剧").any(sourceCategory.title::contains)
+                    "国漫" -> listOf("国漫", "大陆", "国产").any(sourceCategory.title::contains)
+                    "剧场版" -> listOf("剧场", "电影").any(sourceCategory.title::contains)
+                    else -> sourceCategory.title.contains(category)
+                }
+            }?.key
+            val sourceCategory = nativeCategory ?: serverCategory(adapter, category)
+            val items = try {
+                withTimeout(12_000L) {
+                    adapter.searchFiltered(sourceCategory, emptyMap(), 1)
+                        .ifEmpty { adapter.search(sourceCategory, 1) }
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            withContext(Dispatchers.Main) {
+                // Ignore a late result after the user selected another tab/source.
+                if (homeSourceTab == category && homeSourceKey == adapter.key) {
+                    homeSourceTabItems = items
+                }
+            }
+        }
+    }
+
     fun refreshLanercDiscovery(force: Boolean = true) {
+        if (homeSourceKey.isNotBlank()) {
+            refreshSelectedSourceDiscovery()
+            return
+        }
         if (lanercDiscoveryLoading) {
             if (force) lanercDiscoveryMessage = "正在刷新，请稍候…"
             return
@@ -880,22 +1122,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (force) lanercDiscoveryMessage = "正在刷新$refreshTarget…"
             val result = runCatching { lanercDiscoveryRepository.load(force) }
             result.onSuccess { snapshot ->
-                lanercRankings = snapshot.rankings
-                animeCategoryRankings = AnimeRankingCategory.entries.associateWith { category ->
+                aggregateRankings = snapshot.rankings
+                aggregateCategoryRankings = AnimeRankingCategory.entries.associateWith { category ->
                     (
                         snapshot.categoryRankings[category].orEmpty() +
-                            animeCategoryRankings[category].orEmpty().filterNot {
+                            aggregateCategoryRankings[category].orEmpty().filterNot {
                                 it.item.sourceKey.equals("lanerc", ignoreCase = true)
                             }
                         ).distinctBy { normalizeDiscoveryTitle(it.item.title) }
                 }
-                lanercSchedule = snapshot.schedule
-                lanercSeasons = snapshot.seasons
+                aggregateSchedule = snapshot.schedule
+                aggregateSeasons = snapshot.seasons
+                if (homeSourceKey.isBlank()) restoreAggregateDiscovery()
                 // lanerc 只给季度新番提供评分，其余条目（如新开播的当前季新番）
                 // 异步用 bgm.tv 补全，不阻塞刷新提示
                 viewModelScope.launch {
                     val enriched = enrichSeasonScores(snapshot.seasons)
-                    if (enriched != snapshot.seasons) lanercSeasons = enriched
+                    if (enriched != snapshot.seasons) {
+                        aggregateSeasons = enriched
+                        if (homeSourceKey.isBlank()) lanercSeasons = enriched
+                    }
                 }
                 lanercDiscoveryUpdatedAt = snapshot.fetchedAt
                 lanercDiscoveryError = null
@@ -929,6 +1175,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         category: AnimeRankingCategory,
         force: Boolean = false
     ) {
+        if (homeSourceKey.isNotBlank()) {
+            if (force) refreshSelectedSourceDiscovery()
+            return
+        }
         if (!force && category in animeCategorySearchCompleted) return
         if (force) animeCategorySearchCompleted.remove(category)
         animeCategoryRankingJobs.remove(category)?.cancel()
@@ -1260,6 +1510,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val activeDownloadKeys = mutableStateListOf<String>()
     val activeDownloadProgress = mutableStateMapOf<String, String>()
     val activeDownloadInfo = mutableStateMapOf<String, Pair<String, String>>()
+    private var downloadSemaphore = Semaphore(storageManager.getMaxConcurrentDownloads())
+    fun refreshDownloadSemaphore() { downloadSemaphore = Semaphore(storageManager.getMaxConcurrentDownloads()) }
 
     val kinds = listOf("全部", "日漫", "国漫", "剧场版", "欧美")
     val genres = listOf(
@@ -1288,7 +1540,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             withContext(Dispatchers.Main) { notice = "正在加载视频源..." }
             withContext(Dispatchers.IO) { sourceManager.init() }
-            loadHomeInternal()
+            withContext(Dispatchers.Main) {
+                reloadSourcesState()
+                val firstHealthySource = sourceManager.rawSources.firstOrNull { source ->
+                    sourceManager.isSourceAvailable(source.key) &&
+                        sourceManager.isSourceEnabled(source.key) &&
+                        sourceManager.getAdapter(source.key) != null
+                }
+                if (homeSourceKey.isBlank() && firstHealthySource != null) {
+                    updateHomeSource(firstHealthySource.key)
+                } else {
+                    loadHome()
+                }
+            }
             viewModelScope.launch(Dispatchers.IO) {
                 val changed = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
                     RemoteSourceFetcher.syncAll(getApplication<Application>())
@@ -1307,6 +1571,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleSource(key: String) {
+        sourceManager.sourceUnavailableMessage(key)?.let { message ->
+            notice = message
+            if (homeSourceKey == key) updateHomeSource("")
+            reloadSourcesState()
+            return
+        }
         sourceManager.toggleSourceEnabled(key)
         reloadSourcesState()
         loadHome()
@@ -1546,6 +1816,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun search(keyword: String) {
+        val searchSemaphore = kotlinx.coroutines.sync.Semaphore(storageManager.getSearchThreads().coerceAtLeast(1))
         if (keyword.isBlank()) {
             isSearchActive = false
             items = cachedHomePool
@@ -1591,6 +1862,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 coroutineScope {
                     targetAdapters.forEach { adapter ->
                         launch {
+                            searchSemaphore.withPermit {
                             val results = try {
                                 withTimeout(12_000L) { adapter.search(keyword, 1) }
                             } catch (_: Exception) { emptyList() }
@@ -1611,6 +1883,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 notice = "已找到 ${sorted.size} 部作品 ($progress 已完成)"
                                 if (n == 1) loading = false  // Hide spinner after very first result
                             }
+                            }
                         }
                     }
                 }
@@ -1630,11 +1903,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         supplementalQueries.forEach { supplement ->
                             targetAdapters.forEach { adapter ->
                                 launch {
+                                    searchSemaphore.withPermit {
                                     val results = try {
                                         withTimeout(8_000L) { adapter.search(supplement, 1) }
                                     } catch (_: Exception) { emptyList() }
                                     synchronized(accLock) {
                                         accumulated.addAll(results)
+                                    }
                                     }
                                 }
                             }
@@ -1669,12 +1944,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         coroutineScope {
                             targetAdapters.forEach { adapter ->
                                 launch {
+                                    searchSemaphore.withPermit {
                                     val r = try {
                                         withTimeout(8_000L) { adapter.search(q, 1) }
                                     } catch (_: Exception) { emptyList() }
                                     synchronized(accLock) {
                                         accumulated.addAll(r)
                                         fuzzyResults.addAll(r)
+                                    }
                                     }
                                 }
                             }
@@ -1753,6 +2030,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sort?.let { activeSort = it }
         source?.let { activeSource = it }
         page = 1
+
+        sourceManager.sourceUnavailableMessage(activeSource)?.let { message ->
+            libraryJob?.cancel()
+            libraryItems = emptyList()
+            items = emptyList()
+            totalLibrary = 0
+            loading = false
+            libraryLoadingMore = false
+            libraryHasMore = false
+            libraryLoadError = message
+            notice = message
+            return
+        }
 
         val pool = (cachedHomePool + libraryItems).distinctBy { SourceManager.normalizeTitle(it.title) }
         val instant = applyLibraryFiltersFast(pool)
@@ -1903,6 +2193,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun fetchLibrary(reset: Boolean = true) {
+        sourceManager.sourceUnavailableMessage(activeSource)?.let { message ->
+            libraryJob?.cancel()
+            libraryItems = emptyList()
+            items = emptyList()
+            totalLibrary = 0
+            loading = false
+            libraryLoadingMore = false
+            libraryHasMore = false
+            libraryLoadError = message
+            notice = message
+            return
+        }
         // Pagination can be requested by several visible grid items in the
         // same frame. Never cancel an active page request merely because a
         // duplicate load-more signal arrived; that used to leave
@@ -1956,7 +2258,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     targetAdapters.forEach { adapter ->
                         launch {
                             val rawItems = try {
-                                withTimeout(2_500L) {
+                                // 15s budget: sources like guazi need signUp+refresh+
+                                // indexList (3 sequential requests, ~10s first load).
+                                // Interrupting earlier leaves the QuickJS thread
+                                // running and the result permanently late.
+                                withTimeout(15_000L) {
                                     // SourceExports blocks on Future.get().
                                     // runInterruptible makes the 2.5s coroutine
                                     // timeout actually interrupt that wait.
@@ -2077,17 +2383,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else -> filtered
             }
 
-            // Incremental append logic (增量添加展示):
-            val existingKeys = currentExisting.map { SourceManager.normalizeTitle(it.title) }.toSet()
-            val trulyNewItems = filtered.filter { SourceManager.normalizeTitle(it.title) !in existingKeys }
-            val finalUpdatedList = if (reset) {
+            // 增量添加展示：已显示的前几行保持不变，后续抓取到的视频卡片
+            // 一律追加到列表末尾，不再用整表重建/重排覆盖当前已展示的内容。
+            val beforeKeys = currentExisting.map { SourceManager.normalizeTitle(it.title) }.toSet()
+            val batchBringsNew = filtered.any { SourceManager.normalizeTitle(it.title) !in beforeKeys }
+            val liveKeys = libraryItems.map { SourceManager.normalizeTitle(it.title) }.toSet()
+            val trulyNewItems = filtered.filter { SourceManager.normalizeTitle(it.title) !in liveKeys }
+            val finalUpdatedList = if (libraryItems.isEmpty()) {
                 when {
                     filtered.isNotEmpty() -> filtered
                     dedupedBatch.isNotEmpty() -> dedupedBatch
-                    else -> currentExisting
+                    else -> emptyList()
                 }
             } else {
-                currentExisting + trulyNewItems
+                libraryItems + trulyNewItems
             }
 
             withContext(Dispatchers.Main) {
@@ -2102,7 +2411,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         "本次 ${targetAdapters.size} 个视频源均未返回内容，请检查网络后重试"
                     libraryHasMore = true
                     notice = libraryLoadError.orEmpty()
-                } else if (!reset && trulyNewItems.isEmpty()) {
+                } else if (!reset && !batchBringsNew) {
                     libraryLoadError = null
                     libraryHasMore = false
                     notice = "已为你展示全网多源片库全部作品 (共 ${finalUpdatedList.size} 部)"
@@ -2202,6 +2511,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openMovie(item: SourceItem, preferredEpisodeName: String? = null) {
+        sourceManager.sourceUnavailableMessage(item.sourceKey.trim())?.let { message ->
+            notice = message
+            playError = message
+            return
+        }
         detailLoadJob?.cancel()
         val detailGeneration = ++detailLoadGeneration
         playResolveJob?.cancel()
@@ -2472,7 +2786,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectEpisode(index: Int, forceFresh: Boolean = false) {
+    fun selectEpisode(
+        index: Int,
+        forceFresh: Boolean = false,
+        fromRouteFallback: Boolean = false
+    ) {
         val detail = currentActiveDetail()
         if (detail == null) {
             finishPlayResolutionWithError("作品详情已失效，请返回后重新打开")
@@ -2487,12 +2805,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (!fromRouteFallback) attemptedRouteFallbacks.clear()
+
         currentEpisodeIndex = index
         val ep = episodes[index]
         val sourceKey = detail.item.sourceKey
         val adapter = sourceManager.getAdapter(sourceKey)
         if (adapter == null) {
-            finishPlayResolutionWithError("数据源「${detail.item.sourceTitle.ifBlank { sourceKey }}」当前不可用")
+            finishPlayResolutionWithError(
+                sourceManager.sourceUnavailableMessage(sourceKey)
+                    ?: "数据源「${detail.item.sourceTitle.ifBlank { sourceKey }}」当前不可用"
+            )
             return
         }
 
@@ -2557,11 +2880,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     notice = "正在播放 ${ep.name}"
                 } else {
                     val transcoding = playResult?.url?.let(::isLikelyTranscodingPlaceholderUrl) == true
+                    val parserError = playResult?.error?.trim().orEmpty()
                     playError = if (transcoding) "当前播放源仍在转码，正在尝试其他来源"
-                        else "播放地址解析失败或解析超时"
+                        else parserError.ifBlank { "播放地址解析失败或解析超时" }
                     notice = if (transcoding) "已拦截转码占位视频，正在换源"
-                        else "播放地址解析失败 (${detail.item.sourceTitle})，试试「换源播放」"
-                    if (alternativeDetails.isNotEmpty()) {
+                        else parserError.ifBlank {
+                            "播放地址解析失败 (${detail.item.sourceTitle})，试试「换源播放」"
+                        }
+                    if (tryNextRoute()) {
+                        return@withContext
+                    }
+                    if (storageManager.getAutoSwitchSource() && alternativeDetails.isNotEmpty()) {
                         switchSource()
                     }
                 }
@@ -2628,6 +2957,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = message
     }
 
+    private fun episodeIdentity(name: String): String {
+        return Regex("\\d+(?:\\.\\d+)?").find(name)?.value
+            ?: SourceManager.normalizeTitle(name)
+    }
+
+    private fun tryNextRoute(): Boolean {
+        if (!storageManager.getAutoSwitchRoute()) return false
+        val detail = currentActiveDetail() ?: return false
+        val current = detail.episodes.getOrNull(currentEpisodeIndex) ?: return false
+        val identity = episodeIdentity(current.name)
+        val sourceKey = detail.item.sourceKey
+        attemptedRouteFallbacks += "$sourceKey:${current.flagStr.take(200)}"
+        val candidate = detail.episodes.withIndex().firstOrNull { indexed ->
+            val episode = indexed.value
+            indexed.index != currentEpisodeIndex &&
+                episodeIdentity(episode.name) == identity &&
+                (episode.route != current.route || episode.flagStr != current.flagStr) &&
+                "$sourceKey:${episode.flagStr.take(200)}" !in attemptedRouteFallbacks
+        } ?: return false
+        attemptedRouteFallbacks += "$sourceKey:${candidate.value.flagStr.take(200)}"
+        notice = "当前线路不可用，正在自动切换到 ${candidate.value.route.ifBlank { "备用线路" }}"
+        selectEpisode(candidate.index, forceFresh = true, fromRouteFallback = true)
+        return true
+    }
+
+    fun handlePlaybackError() {
+        invalidateCurrentPlayCache()
+        if (tryNextRoute()) return
+        if (storageManager.getAutoSwitchSource() && alternativeDetails.isNotEmpty()) {
+            switchSource()
+        }
+    }
+
     /**
      * A CDN can return a URL that expires without carrying a recognizable
      * timestamp in its query string. Do not keep serving that URL from the
@@ -2654,7 +3016,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = "当前源仍在转码，正在切换可用来源"
         viewModelScope.launch {
             delay(2_500L)
-            if (alternativeDetails.isNotEmpty()) {
+            if (storageManager.getAutoSwitchSource() && alternativeDetails.isNotEmpty()) {
                 switchSource()
             } else {
                 selectEpisode(currentEpisodeIndex, forceFresh = true)
@@ -2833,6 +3195,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notice = "已开始后台下载：${detail.item.title} ${episode.name}"
 
         viewModelScope.launch(Dispatchers.IO) {
+            if (storageManager.getWifiOnly() && !isWifiConnected(getApplication())) {
+                activeDownloadKeys.remove(downloadKey)
+                activeDownloadInfo.remove(downloadKey)
+                activeDownloadProgress.remove(downloadKey)
+                withContext(Dispatchers.Main) { notice = "已开启仅WiFi下载，当前移动网络下已暂停" }
+                return@launch
+            }
+            downloadSemaphore.acquire()
+            try {
             val downloader = VideoDownloadManager(getApplication())
             try {
                 downloader.downloadCover(detail.item.cover, detail.item.title)
@@ -2883,6 +3254,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     activeDownloadProgress.remove(downloadKey)
                     activeDownloadInfo.remove(downloadKey)
                 }
+            }
+            } finally {
+                downloadSemaphore.release()
             }
         }
     }
@@ -3077,6 +3451,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (
+            StorageManager(this).getAutoPip() &&
+            PipController.playerActive &&
+            PipController.isPlaying
+        ) {
+            enterPlayerPictureInPicture()
+        }
+    }
+
     private fun buildPipParams(): android.app.PictureInPictureParams {
         fun pipAction(control: Int, iconRes: Int, title: String): android.app.RemoteAction {
             val intent = android.content.Intent(ACTION_PIP_CONTROL)
@@ -3104,11 +3489,8 @@ class MainActivity : ComponentActivity() {
             .build()
     }
 
-    /**
-     * PiP is deliberately manual-only. Pressing Home or switching apps must
-     * follow the normal background policy (pause), not silently create a new
-     * PiP session because the user used the PiP button earlier.
-     */
+    /** Starts a PiP session from either the explicit player button or the
+     * user-enabled Home-key auto-PiP preference. */
     fun enterPlayerPictureInPicture(): Boolean {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O ||
             !PipController.playerActive
@@ -3256,6 +3638,8 @@ fun JuyingApp(vm: MainViewModel) {
         else -> systemDark
     }
 
+    val palette = THEME_PALETTES.find { it.id == vm.themePalette } ?: THEME_PALETTES.first()
+
     val customColors = if (isDark) {
         CustomColors(
             bg = Color(0xFF090E17),
@@ -3263,7 +3647,7 @@ fun JuyingApp(vm: MainViewModel) {
             panel2 = Color(0xFF162436),
             text = Color(0xFFF3F7FC),
             muted = Color(0xFF8B9AAF),
-            cyan = Color(0xFF43D5E8),
+            cyan = palette.accentDark,
             purple = Color(0xFFA855F7),
             orange = Color(0xFFFFB257),
             rose = Color(0xFFFF7F9E),
@@ -3277,7 +3661,7 @@ fun JuyingApp(vm: MainViewModel) {
             panel2 = Color(0xFFF8FAFC),
             text = Color(0xFF0F172A),
             muted = Color(0xFF64748B),
-            cyan = Color(0xFF0284C7),
+            cyan = palette.accent,
             purple = Color(0xFF9333EA),
             orange = Color(0xFFEA580C),
             rose = Color(0xFFE11D48),
@@ -3362,6 +3746,16 @@ fun JuyingApp(vm: MainViewModel) {
                         "profile_favorites" -> FavoritesScreen(vm)
                         "profile_downloads" -> OfflineCacheScreen(vm)
                         "settings" -> SettingsScreen(vm)
+                        "settings_theme" -> ThemeScreen(vm)
+                        "settings_sources" -> DataSourcesScreen(vm)
+                        "source_import" -> Column(Modifier.fillMaxSize()) {
+                            SettingsHeader("导入自定义源") { vm.view = "profile" }
+                            CustomSourceImportCard(vm)
+                        }
+                        "source_diag" -> Column(Modifier.fillMaxSize()) {
+                            SettingsHeader("数据源诊断与日志") { vm.view = "profile" }
+                            SourceDebugLogCard(vm)
+                        }
             "notifications" -> NotificationsScreen(vm)
                         "settings_password" -> ChangePasswordScreen(vm)
                         "settings_email" -> ChangeEmailScreen(vm)
@@ -3582,6 +3976,10 @@ private fun MarqueeText(
 @Composable
 fun HomeView(vm: MainViewModel) {
     var selectedCategory by remember { mutableStateOf("精选") }
+    LaunchedEffect(vm.homeSourceKey) {
+        selectedCategory = "精选"
+        vm.selectHomeStandardCategory("精选")
+    }
     val homeSeasons = vm.lanercSeasons.map { it.season }
         .ifEmpty { beijingSeasonWindow() }
     val homeSeasonSummary = homeSeasons.firstOrNull()?.year
@@ -3590,11 +3988,17 @@ fun HomeView(vm: MainViewModel) {
         }
         .orEmpty()
 
-    val featuredItems = remember(vm.homeSections.firstOrNull()?.items?.firstOrNull()?.id, selectedCategory) {
+    // ── 首页切源（对齐 AuvFun）：全部 = 预置聚合分区；单源 = 展示该源自己的首页分区 ──
+    var sourceMenuExpanded by remember { mutableStateOf(false) }
+    val homeSourceLabel = vm.sourcesState.firstOrNull { it.key == vm.homeSourceKey }?.title ?: "全部"
+    val displaySections = if (vm.homeSourceKey.isBlank()) vm.homeSections
+        else vm.homeSourceSections
+
+    val featuredItems = remember(vm.homeSourceKey, displaySections.firstOrNull()?.items?.firstOrNull()?.id, selectedCategory) {
         val filteredSections = if (selectedCategory == "精选") {
-            vm.homeSections
+            displaySections
         } else {
-            vm.homeSections.filter { section ->
+            displaySections.filter { section ->
                 val sectionKind = when {
                     section.title.contains("国漫") || section.key.contains("guo") -> "国漫"
                     section.title.contains("日漫") || section.title.contains("日本") || section.title.contains("番") -> "日漫"
@@ -3619,8 +4023,19 @@ fun HomeView(vm: MainViewModel) {
             }
         }
     }
-    val categoryAllItems = remember(vm.homeSections, selectedCategory) {
-        if (selectedCategory == "精选") emptyList() else categoryHomeItems(vm, selectedCategory)
+    val categoryAllItems = remember(
+        vm.homeSourceKey,
+        displaySections,
+        selectedCategory,
+        vm.homeSourceTabItems
+    ) {
+        if (selectedCategory == "精选") {
+            emptyList()
+        } else {
+            val sectionItems = categoryHomeItems(vm, selectedCategory, displaySections)
+            val fetchedItems = if (vm.homeSourceKey.isBlank()) emptyList() else vm.homeSourceTabItems
+            (fetchedItems + sectionItems).distinctBy { SourceManager.normalizeTitle(it.title) }
+        }
     }
     val categoryCarouselItems = remember(categoryAllItems, categoryRotation) {
         rotateWindow(categoryAllItems, (categoryRotation * 5L).toInt(), 5)
@@ -3646,6 +4061,70 @@ fun HomeView(vm: MainViewModel) {
                     .clickable { vm.view = "profile" }
             ) {
                 AccountAvatar(vm.accountUser?.avatarUrl, Modifier.fillMaxSize())
+            }
+
+            Spacer(Modifier.width(6.dp))
+
+            // 首页切换源按钮（对齐 AuvFun 首页左上角）
+            Box {
+                Row(
+                    modifier = Modifier
+                        .height(34.dp)
+                        .widthIn(min = 56.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(AppColors.panel)
+                        .clickable { sourceMenuExpanded = true }
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        homeSourceLabel,
+                        color = AppColors.text,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 84.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.ArrowDropDown,
+                        contentDescription = "切换数据源",
+                        tint = AppColors.muted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = sourceMenuExpanded,
+                    onDismissRequest = { sourceMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("全部数据源") },
+                        trailingIcon = {
+                            if (vm.homeSourceKey.isBlank()) Icon(Icons.Default.Check, null, tint = AppColors.cyan, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = { vm.updateHomeSource(""); sourceMenuExpanded = false }
+                    )
+                    vm.sourcesState.filter {
+                        vm.sourceManager.isSourceEnabled(it.key) || !vm.sourceManager.isSourceAvailable(it.key)
+                    }.forEach { cfg ->
+                        val availability = vm.sourceManager.sourceAvailability(cfg.key)
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (availability == SourceAvailability.AVAILABLE) cfg.title
+                                    else "${cfg.title}（${availability.label}）",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            trailingIcon = {
+                                if (vm.homeSourceKey == cfg.key) Icon(Icons.Default.Check, null, tint = AppColors.cyan, modifier = Modifier.size(18.dp))
+                            },
+                            onClick = { vm.updateHomeSource(cfg.key); sourceMenuExpanded = false }
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.width(8.dp))
@@ -3738,26 +4217,29 @@ fun HomeView(vm: MainViewModel) {
             }
         }
 
-        // ── CATEGORY TABS (精选 | 日漫 | 剧场版) ──
+        // ── CATEGORY TABS (合并态: 精选|日漫|国漫|剧场版；单源态: 该源 categories()) ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            listOf("精选", "日漫", "国漫", "剧场版").forEach { category ->
+            val tabs = listOf("精选", "日漫", "国漫", "剧场版")
+            tabs.forEach { category ->
                 val isSelected = selectedCategory == category
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.clickable {
                         selectedCategory = category
+                        vm.selectHomeStandardCategory(category)
                     }
                 ) {
                     Text(
                         category,
                         color = if (isSelected) AppColors.cyan else AppColors.muted,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                        fontSize = 15.sp
+                        fontSize = 15.sp,
+                        maxLines = 1
                     )
                     if (isSelected) {
                         Spacer(Modifier.height(4.dp))
@@ -3846,7 +4328,95 @@ fun HomeView(vm: MainViewModel) {
             }
         }
 
-        if (vm.loading && vm.homeSections.isEmpty()) {
+        if (vm.homeSourceKey.isNotBlank() && vm.homeSourceError != null) {
+            // ── 单源模式（对齐 AuvFun）：默认展示该源自己的首页分区；点分类 Tab 用 search(catKey,1) 拉内容 ──
+            LazyColumn {
+                when {
+                    vm.homeSourceError != null -> {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 60.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    vm.homeSourceError.orEmpty(),
+                                    color = AppColors.rose,
+                                    fontSize = 14.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                    vm.homeSourceLoading && vm.homeSourceSections.isEmpty() && vm.homeSourceTab.isBlank() -> {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
+                                    Spacer(Modifier.height(10.dp))
+                                    Text("正在加载该源首页...", color = AppColors.muted, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
+                    vm.homeSourceTab.isBlank() -> {
+                        if (vm.homeSourceSections.isEmpty()) {
+                            item {
+                                Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                                    Text("该源暂未加载到首页内容", color = AppColors.muted)
+                                }
+                            }
+                        }
+                        vm.homeSourceSections.forEachIndexed { sectionIndex, section ->
+                            if (section.items.isNotEmpty()) {
+                                item(key = "src_hdr_$sectionIndex") {
+                                    Text(
+                                        section.title,
+                                        color = AppColors.text,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 17.sp,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                                item(key = "src_row_$sectionIndex") {
+                                    LazyRow(contentPadding = PaddingValues(horizontal = 12.dp)) {
+                                        lazyItemsIndexed(
+                                            items = section.items.take(16),
+                                            key = { i, item -> "src_item_${sectionIndex}_${item.sourceKey}:${item.id}:$i" }
+                                        ) { _, item ->
+                                            MovieCard(item, Modifier.width(135.dp).padding(4.dp)) { vm.openMovie(item) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else -> {
+                        if (vm.homeSourceTabItems.isEmpty()) {
+                            item {
+                                Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                                    Text("该分类暂无内容", color = AppColors.muted)
+                                }
+                            }
+                        } else {
+                            item(key = "src_category_items") {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    vm.homeSourceTabItems.chunked(3).forEach { rowItems ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            rowItems.forEach { item ->
+                                                MovieCard(item, Modifier.weight(1f).padding(4.dp)) { vm.openMovie(item) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if ((vm.loading || vm.homeSourceLoading) && displaySections.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
@@ -3854,7 +4424,7 @@ fun HomeView(vm: MainViewModel) {
                         Text("正在并发加载视频源...", color = AppColors.muted, fontSize = 13.sp)
                     }
                 }
-            } else if (vm.homeSections.isEmpty()) {
+            } else if (displaySections.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("暂未加载到推荐卡片", color = AppColors.muted)
@@ -3984,7 +4554,7 @@ fun HomeView(vm: MainViewModel) {
                     }
 
                     // ── SECTIONS ──
-                    vm.homeSections.forEach { section ->
+                    displaySections.forEach { section ->
                         if (section.items.isNotEmpty()) {
                             item(key = "section_header_${section.key}") {
                                 Row(
@@ -4099,11 +4669,26 @@ private fun strictCategoryMatch(item: SourceItem, category: String): Boolean {
     }
 }
 
-private fun categoryHomeItems(vm: MainViewModel, category: String): List<SourceItem> {
-    return vm.homeSections
+private fun categoryHomeItems(vm: MainViewModel, category: String, sections: List<HomeSection>): List<SourceItem> {
+    val strictItems = sections
         .flatMap { it.items }
         .distinctBy { SourceManager.normalizeTitle(it.title) }
         .filter { strictCategoryMatch(it, category) }
+    if (strictItems.isNotEmpty()) return strictItems
+
+    // Some source scripts omit region/type on each card but expose it in the
+    // section title. Use only same-source section evidence as the fallback;
+    // never borrow cards from another source or invent a category.
+    val sectionKeywords = when (category) {
+        "日漫" -> listOf("日漫", "日本", "番剧", "新番")
+        "国漫" -> listOf("国漫", "大陆", "国产")
+        "剧场版" -> listOf("剧场", "电影")
+        else -> listOf(category)
+    }
+    return sections
+        .filter { section -> sectionKeywords.any(section.title::contains) }
+        .flatMap { it.items }
+        .distinctBy { SourceManager.normalizeTitle(it.title) }
 }
 
 /** 把作品池按偏移量循环平移后取前 size 个，保证分类轮播/热门推荐定期轮换内容。 */
@@ -4306,6 +4891,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     headers = playResult.headers,
                     referer = playResult.referer,
                     qualities = playResult.qualities,
+                    error = playResult.error,
+                    startSec = playResult.startSec,
                     title = detail.item.title,
                     episodeName = currentEpisode?.name.orEmpty(),
                     danmakuMediaKey = vm.commentMediaKey(detail.item),
@@ -4320,7 +4907,7 @@ fun PlayerViewScreen(vm: MainViewModel) {
                     onPrevEpisode = if (vm.currentEpisodeIndex > 0) {
                         { vm.selectEpisode(vm.currentEpisodeIndex - 1) }
                     } else null,
-                    onError = { vm.invalidateCurrentPlayCache() },
+                    onError = { vm.handlePlaybackError() },
                     onLikelyTranscodingPlaceholder = {
                         vm.recoverFromLikelyTranscodingPlaceholder()
                     },
@@ -4342,8 +4929,8 @@ fun PlayerViewScreen(vm: MainViewModel) {
                             LoadingSpinner(modifier = Modifier.size(36.dp), color = AppColors.cyan)
                             Spacer(Modifier.height(8.dp))
                             Text(vm.notice, color = AppColors.muted, fontSize = 13.sp)
-                        } else if (vm.playError != null) {
-                            Text(vm.playError.orEmpty(), color = AppColors.rose, fontSize = 13.sp)
+                        } else if (playResult?.error?.isNotBlank() == true || vm.playError != null) {
+                            Text(playResult?.error ?: vm.playError.orEmpty(), color = AppColors.rose, fontSize = 13.sp)
                             Spacer(Modifier.height(8.dp))
                             TextButton(onClick = { vm.retryPlay() }) {
                                 Text("重试播放", color = AppColors.cyan)
@@ -6125,6 +6712,7 @@ fun ProfileView(vm: MainViewModel) {
 
         // 观看历史 Section
         item {
+            if (vm.showContinueWatching) {
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -6201,6 +6789,7 @@ fun ProfileView(vm: MainViewModel) {
                     }
                 }
             }
+            }
         }
 
         // Source Management Card
@@ -6218,25 +6807,91 @@ fun ProfileView(vm: MainViewModel) {
                             color = AppColors.cyan, fontSize = 12.sp
                         )
                     }
-                    Spacer(Modifier.height(8.dp))
-                    vm.sourcesState.chunked(2).forEach { rowSources ->
-                        Row(Modifier.fillMaxWidth()) {
-                            rowSources.forEach { config ->
-                                val enabled = vm.sourceManager.isSourceEnabled(config.key)
-                                FilterChip(
-                                    selected = enabled,
-                                    onClick = { vm.toggleSource(config.key) },
-                                    label = { Text("${config.title} (${if (enabled) "开" else "关"})", fontSize = 12.sp) },
-                                    modifier = Modifier.weight(1f).padding(4.dp),
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = AppColors.cyan.copy(alpha = 0.2f),
-                                        selectedLabelColor = AppColors.cyan,
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { vm.view = "source_import" }) {
+                            Text("导入自定义源", color = AppColors.cyan, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = { vm.view = "source_diag" }) {
+                            Text("诊断测试", color = AppColors.purple, fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    vm.sourcesState.forEach { config ->
+                        val enabled = vm.sourceManager.isSourceEnabled(config.key)
+                        val availability = vm.sourceManager.sourceAvailability(config.key)
+                        val unavailableMessage = vm.sourceManager.sourceUnavailableMessage(config.key)
+                        val isCustom = vm.sourceManager.isCustomSource(config.key)
+                        val sourceUrl = vm.sourceManager.getSourceUrl(config.key)
+                        var testing by remember(config.key) { mutableStateOf(false) }
+                        var testMs by remember(config.key) { mutableStateOf<Long?>(null) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(config.title, color = AppColors.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                    if (isCustom) {
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("自定义", color = AppColors.orange, fontSize = 10.sp)
+                                    }
+                                }
+                                if (sourceUrl.isNotBlank()) {
+                                    Text(
+                                        sourceUrl,
+                                        color = AppColors.muted,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 2.dp)
                                     )
+                                }
+                                if (unavailableMessage != null) {
+                                    Text(
+                                        unavailableMessage,
+                                        color = AppColors.rose,
+                                        fontSize = 10.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    testing = true
+                                    vm.viewModelScope.launch(Dispatchers.IO) {
+                                        val ms = vm.sourceManager.testSourceSpeed(config.key)
+                                        withContext(Dispatchers.Main) { testMs = ms; testing = false }
+                                    }
+                                },
+                                enabled = !testing
+                            ) {
+                                Text(
+                                    when {
+                                        availability != SourceAvailability.AVAILABLE -> availability.label
+                                        testing -> "测试中"
+                                        testMs != null && testMs!! > 0 -> "${testMs}ms"
+                                        testMs != null -> "失败"
+                                        else -> "测速"
+                                    },
+                                    color = AppColors.cyan, fontSize = 11.sp
                                 )
                             }
-                            if (rowSources.size == 1) {
-                                Spacer(Modifier.weight(1f).padding(4.dp))
+                            if (isCustom) {
+                                IconButton(onClick = {
+                                    vm.sourceManager.removeCustomSource(config.key)
+                                    vm.reloadSourcesState()
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = AppColors.rose, modifier = Modifier.size(18.dp))
+                                }
                             }
+                            Switch(
+                                checked = enabled,
+                                onCheckedChange = { vm.toggleSource(config.key) },
+                                enabled = availability == SourceAvailability.AVAILABLE,
+                                colors = SwitchDefaults.colors(checkedTrackColor = AppColors.cyan, checkedThumbColor = Color.White)
+                            )
                         }
                     }
                 }
@@ -7858,131 +8513,1044 @@ private fun LegacySettingsScreen(vm: MainViewModel) {
 @Composable
 fun SettingsScreen(vm: MainViewModel) {
     val context = LocalContext.current
-    var themeDialogVisible by remember { mutableStateOf(false) }
+    val storageManager = remember(context) { StorageManager(context) }
+    var autoSwitchSource by remember { mutableStateOf(storageManager.getAutoSwitchSource()) }
+    var autoSwitchRoute by remember { mutableStateOf(storageManager.getAutoSwitchRoute()) }
+    var autoSwitchKernel by remember { mutableStateOf(storageManager.getAutoSwitchKernel()) }
+    var autoPip by remember { mutableStateOf(storageManager.getAutoPip()) }
+    var backgroundPlayback by remember { mutableStateOf(storageManager.getBackgroundPlayback()) }
+    var defaultEngine by remember { mutableStateOf("ExoPlayer") }
+    var autoPlayNext by remember { mutableStateOf(storageManager.getAutoPlayNext()) }
+    var defaultSpeed by remember { mutableStateOf(storageManager.getDefaultSpeed()) }
+    var longPressSpeed by remember { mutableStateOf(storageManager.getLongPressSpeed()) }
+    var downloadDir by remember { mutableStateOf(storageManager.getDownloadDir()) }
+    var maxConcurrentDownloads by remember { mutableStateOf(storageManager.getMaxConcurrentDownloads()) }
+    var segmentThreads by remember { mutableStateOf(storageManager.getSegmentThreads()) }
+    var wifiOnly by remember { mutableStateOf(storageManager.getWifiOnly()) }
+    var doubleTapEnabled by remember { mutableStateOf(storageManager.getDoubleTapSeekEnabled()) }
+    var skipIntroSec by remember { mutableStateOf(storageManager.getSkipIntroSec()) }
+    var skipOutroSec by remember { mutableStateOf(storageManager.getSkipOutroSec()) }
+    var autoFullscreenOnLoad by remember { mutableStateOf(storageManager.getAutoFullscreenOnLoad()) }
+    var autoRotate by remember { mutableStateOf(storageManager.getAutoRotateLandscape()) }
+    var searchThreads by remember { mutableStateOf(storageManager.getSearchThreads()) }
+    var historyRetentionDays by remember { mutableStateOf(storageManager.getHistoryRetentionDays()) }
+
+    LaunchedEffect(Unit) {
+        storageManager.setDefaultEngine("ExoPlayer")
+        storageManager.setAutoSwitchKernel(false)
+        autoSwitchKernel = false
+    }
+
+    var engineDialogVisible by remember { mutableStateOf(false) }
+    var speedDialogVisible by remember { mutableStateOf(false) }
+    var longPressSpeedDialogVisible by remember { mutableStateOf(false) }
+    var downloadDirDialogVisible by remember { mutableStateOf(false) }
+    var concurrentDialogVisible by remember { mutableStateOf(false) }
+    var segmentDialogVisible by remember { mutableStateOf(false) }
+    var skipIntroDialogVisible by remember { mutableStateOf(false) }
+    var searchThreadsDialogVisible by remember { mutableStateOf(false) }
+    var historyRetentionDialogVisible by remember { mutableStateOf(false) }
+    var resetConfirmVisible by remember { mutableStateOf(false) }
+
     val themeLabel = when (vm.themeMode) {
         "light" -> "浅色模式"
         "dark" -> "深色模式"
         else -> "跟随系统"
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().background(AppColors.bg)) {
         SettingsHeader("设置") { vm.view = "profile" }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            item { SettingsSectionTitle("外观设置") }
+            item { SettingsSectionTitle("下载") }
             item {
                 SettingsCard {
-                    SettingsRow(Icons.Default.Star, "色彩主题", themeLabel) {
-                        themeDialogVisible = true
-                    }
+                    SettingsItemRow(
+                        icon = Icons.Default.Place,
+                        iconBg = Color(0xFFFFF7D6),
+                        iconTint = Color(0xFFF59E0B),
+                        title = "下载位置",
+                        subtitle = if (downloadDir.isBlank()) "/storage/emulated/0/Android/data/com.juying.app/files/Movies/lanerc" else downloadDir,
+                        onClick = { downloadDirDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        iconRes = R.drawable.ic_download,
+                        iconBg = Color(0xFFE6F8F0),
+                        iconTint = Color(0xFF10B981),
+                        title = "同时下载数",
+                        trailingText = "$maxConcurrentDownloads",
+                        onClick = { concurrentDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Build,
+                        iconBg = Color(0xFFFFF7D6),
+                        iconTint = Color(0xFFF59E0B),
+                        title = "分段加速线程",
+                        subtitle = "服务器支持 Range 时并行分段；失败任务会重新下载",
+                        trailingText = "$segmentThreads",
+                        onClick = { segmentDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Info,
+                        iconBg = Color(0xFFEBF3FF),
+                        iconTint = Color(0xFF3B82F6),
+                        title = "仅 Wi-Fi 下载",
+                        subtitle = "开启后仅允许在 Wi-Fi 下开始新下载",
+                        isSwitch = true,
+                        checked = wifiOnly,
+                        onCheckedChange = { wifiOnly = it; storageManager.setWifiOnly(it) }
+                    )
                 }
             }
-            item { SettingsSectionTitle("账户设置") }
+
+            item { SettingsSectionTitle("播放") }
             item {
                 SettingsCard {
-                    SettingsRow(Icons.Default.Lock, "修改密码") { vm.view = "settings_password" }
+                    SettingsItemRow(
+                        icon = Icons.Default.PlayArrow,
+                        iconBg = Color(0xFFF3E8FF),
+                        iconTint = Color(0xFF8B5CF6),
+                        title = "播放器默认内核",
+                        subtitle = "当前版本统一使用 Media3 ExoPlayer",
+                        trailingText = defaultEngine,
+                        onClick = { engineDialogVisible = true }
+                    )
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Notifications, "修改邮箱", vm.accountUser?.email.orEmpty()) {
-                        vm.view = "settings_email"
-                    }
-                }
-            }
-            item { SettingsSectionTitle("通用设置") }
-            item {
-                SettingsCard {
-                    SettingsRow(
-                        Icons.Default.Settings,
-                        if (vm.updateChecking) "正在检查更新" else "检查更新",
-                        BuildConfig.VERSION_NAME,
-                    ) { vm.checkForAppUpdate(manual = true) }
+                    SettingsItemRow(
+                        icon = Icons.Default.Refresh,
+                        iconBg = Color(0xFFE6FFFA),
+                        iconTint = Color(0xFF06B6D4),
+                        title = "自动换源",
+                        subtitle = "当前源所有线路都播不动时，自动搜其它...",
+                        isSwitch = true,
+                        checked = autoSwitchSource,
+                        onCheckedChange = { autoSwitchSource = it; storageManager.setAutoSwitchSource(it) }
+                    )
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Edit, "建议/意见反馈") { vm.view = "settings_feedback" }
+                    SettingsItemRow(
+                        icon = Icons.Default.List,
+                        iconBg = Color(0xFFE6F8F0),
+                        iconTint = Color(0xFF10B981),
+                        title = "自动切线路",
+                        subtitle = "当前线路播不动时，自动切到下一条线路...",
+                        isSwitch = true,
+                        checked = autoSwitchRoute,
+                        onCheckedChange = { autoSwitchRoute = it; storageManager.setAutoSwitchRoute(it) }
+                    )
                     SettingsDivider()
-                    SettingsRow(Icons.Default.Info, "免责声明") { vm.view = "settings_disclaimer" }
-                    SettingsDivider()
-                    SettingsRow(Icons.Default.Share, "分享应用") {
-                        val share = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "聚映 · 多源动漫播放器")
-                            putExtra(
-                                Intent.EXTRA_TEXT,
-                                "我正在使用聚映观看动漫，推荐给你：\n${BuildConfig.ACCOUNT_API_BASE}/api/android/latest",
-                            )
+                    SettingsItemRow(
+                        icon = Icons.Default.Settings,
+                        iconBg = Color(0xFFF3E8FF),
+                        iconTint = Color(0xFF8B5CF6),
+                        title = "自动换内核（未启用）",
+                        subtitle = "当前仅接入 ExoPlayer；接入第二内核后才可启用",
+                        isSwitch = true,
+                        checked = false,
+                        onCheckedChange = {
+                            autoSwitchKernel = false
+                            storageManager.setAutoSwitchKernel(false)
+                            Toast.makeText(context, "当前版本只接入 ExoPlayer，自动换内核尚未启用", Toast.LENGTH_SHORT).show()
                         }
-                        context.startActivity(Intent.createChooser(share, "分享聚映"))
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.PlayArrow,
+                        iconBg = Color(0xFFFFE4E6),
+                        iconTint = Color(0xFFEC4899),
+                        title = "自动播放下一集",
+                        subtitle = "播放完毕后自动续播",
+                        isSwitch = true,
+                        checked = autoPlayNext,
+                        onCheckedChange = { autoPlayNext = it; storageManager.setAutoPlayNext(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Info,
+                        iconBg = Color(0xFFF3E8FF),
+                        iconTint = Color(0xFF8B5CF6),
+                        title = "旋转屏幕自动切换横竖屏",
+                        subtitle = "旋转手机时播放器自动在全屏/竖屏间切换...",
+                        isSwitch = true,
+                        checked = autoRotate,
+                        onCheckedChange = { autoRotate = it; storageManager.setAutoRotateLandscape(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.PlayArrow,
+                        iconBg = Color(0xFFFFE4E6),
+                        iconTint = Color(0xFFEC4899),
+                        title = "默认倍速",
+                        trailingText = "${defaultSpeed}x",
+                        onClick = { speedDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.ArrowForward,
+                        iconBg = Color(0xFFFFEDD5),
+                        iconTint = Color(0xFFF97316),
+                        title = "长按倍速",
+                        subtitle = "播放页长按屏幕时切换到的倍速",
+                        trailingText = "${longPressSpeed}x",
+                        onClick = { longPressSpeedDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Refresh,
+                        iconBg = Color(0xFFEBF3FF),
+                        iconTint = Color(0xFF3B82F6),
+                        title = "双击快进/快退",
+                        subtitle = "播放页双击画面左/右侧快退/快进...",
+                        trailingText = if (!doubleTapEnabled) "已关闭" else "",
+                        isSwitch = true,
+                        checked = doubleTapEnabled,
+                        onCheckedChange = { doubleTapEnabled = it; storageManager.setDoubleTapSeekEnabled(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Star,
+                        iconBg = Color(0xFFF3E8FF),
+                        iconTint = Color(0xFF8B5CF6),
+                        title = "跳过片头/片尾",
+                        subtitle = "所有影片的默认跳过秒数；播放页设置面...",
+                        trailingText = "$skipIntroSec / $skipOutroSec 秒",
+                        onClick = { skipIntroDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.CheckCircle,
+                        iconBg = Color(0xFFE6F8F0),
+                        iconTint = Color(0xFF10B981),
+                        title = "加载完成自动全屏",
+                        subtitle = "视频首帧准备好后自动进入全屏播放",
+                        isSwitch = true,
+                        checked = autoFullscreenOnLoad,
+                        onCheckedChange = { autoFullscreenOnLoad = it; storageManager.setAutoFullscreenOnLoad(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Info,
+                        iconBg = Color(0xFFE6FFFA),
+                        iconTint = Color(0xFF06B6D4),
+                        title = "自动小窗",
+                        subtitle = "播放时按 Home 自动悬浮小窗，便于一边...",
+                        isSwitch = true,
+                        checked = autoPip,
+                        onCheckedChange = { autoPip = it; storageManager.setAutoPip(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.PlayArrow,
+                        iconBg = Color(0xFFE6FFFA),
+                        iconTint = Color(0xFF06B6D4),
+                        title = "后台播放",
+                        subtitle = "离开应用或锁屏后继续播放音频；与播放器内设置同步",
+                        isSwitch = true,
+                        checked = backgroundPlayback,
+                        onCheckedChange = {
+                            backgroundPlayback = it
+                            storageManager.setBackgroundPlayback(it)
+                        }
+                    )
+                }
+            }
+
+            item { SettingsSectionTitle("通用") }
+            item {
+                SettingsCard {
+                    SettingsItemRow(
+                        icon = Icons.Default.Search,
+                        iconBg = Color(0xFFEBF3FF),
+                        iconTint = Color(0xFF3B82F6),
+                        title = "搜索线程数",
+                        subtitle = "多源聚合搜索时同时跑的源数",
+                        trailingText = "$searchThreads",
+                        onClick = { searchThreadsDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Home,
+                        iconBg = Color(0xFFFFE4E6),
+                        iconTint = Color(0xFFEC4899),
+                        title = "首页启动继续观看浮层",
+                        subtitle = "冷启动时在首页底部弹出最近一次观看的...",
+                        isSwitch = true,
+                        checked = vm.showContinueWatching,
+                        onCheckedChange = { vm.updateShowContinueWatching(it) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.DateRange,
+                        iconBg = Color(0xFFF1F5F9),
+                        iconTint = Color(0xFF64748B),
+                        title = "历史保留时长",
+                        trailingText = if (historyRetentionDays <= 0) "永久" else "${historyRetentionDays} 天",
+                        onClick = { historyRetentionDialogVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Refresh,
+                        iconBg = Color(0xFFF3E8FF),
+                        iconTint = Color(0xFF8B5CF6),
+                        title = "恢复默认设置",
+                        onClick = { resetConfirmVisible = true }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Star,
+                        iconBg = Color(0xFFFFE4E6),
+                        iconTint = Color(0xFFEC4899),
+                        title = "主题与色彩",
+                        subtitle = "调主题色和深色模式",
+                        trailingText = themeLabel,
+                        onClick = { vm.view = "settings_theme" }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Settings,
+                        iconBg = Color(0xFFE6FFFA),
+                        iconTint = Color(0xFF06B6D4),
+                        title = "数据源",
+                        subtitle = "管理切换音视频数据源",
+                        trailingText = "${vm.sourcesState.count { vm.sourceManager.isSourceEnabled(it.key) }}/${vm.sourcesState.size} 启用",
+                        onClick = { vm.view = "settings_sources" }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Build,
+                        iconBg = Color(0xFFEBF3FF),
+                        iconTint = Color(0xFF3B82F6),
+                        title = if (vm.updateChecking) "正在检查更新" else "检查更新",
+                        trailingText = BuildConfig.VERSION_NAME,
+                        onClick = { vm.checkForAppUpdate(manual = true) }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Edit,
+                        iconBg = Color(0xFFFFE4E6),
+                        iconTint = Color(0xFFEC4899),
+                        title = "建议/意见反馈",
+                        onClick = { vm.view = "settings_feedback" }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Info,
+                        iconBg = Color(0xFFEBF3FF),
+                        iconTint = Color(0xFF3B82F6),
+                        title = "免责声明",
+                        onClick = { vm.view = "settings_disclaimer" }
+                    )
+                    SettingsDivider()
+                    SettingsItemRow(
+                        icon = Icons.Default.Share,
+                        iconBg = Color(0xFFE6F8F0),
+                        iconTint = Color(0xFF10B981),
+                        title = "分享应用",
+                        onClick = {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "聚映 · 多源动漫播放器")
+                                putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    "我正在使用聚映观看动漫，推荐给你：\n${BuildConfig.ACCOUNT_API_BASE}/api/android/latest",
+                                )
+                            }
+                            context.startActivity(Intent.createChooser(share, "分享聚映"))
+                        }
+                    )
+                }
+            }
+
+            if (vm.accountUser != null) {
+                item { SettingsSectionTitle("账户") }
+                item {
+                    SettingsCard {
+                        SettingsItemRow(
+                            icon = Icons.Default.Lock,
+                            iconBg = Color(0xFFFFEDD5),
+                            iconTint = Color(0xFFF97316),
+                            title = "修改密码",
+                            onClick = { vm.view = "settings_password" }
+                        )
+                        SettingsDivider()
+                        SettingsItemRow(
+                            icon = Icons.Default.Notifications,
+                            iconBg = Color(0xFFE6FFFA),
+                            iconTint = Color(0xFF06B6D4),
+                            title = "修改邮箱",
+                            trailingText = vm.accountUser?.email.orEmpty(),
+                            onClick = { vm.view = "settings_email" }
+                        )
                     }
                 }
             }
+
             if (vm.updateMessage.isNotBlank()) {
-                item { Text(vm.updateMessage, color = AppColors.muted, fontSize = 12.sp) }
+                item { Text(vm.updateMessage, color = AppColors.muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp)) }
             }
             if (vm.accountMessage.isNotBlank()) {
-                item { Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp) }
+                item { Text(vm.accountMessage, color = AppColors.muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp)) }
             }
             item {
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = { vm.logoutAccount(); vm.view = "profile" },
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                    shape = RoundedCornerShape(26.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF25F68)),
-                ) { Text("退出登录", color = Color.White, fontSize = 16.sp) }
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(25.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEC5598)),
+                ) { Text("退出登录", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
 
-    if (themeDialogVisible) {
+    if (engineDialogVisible) {
         AlertDialog(
-            onDismissRequest = { themeDialogVisible = false },
-            title = { Text("选择色彩主题", color = AppColors.text) },
+            onDismissRequest = { engineDialogVisible = false },
+            title = { Text("播放器默认内核", color = AppColors.text) },
             text = {
                 Column {
-                    listOf("system" to "跟随系统", "light" to "浅色模式", "dark" to "深色模式").forEach { option ->
+                    Text(
+                        "当前版本只接入 ExoPlayer；IjkPlayer/SystemPlayer 尚无实际播放实现，因此不再提供无效选项。",
+                        color = AppColors.muted,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    listOf("ExoPlayer").forEach { engine ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { vm.updateThemeMode(option.first); themeDialogVisible = false }
+                                .clickable { defaultEngine = engine; storageManager.setDefaultEngine(engine); engineDialogVisible = false }
                                 .padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            RadioButton(selected = vm.themeMode == option.first, onClick = null)
+                            RadioButton(selected = defaultEngine == engine, onClick = null)
                             Spacer(Modifier.width(8.dp))
-                            Text(option.second, color = AppColors.text)
+                            Text(engine, color = AppColors.text)
                         }
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { themeDialogVisible = false }) { Text("取消") } },
+            confirmButton = { TextButton(onClick = { engineDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+
+    if (speedDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { speedDialogVisible = false },
+            title = { Text("默认倍速", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(1.0f, 1.25f, 1.5f, 2.0f, 3.0f).forEach { s ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { defaultSpeed = s; storageManager.setDefaultSpeed(s); speedDialogVisible = false }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = defaultSpeed == s, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("${s}x", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { speedDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (longPressSpeedDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { longPressSpeedDialogVisible = false },
+            title = { Text("长按倍速", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f).forEach { s ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { longPressSpeed = s; storageManager.setLongPressSpeed(s); longPressSpeedDialogVisible = false }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = longPressSpeed == s, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("${s}x", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { longPressSpeedDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+
+    if (downloadDirDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { downloadDirDialogVisible = false },
+            title = { Text("下载位置", color = AppColors.text) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = downloadDir,
+                        onValueChange = { downloadDir = it },
+                        label = { Text("自定义下载目录(绝对路径，留空=默认)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppColors.cyan, unfocusedBorderColor = AppColors.muted)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    storageManager.setDownloadDir(downloadDir.trim())
+                    downloadDirDialogVisible = false
+                }) { Text("保存", color = AppColors.cyan) }
+            },
+            dismissButton = {
+                TextButton(onClick = { downloadDir = ""; downloadDirDialogVisible = false }) { Text("恢复默认", color = AppColors.rose) }
+            },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (concurrentDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { concurrentDialogVisible = false },
+            title = { Text("同时下载数", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(1, 2, 3, 5).forEach { n ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { maxConcurrentDownloads = n; storageManager.setMaxConcurrentDownloads(n); vm.refreshDownloadSemaphore(); concurrentDialogVisible = false }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = maxConcurrentDownloads == n, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("$n 个", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { concurrentDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (segmentDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { segmentDialogVisible = false },
+            title = { Text("分段加速线程", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(1, 2, 4, 8).forEach { n ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { segmentThreads = n; storageManager.setSegmentThreads(n); segmentDialogVisible = false }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = segmentThreads == n, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("$n", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { segmentDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (skipIntroDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { skipIntroDialogVisible = false },
+            title = { Text("跳过片头/片尾", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(0, 5, 10, 30, 60).forEach { s ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { skipIntroSec = s; skipOutroSec = s; storageManager.setSkipIntroSec(s); storageManager.setSkipOutroSec(s); skipIntroDialogVisible = false }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = skipIntroSec == s, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (s == 0) "关闭" else "$s 秒", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { skipIntroDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (searchThreadsDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { searchThreadsDialogVisible = false },
+            title = { Text("搜索线程数", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(1, 3, 5, 8).forEach { n ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { searchThreads = n; storageManager.setSearchThreads(n); searchThreadsDialogVisible = false }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = searchThreads == n, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("$n", color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { searchThreadsDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (historyRetentionDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { historyRetentionDialogVisible = false },
+            title = { Text("历史保留时长", color = AppColors.text) },
+            text = {
+                Column {
+                    listOf(0 to "永久", 7 to "7 天", 30 to "30 天", 90 to "90 天").forEach { (d, label) ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { historyRetentionDays = d; storageManager.setHistoryRetentionDays(d); historyRetentionDialogVisible = false }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = historyRetentionDays == d, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(label, color = AppColors.text)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { historyRetentionDialogVisible = false }) { Text("取消") } },
+            containerColor = AppColors.panel,
+        )
+    }
+    if (resetConfirmVisible) {
+        AlertDialog(
+            onDismissRequest = { resetConfirmVisible = false },
+            title = { Text("恢复默认设置", color = AppColors.text) },
+            text = { Text("确定要恢复所有设置吗？此操作不会清除收藏、历史记录和登录状态。", color = AppColors.muted, fontSize = 14.sp) },
+            confirmButton = {
+                TextButton(onClick = {
+                    storageManager.resetSettings()
+                    resetConfirmVisible = false
+                    downloadDir = ""; maxConcurrentDownloads = 3; segmentThreads = 4; wifiOnly = false
+                    doubleTapEnabled = false; skipIntroSec = 0; skipOutroSec = 0; autoFullscreenOnLoad = false; autoRotate = true
+                    searchThreads = 5; historyRetentionDays = 0
+                    autoSwitchSource = true; autoSwitchRoute = true; autoSwitchKernel = false; autoPip = false
+                    backgroundPlayback = false; defaultEngine = "ExoPlayer"
+                    autoPlayNext = false; defaultSpeed = 1.0f; longPressSpeed = 3.0f
+                    vm.refreshDownloadSemaphore()
+                    vm.updateThemeMode("dark"); vm.updateThemePalette("bubblegum"); vm.updateShowContinueWatching(true)
+                }) { Text("确认", color = AppColors.rose) }
+            },
+            dismissButton = { TextButton(onClick = { resetConfirmVisible = false }) { Text("取消") } },
             containerColor = AppColors.panel,
         )
     }
 }
 
 @Composable
+fun ThemeScreen(vm: MainViewModel) {
+    val isDark = AppColors.isDark
+    Column(Modifier.fillMaxSize().background(AppColors.bg)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { vm.view = "settings" }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+            }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFFFDE8F3))
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "主题",
+                    color = Color(0xFFEC5598),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 4.dp)
+        ) {
+            Text(
+                "在这里调主题色和深色模式，所有页面都会跟着变",
+                color = AppColors.muted,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.height(24.dp))
+
+            Text(
+                "主题色",
+                color = AppColors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(16.dp))
+
+            val displayOrder = listOf("red", "bubblegum", "orange", "purple", "blue", "indigo", "green", "teal")
+            val orderedPalettes = displayOrder.mapNotNull { id -> THEME_PALETTES.firstOrNull { it.id == id } }
+
+            orderedPalettes.chunked(4).forEach { rowPalettes ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceAround
+                ) {
+                    rowPalettes.forEach { p ->
+                        val selected = vm.themePalette == p.id
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clickable { vm.updateThemePalette(p.id) }
+                                .padding(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(p.accent)
+                                    .then(
+                                        if (selected) Modifier.border(
+                                            3.dp,
+                                            Color(0xFFEC5598),
+                                            CircleShape
+                                        ) else Modifier
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (selected) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                p.name,
+                                color = if (selected) Color(0xFFEC5598) else AppColors.text,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(28.dp))
+            Text(
+                "深色模式",
+                color = AppColors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val modes = listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色")
+                modes.forEach { (modeKey, label) ->
+                    val selected = vm.themeMode == modeKey
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(
+                                if (selected) Color(0xFFEC5598)
+                                else if (isDark) Color(0xFF1E293B)
+                                else Color(0xFFF4F5F7)
+                            )
+                            .clickable { vm.updateThemeMode(modeKey) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            color = if (selected) Color.White else AppColors.text,
+                            fontSize = 14.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+fun DataSourcesScreen(vm: MainViewModel) {
+    var testingAll by remember { mutableStateOf(false) }
+    val sourceResults = remember { mutableStateMapOf<String, Boolean?>() }
+    val isDark = AppColors.isDark
+
+    Column(Modifier.fillMaxSize().background(AppColors.bg)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { vm.view = "settings" }) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
+            }
+            Text(
+                "数据源",
+                color = AppColors.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFFFDE8F3))
+                    .clickable(enabled = !testingAll) {
+                        testingAll = true
+                        val activeKeys = vm.sourcesState.map { it.key }
+                        sourceResults.clear()
+                        activeKeys.forEach { sourceResults[it] = null }
+                        vm.viewModelScope.launch(Dispatchers.IO) {
+                            coroutineScope {
+                                activeKeys.map { k ->
+                                    launch {
+                                        val result = vm.sourceManager.testSource(k)
+                                        val ok = !result.contains("❌") && !result.contains("失败") &&
+                                            !result.contains("异常") && !result.contains("未开启") &&
+                                            !result.contains("维护") && !result.contains("暂不可用") &&
+                                            !result.contains("FAILED")
+                                        withContext(Dispatchers.Main) { sourceResults[k] = ok }
+                                    }
+                                }
+                            }
+                            withContext(Dispatchers.Main) { testingAll = false }
+                        }
+                    }
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (testingAll) "测试中..." else "测试",
+                    color = Color(0xFFEC5598),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFEC5598))
+                    .clickable { vm.view = "source_import" },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = "添加",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "全部数据源",
+                color = AppColors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            val enabledCount = vm.sourcesState.count { vm.sourceManager.isSourceEnabled(it.key) }
+            Text(
+                "${enabledCount}/${vm.sourcesState.size} 启用",
+                color = AppColors.muted,
+                fontSize = 13.sp
+            )
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                ) {
+                    Column {
+                        vm.sourcesState.forEachIndexed { index, config ->
+                            val enabled = vm.sourceManager.isSourceEnabled(config.key)
+                            val availability = vm.sourceManager.sourceAvailability(config.key)
+                            val unavailableMessage = vm.sourceManager.sourceUnavailableMessage(config.key)
+                            val isCustom = vm.sourceManager.isCustomSource(config.key)
+                            val initialLetter = config.title.take(1).uppercase()
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFFFDF0F6)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        initialLetter,
+                                        color = Color(0xFFEC5598),
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(Modifier.width(14.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            config.title,
+                                            color = AppColors.text,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (isCustom) {
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                "自定义",
+                                                color = AppColors.orange,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                    val desc = unavailableMessage
+                                        ?: if (config.title == "AuvFun" || config.title.contains("6")) "精选源" else "精选好源"
+                                    Text(
+                                        desc,
+                                        color = if (unavailableMessage != null) AppColors.rose else AppColors.muted,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                                if (isCustom) {
+                                    IconButton(onClick = {
+                                        vm.sourceManager.removeCustomSource(config.key)
+                                        vm.reloadSourcesState()
+                                    }) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = "删除",
+                                            tint = AppColors.rose,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                val inTest = sourceResults.containsKey(config.key)
+                                val testState = if (inTest) sourceResults[config.key] else null
+                                when {
+                                    inTest && testState == null -> LoadingSpinner(
+                                        modifier = Modifier.size(18.dp),
+                                        color = AppColors.cyan
+                                    )
+                                    testState == true -> Icon(
+                                        Icons.Default.CheckCircle,
+                                        contentDescription = "测试通过",
+                                        tint = Color(0xFF10B981),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    testState == false -> Text(
+                                        if (availability == SourceAvailability.AVAILABLE) "❌" else availability.label,
+                                        color = AppColors.rose,
+                                        fontSize = if (availability == SourceAvailability.AVAILABLE) 16.sp else 11.sp
+                                    )
+                                    else -> Spacer(Modifier.size(20.dp))
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Switch(
+                                    checked = enabled,
+                                    onCheckedChange = { vm.toggleSource(config.key) },
+                                    enabled = availability == SourceAvailability.AVAILABLE,
+                                    colors = SwitchDefaults.colors(
+                                        checkedTrackColor = Color(0xFFEC5598),
+                                        checkedThumbColor = Color.White,
+                                        uncheckedTrackColor = if (isDark) Color(0xFF374151) else Color(0xFFCBD5E1),
+                                        uncheckedThumbColor = Color.White
+                                    )
+                                )
+                            }
+                            if (index < vm.sourcesState.size - 1) {
+                                Divider(
+                                    color = AppColors.muted.copy(alpha = 0.1f),
+                                    modifier = Modifier.padding(start = 68.dp, end = 16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(16.dp)) }
+        }
+    }
+}
+
+@Composable
 private fun SettingsHeader(title: String, onBack: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onBack) {
-            Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.muted)
+            Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = AppColors.text)
         }
-        Text(title, color = AppColors.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(title, color = AppColors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
     }
 }
 
 @Composable
 private fun SettingsSectionTitle(title: String) {
     Text(
-        title,
-        color = AppColors.text,
-        fontSize = 16.sp,
+        text = title,
+        color = AppColors.muted,
+        fontSize = 14.sp,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+        modifier = Modifier.padding(start = 6.dp, top = 14.dp, bottom = 6.dp),
     )
 }
 
@@ -7992,15 +9560,126 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.panel),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) { Column(content = content) }
 }
 
 @Composable
 private fun SettingsDivider() {
     Divider(
-        color = AppColors.muted.copy(alpha = 0.12f),
-        modifier = Modifier.padding(horizontal = 18.dp),
+        color = AppColors.muted.copy(alpha = 0.1f),
+        modifier = Modifier.padding(start = 68.dp, end = 16.dp),
     )
+}
+
+@Composable
+private fun SettingsItemRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    iconRes: Int? = null,
+    iconBg: Color,
+    iconTint: Color,
+    title: String,
+    subtitle: String = "",
+    trailingText: String = "",
+    hasArrow: Boolean = true,
+    isSwitch: Boolean = false,
+    checked: Boolean = false,
+    onCheckedChange: ((Boolean) -> Unit)? = null,
+    onClick: (() -> Unit)? = null,
+) {
+    val isDark = AppColors.isDark
+    val actualBg = if (isDark) iconTint.copy(alpha = 0.22f) else iconBg
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null && !isSwitch) Modifier.clickable { onClick() } else Modifier)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(actualBg),
+            contentAlignment = Alignment.Center
+        ) {
+            if (iconRes != null) {
+                Icon(
+                    painter = painterResource(iconRes),
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            } else if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = AppColors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (subtitle.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    color = AppColors.muted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        if (isSwitch) {
+            if (trailingText.isNotBlank()) {
+                Text(
+                    text = trailingText,
+                    color = AppColors.muted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedTrackColor = Color(0xFFEC5598),
+                    checkedThumbColor = Color.White,
+                    uncheckedTrackColor = if (isDark) Color(0xFF374151) else Color(0xFFCBD5E1),
+                    uncheckedThumbColor = Color.White
+                )
+            )
+        } else {
+            if (trailingText.isNotBlank()) {
+                Text(
+                    text = trailingText,
+                    color = AppColors.muted,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 160.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            if (hasArrow) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = AppColors.muted,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -8010,26 +9689,14 @@ private fun SettingsRow(
     trailing: String = "",
     onClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 18.dp, vertical = 18.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = AppColors.text, modifier = Modifier.size(24.dp))
-        Spacer(Modifier.width(18.dp))
-        Text(title, color = AppColors.text, fontSize = 16.sp, modifier = Modifier.weight(1f))
-        if (trailing.isNotBlank()) {
-            Text(
-                trailing,
-                color = AppColors.muted,
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 150.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-        }
-        Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = AppColors.muted)
-    }
+    SettingsItemRow(
+        icon = icon,
+        iconBg = Color(0xFFEBF3FF),
+        iconTint = Color(0xFF3B82F6),
+        title = title,
+        trailingText = trailing,
+        onClick = onClick
+    )
 }
 
 @Composable
@@ -8257,7 +9924,11 @@ fun WeeklyScheduleScreen(vm: MainViewModel) {
     val calDay = Calendar.getInstance(beijingTimeZone).get(Calendar.DAY_OF_WEEK)
     val defaultIndex = if (calDay == Calendar.SUNDAY) 6 else (calDay - 2).coerceIn(0, 6)
     var selectedDayIndex by remember { mutableStateOf(defaultIndex) }
-    val pool = vm.allPoolItems()
+    val pool = if (vm.homeSourceKey.isBlank()) {
+        vm.allPoolItems()
+    } else {
+        vm.homeSourceSections.flatMap { it.items }
+    }
     val localScheduleEntries = remember(pool) { buildScheduleEntries(pool) }
     val scheduleEntries = vm.lanercSchedule.ifEmpty { localScheduleEntries }
     val usingRemoteSchedule = vm.lanercSchedule.isNotEmpty()
@@ -9549,7 +11220,7 @@ fun SourceDebugLogCard(vm: MainViewModel) {
                     onClick = {
                         isTesting = true
                         vm.viewModelScope.launch(Dispatchers.IO) {
-                            val activeKeys = vm.sourcesState.filter { vm.sourceManager.isSourceEnabled(it.key) }.map { it.key }
+                            val activeKeys = vm.sourcesState.map { it.key }
                             val resList = activeKeys.map { k -> vm.sourceManager.testSource(k) }
                             withContext(Dispatchers.Main) {
                                 testResult = resList.joinToString("\n---\n")

@@ -37,9 +37,17 @@ class StorageManager(context: Context) {
 
     fun getHistory(): List<HistoryItem> {
         val json = prefs.getString("watch_history", "[]") ?: "[]"
-        return try {
+        val raw: List<HistoryItem> = try {
             gson.fromJson(json, object : TypeToken<List<HistoryItem>>() {}.type) ?: emptyList()
         } catch (_: Exception) { emptyList() }
+        val retentionDays = getHistoryRetentionDays()
+        if (retentionDays <= 0) return raw
+        val cutoff = System.currentTimeMillis() - retentionDays * 86400000L
+        val filtered = raw.filter { it.timestamp >= cutoff }
+        if (filtered.size != raw.size) {
+            prefs.edit().putString("watch_history", gson.toJson(filtered)).apply()
+        }
+        return filtered
     }
 
     fun addHistory(
@@ -248,6 +256,9 @@ class StorageManager(context: Context) {
     fun getThemeMode(): String = prefs.getString("theme_mode", "dark") ?: "dark"
     fun setThemeMode(mode: String) { prefs.edit().putString("theme_mode", mode).apply() }
 
+    fun getThemePalette(): String = prefs.getString("theme_palette", "bubblegum") ?: "bubblegum"
+    fun setThemePalette(id: String) { prefs.edit().putString("theme_palette", id).apply() }
+
     fun getUserEmail(): String = prefs.getString("user_email", "") ?: ""
     fun setUserEmail(email: String) { prefs.edit().putString("user_email", email).apply() }
 
@@ -273,4 +284,81 @@ class StorageManager(context: Context) {
 
     fun getCustomSpeed(): Float = prefs.getFloat("custom_speed", 1.0f)
     fun setCustomSpeed(speed: Float) { prefs.edit().putFloat("custom_speed", speed.coerceIn(0.25f, 4.0f)).apply() }
+
+    fun getAutoSwitchSource(): Boolean = prefs.getBoolean("auto_switch_source", true)
+    fun setAutoSwitchSource(v: Boolean) { prefs.edit().putBoolean("auto_switch_source", v).apply() }
+
+    fun getAutoPlayNext(): Boolean = prefs.getBoolean("auto_play_next", false)
+    fun setAutoPlayNext(v: Boolean) { prefs.edit().putBoolean("auto_play_next", v).apply() }
+
+    fun getDefaultSpeed(): Float = prefs.getFloat("default_speed", 1.0f)
+    fun setDefaultSpeed(v: Float) { prefs.edit().putFloat("default_speed", v.coerceIn(0.25f, 4.0f)).apply() }
+
+    fun getDownloadDir(): String = prefs.getString("download_dir", "") ?: ""
+    fun setDownloadDir(dir: String) { prefs.edit().putString("download_dir", dir).apply() }
+
+    fun getMaxConcurrentDownloads(): Int = prefs.getInt("max_concurrent_downloads", 3)
+    fun setMaxConcurrentDownloads(n: Int) { prefs.edit().putInt("max_concurrent_downloads", n.coerceIn(1, 8)).apply() }
+
+    fun getSegmentThreads(): Int = prefs.getInt("segment_threads", 4)
+    fun setSegmentThreads(n: Int) { prefs.edit().putInt("segment_threads", n.coerceIn(1, 16)).apply() }
+
+    fun getWifiOnly(): Boolean = prefs.getBoolean("wifi_only", false)
+    fun setWifiOnly(v: Boolean) { prefs.edit().putBoolean("wifi_only", v).apply() }
+
+    fun getDoubleTapSeekEnabled(): Boolean = prefs.getBoolean("double_tap_seek_enabled", false)
+    fun setDoubleTapSeekEnabled(v: Boolean) { prefs.edit().putBoolean("double_tap_seek_enabled", v).apply() }
+
+    fun getSkipIntroSec(): Int = prefs.getInt("skip_intro_sec", 0)
+    fun setSkipIntroSec(s: Int) { prefs.edit().putInt("skip_intro_sec", s.coerceIn(0, 300)).apply() }
+
+    fun getSkipOutroSec(): Int = prefs.getInt("skip_outro_sec", 0)
+    fun setSkipOutroSec(s: Int) { prefs.edit().putInt("skip_outro_sec", s.coerceIn(0, 300)).apply() }
+
+    fun getAutoFullscreenOnLoad(): Boolean = prefs.getBoolean("auto_fullscreen_on_load", false)
+    fun setAutoFullscreenOnLoad(v: Boolean) { prefs.edit().putBoolean("auto_fullscreen_on_load", v).apply() }
+
+    fun getAutoRotateLandscape(): Boolean = prefs.getBoolean("auto_rotate_landscape", true)
+    fun setAutoRotateLandscape(v: Boolean) { prefs.edit().putBoolean("auto_rotate_landscape", v).apply() }
+
+    fun getSearchThreads(): Int = prefs.getInt("search_threads", 5)
+    fun setSearchThreads(n: Int) { prefs.edit().putInt("search_threads", n.coerceIn(1, 8)).apply() }
+
+    fun getShowContinueWatching(): Boolean = prefs.getBoolean("show_continue_watching", true)
+    fun setShowContinueWatching(v: Boolean) { prefs.edit().putBoolean("show_continue_watching", v).apply() }
+
+    fun getHistoryRetentionDays(): Int = prefs.getInt("history_retention_days", 0)
+    fun setHistoryRetentionDays(d: Int) { prefs.edit().putInt("history_retention_days", d.coerceIn(0, 365)).apply() }
+
+    fun getAutoSwitchRoute(): Boolean = prefs.getBoolean("auto_switch_route", true)
+    fun setAutoSwitchRoute(v: Boolean) { prefs.edit().putBoolean("auto_switch_route", v).apply() }
+
+    fun getAutoSwitchKernel(): Boolean = prefs.getBoolean("auto_switch_kernel", false)
+    fun setAutoSwitchKernel(v: Boolean) { prefs.edit().putBoolean("auto_switch_kernel", v).apply() }
+
+    fun getAutoPip(): Boolean = prefs.getBoolean("auto_pip", false)
+    fun setAutoPip(v: Boolean) { prefs.edit().putBoolean("auto_pip", v).apply() }
+
+    fun getBackgroundPlayback(): Boolean = prefs.getBoolean("background_playback", false)
+    fun setBackgroundPlayback(v: Boolean) { prefs.edit().putBoolean("background_playback", v).apply() }
+
+    fun getPlayerResizeMode(): Int = prefs.getInt("player_resize_mode", 0)
+    fun setPlayerResizeMode(mode: Int) { prefs.edit().putInt("player_resize_mode", mode).apply() }
+
+    fun getDefaultEngine(): String = prefs.getString("default_engine", "ExoPlayer") ?: "ExoPlayer"
+    fun setDefaultEngine(engine: String) { prefs.edit().putString("default_engine", engine).apply() }
+
+    fun resetSettings() {
+        val keys = listOf(
+            "theme_mode", "theme_palette",
+            "auto_switch_source", "auto_switch_route", "auto_switch_kernel", "auto_pip",
+            "background_playback", "player_resize_mode", "default_engine",
+            "auto_play_next", "default_speed", "long_press_speed", "custom_speed",
+            "download_dir", "max_concurrent_downloads", "segment_threads", "wifi_only",
+            "double_tap_seek_enabled", "skip_intro_sec", "skip_outro_sec",
+            "auto_fullscreen_on_load", "auto_rotate_landscape",
+            "search_threads", "show_continue_watching", "history_retention_days"
+        )
+        prefs.edit().apply { keys.forEach { remove(it) } }.apply()
+    }
 }

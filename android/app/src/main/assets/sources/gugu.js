@@ -1,7 +1,7 @@
 /*
  * 咕咕｜动漫（gugu） JS 源
  * 还原自 TVBox csp_AppGet（spider.jar 反编译：com.github.catvod.spider.AppGet）。
- * version: 1.0.0
+ * version: 1.0.1-juying
  *
  * 协议要点（逐段对照 AppGet.java / merge.m.a 加解密 / merge.k.b·k.c HTTP）：
  *   1) 所有业务接口都是 POST {BASE}/api.php{path}，body = 明文 JSON / 表单串，
@@ -27,6 +27,7 @@ var TOKEN     = EXT.token    || '';
 var UA_API    = EXT.ua || 'okhttp/3.14.9';
 var UA_WEB    = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 var TIMEOUT   = 20000;
+var LAST_PLAY_ERROR = '';
 
 // AES/CBC：解密=base64→utf8，加密=utf8→base64（均默认）。PKCS7 在 JCE 里同 PKCS5。iv 即 key。
 var AES = { mode: 'CBC', padding: 'PKCS7', keyFormat: 'utf8', ivFormat: 'utf8', iv: DATA_IV };
@@ -121,7 +122,7 @@ function toItem(v) {
         id: (v.vod_id == null) ? '' : String(v.vod_id),
         name: decodeEntities(v.vod_name || ''),
         pic: v.vod_pic || '',
-        type: limitCats(v.vod_class || v.type_name || '', 99),
+        type: limitCats(v.vod_class || v.type_name || '', 2),
         year: v.vod_year || '',
         remarks: decodeEntities(v.vod_remarks || ''),
         desc: ''
@@ -263,7 +264,7 @@ function detail(id) {
         var d = dj.vod || {};
         out.name    = decodeEntities(d.vod_name || '');
         out.pic     = d.vod_pic || '';
-        out.type    = limitCats(d.vod_class || '', 99);
+        out.type    = limitCats(d.vod_class || '', 2);
         out.year    = d.vod_year || '';
         out.remarks = decodeEntities(d.vod_remarks || '');
         out.desc    = trim(decodeEntities(stripTags(d.vod_content || '')));
@@ -324,10 +325,16 @@ function vodParse(bodyStr) {
         var dec = decData((parseJson(resp) || {}).data || '');
         var obj = parseJson(dec) || {};
         var jf = obj.json;
-        if (typeof jf === 'string') { var jo = parseJson(jf) || {}; return jo.url || ''; }
+        if (typeof jf === 'string') {
+            var jo = parseJson(jf) || {};
+            if (!jo.url && jo.msg) LAST_PLAY_ERROR = String(jo.msg);
+            return jo.url || '';
+        }
         if (jf && jf.url) return jf.url;
+        if (jf && jf.msg) LAST_PLAY_ERROR = String(jf.msg);
+        if (!obj.url && obj.msg) LAST_PLAY_ERROR = String(obj.msg);
         return obj.url || '';
-    } catch (e) { log('[gugu] vodParse err: ' + e); return ''; }
+    } catch (e) { LAST_PLAY_ERROR = String(e); log('[gugu] vodParse err: ' + e); return ''; }
 }
 
 function playResult(url, ua) {
@@ -335,7 +342,7 @@ function playResult(url, ua) {
 }
 
 function play(flag) {
-    var empty = JSON.stringify({ url: '', type: 'auto', referer: '' });
+    LAST_PLAY_ERROR = '';
     try {
         var f = parseJson(flag) || {};
         var p = f.p || '', parse = f.parse || '', u = f.u || '', t = f.t || '';
@@ -370,5 +377,10 @@ function play(flag) {
 
         log('[gugu] play unresolved, s=' + s.substring(0, 120));
     } catch (e) { log('[gugu] play err: ' + e); }
-    return empty;
+    return JSON.stringify({
+        url: '',
+        type: 'auto',
+        referer: '',
+        error: LAST_PLAY_ERROR ? ('咕咕解析服务：' + LAST_PLAY_ERROR) : '咕咕播放线路当前未返回地址'
+    });
 }
